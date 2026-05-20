@@ -878,7 +878,13 @@ type HoldingAggRow = {
   purchases: number;
 };
 
-async function aggregateHoldings(
+// Exported for FINLYNQ-65 regression tests in
+// `tests/portfolio-aggregator-dividends-and-sellskip.test.ts`. The library
+// aggregator `getHoldingsValueByAccount` (covered by FINLYNQ-49) does not
+// compute `dividendsReceived` or realized-gain, so the issue #84 and #128
+// realized-gain cases need this aggregator directly. Not part of the public
+// MCP tool surface — internal-only export.
+export async function aggregateHoldings(
   db: DbLike,
   userId: string,
   dek: Buffer | null,
