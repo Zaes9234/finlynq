@@ -627,48 +627,70 @@ async function autoCategory(
     }
   }
 
-  // Rule lookup — schema is (match_field, match_type, match_value), NOT a single
-  // `match_payee` column. The previous code referenced a non-existent column and
-  // 500'd every record_transaction call when any active rule existed for the
-  // user (root cause of the "category-rules lookup bug" Claude reported in the
-  // 2026-04-27 Fidelity reconciliation conversation). Pull active payee-rules
-  // and match in memory — same semantics as src/lib/auto-categorize.ts:
-  //   contains → POSITION/includes; exact → equality; regex → JS RegExp.
-  // Rule count per user is small (typically <100), so the in-memory loop is
-  // cheaper than four CASE branches in SQL.
-  const rules = await q(db, sql`
-    SELECT match_type, match_value, assign_category_id, priority
+  // FINLYNQ-84: rules now carry JSONB conditions + actions. We use the
+  // shared matcher (matchesRule + computePureActionPatch) so the MCP write
+  // path stays aligned with the REST/import-pipeline definition of "match".
+  //
+  // For the autoCategory helper (used by record_transaction etc.) we only
+  // resolve set_category from the matched rule's pure-action patch — any
+  // other actions belong to the approve-time path. Rules whose only action
+  // is rename_payee / set_tags / set_entered_currency / set_portfolio_holding
+  // / set_account / create_transfer are IGNORED here.
+  const rawRules = await q(db, sql`
+    SELECT id, name, conditions, actions, priority
       FROM transaction_rules
      WHERE user_id = ${userId}
        AND is_active = true
-       AND match_field = 'payee'
-       AND assign_category_id IS NOT NULL
      ORDER BY priority DESC
   `);
-  const payeeLower = payee.toLowerCase();
+  const parsedRules = rawRules.map((r) => ({
+    id: Number(r.id),
+    name: String(r.name ?? ""),
+    conditions: (r.conditions ?? { all: [] }) as { all: unknown[] },
+    actions: (Array.isArray(r.actions) ? r.actions : []) as Array<{ kind: string; categoryId?: number }>,
+    isActive: true,
+    priority: Number(r.priority ?? 0),
+  }));
+  // Inline lightweight matcher — duplicates auto-categorize's matchesRule
+  // shape for the stdio-compat case where we don't have date/account in scope.
+  function matchesPayeeOnly(payee: string, conditions: { all: unknown[] }): boolean {
+    const conds = conditions.all ?? [];
+    if (conds.length === 0) return false;
+    return conds.every((c: unknown) => {
+      const cond = c as { field?: string; op?: string; value?: string };
+      // Only payee/note/tags string predicates evaluate against payee alone.
+      // Any other condition kind fails fast (we don't have the data here).
+      if (cond.field !== "payee" && cond.field !== "tags" && cond.field !== "note") return false;
+      if (cond.field !== "payee") return false; // autoCategory: payee-only scope
+      const v = String(cond.value ?? "");
+      const a = payee.toLowerCase();
+      const b = v.toLowerCase();
+      if (cond.op === "contains") return a.includes(b);
+      if (cond.op === "exact") return a === b;
+      if (cond.op === "regex") {
+        try { return new RegExp(v, "i").test(payee); }
+        catch { return false; }
+      }
+      return false;
+    });
+  }
+  function ruleSetCategoryId(actions: Array<{ kind: string; categoryId?: number }>): number | null {
+    for (const a of actions) {
+      if (a.kind === "set_category" && typeof a.categoryId === "number") return a.categoryId;
+    }
+    return null;
+  }
 
   // ── Investment-account branch ────────────────────────────────────────────
-  // Run the investment-only ladder and return early. The generic history
-  // pass below NEVER runs for investment accounts (#89): a "Car Maintenance"
-  // expense category leaking through expense-skip guards is strictly worse
-  // than uncategorized for a brokerage cash leg.
+  // Run the investment-only ladder and return early.
   if (isInvestmentAccount) {
     // 1. Investment-aware rules — expense rules are skipped, next priority gets a chance.
-    for (const rule of rules) {
-      const value = String(rule.match_value ?? "");
-      const valueLower = value.toLowerCase();
-      const type = String(rule.match_type ?? "");
-      let hit = false;
-      if (type === "contains") hit = payeeLower.includes(valueLower);
-      else if (type === "exact") hit = payeeLower === valueLower;
-      else if (type === "regex") {
-        try { hit = new RegExp(value, "i").test(payee); } catch { hit = false; }
-      }
-      if (hit) {
-        const cid = Number(rule.assign_category_id);
-        if (catTypeById?.get(cid) === "E") continue;
-        return cid;
-      }
+    for (const rule of parsedRules) {
+      if (!matchesPayeeOnly(payee, rule.conditions)) continue;
+      const cid = ruleSetCategoryId(rule.actions);
+      if (cid == null) continue;
+      if (catTypeById?.get(cid) === "E") continue;
+      return cid;
     }
     // 2. Keyword pattern pass (Dividend / Interest / Forex / Disbursement).
     if (investmentHints) {
@@ -680,25 +702,14 @@ async function autoCategory(
       const fb = fallbackInvestmentCategory(investmentHints);
       if (fb !== null) return fb;
     }
-    // 4. Uncategorized (null FK is the convention — chat-engine,
-    //    weekly-recap, spotlight all render it as "Uncategorized").
     return null;
   }
 
-  // ── Non-investment branch (unchanged) ────────────────────────────────────
-  for (const rule of rules) {
-    const value = String(rule.match_value ?? "");
-    const valueLower = value.toLowerCase();
-    const type = String(rule.match_type ?? "");
-    let hit = false;
-    if (type === "contains") hit = payeeLower.includes(valueLower);
-    else if (type === "exact") hit = payeeLower === valueLower;
-    else if (type === "regex") {
-      try { hit = new RegExp(value, "i").test(payee); } catch { hit = false; }
-    }
-    if (hit) {
-      return Number(rule.assign_category_id);
-    }
+  // ── Non-investment branch ────────────────────────────────────────────────
+  for (const rule of parsedRules) {
+    if (!matchesPayeeOnly(payee, rule.conditions)) continue;
+    const cid = ruleSetCategoryId(rule.actions);
+    if (cid != null) return cid;
   }
 
   // Historical-frequency match (non-investment only).
@@ -4661,7 +4672,15 @@ export function registerPgTools(
       // Count FK references. All three tables scope by user_id so cross-tenant
       // counts can never leak. PG returns BIGINT-as-string; cast to Number.
       const txCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${catId}`) as { cnt: string | number }[];
-      const ruleCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transaction_rules WHERE user_id = ${userId} AND assign_category_id = ${catId}`) as { cnt: string | number }[];
+      // FINLYNQ-84: actions are JSONB. Count rules whose actions array
+      // includes a set_category action with this category id (or whose
+      // create_transfer's destAccountId / set_account's accountId resolves
+      // — only set_category matters here for category-delete FK check).
+      const ruleCountRow = await q(db, sql`
+        SELECT COUNT(*) AS cnt FROM transaction_rules
+        WHERE user_id = ${userId}
+          AND actions @> ${JSON.stringify([{ kind: "set_category", categoryId: catId }])}::jsonb
+      `) as { cnt: string | number }[];
       const subCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${catId}`) as { cnt: string | number }[];
       const txCount = Number(txCountRow[0]?.cnt ?? 0);
       const ruleCount = Number(ruleCountRow[0]?.cnt ?? 0);
@@ -4714,7 +4733,12 @@ export function registerPgTools(
       // Re-check FK references atomically — token is bound to id only; a row
       // could have been categorized between preview and execute.
       const txCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${id}`) as { cnt: string | number }[];
-      const ruleCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM transaction_rules WHERE user_id = ${userId} AND assign_category_id = ${id}`) as { cnt: string | number }[];
+      // FINLYNQ-84: count via JSONB @> containment.
+      const ruleCountRow = await q(db, sql`
+        SELECT COUNT(*) AS cnt FROM transaction_rules
+        WHERE user_id = ${userId}
+          AND actions @> ${JSON.stringify([{ kind: "set_category", categoryId: id }])}::jsonb
+      `) as { cnt: string | number }[];
       const subCountRow = await q(db, sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${id}`) as { cnt: string | number }[];
       const txCount = Number(txCountRow[0]?.cnt ?? 0);
       const ruleCount = Number(ruleCountRow[0]?.cnt ?? 0);
@@ -5080,20 +5104,19 @@ export function registerPgTools(
   );
 
   // ── create_rule ────────────────────────────────────────────────────────────
-  // Issue #214 — two-bug fix:
-  //   (a) `match_payee` column does NOT exist in `transaction_rules` (schema is
-  //       (match_field, match_type, match_value)). Synthesize the three target
-  //       fields from the user-facing `match_payee` alias and write the new
-  //       schema. `created_at` is NOT NULL with no DB default — set it.
-  //   (b) `decryptNameish` was missing on the categories SELECT, so every row
-  //       had `name === undefined`. The `fuzzyFind` waterfall's last step
-  //       (`lo.includes(String(o.name ?? "").toLowerCase())`) collapses to
-  //       `lo.includes("")` which is always true — silently returning the
-  //       first category in the result set as a "match". Mirror what
-  //       `update_rule` does so unknown categories error out cleanly.
+  //
+  // FINLYNQ-84: rules are JSONB conditions+actions. The legacy MCP shorthand
+  // (match_payee + assign_category + rename_to? + assign_tags? + priority?)
+  // is preserved for backwards compatibility — synthesized into a v2 rule
+  // with a single payee/contains condition + a 1..3-action set.
+  //
+  // Issue #214 invariants preserved: `decryptNameish` BEFORE `fuzzyFind` on
+  // the categories lookup — without it every row's name is undefined and
+  // fuzzyFind's last reverse-includes step collapses to lo.includes("")
+  // returning the first row.
   server.tool(
     "create_rule",
-    "Create an auto-categorization rule for future imports",
+    "Create an auto-categorization rule for future imports. Legacy shorthand (match_payee + assign_category) is synthesized into a v2 rule (FINLYNQ-84).",
     {
       match_payee: z.string().describe("Payee pattern to match (substring, case-insensitive; legacy `%` wildcards are stripped)"),
       assign_category: z.string().describe("Category name to assign (fuzzy matched)"),
@@ -5107,25 +5130,33 @@ export function registerPgTools(
       const cat = fuzzyFind(assign_category, allCats);
       if (!cat) return err(`Category "${assign_category}" not found`);
 
-      // Strip legacy `%` wildcards — the new schema's `match_type='contains'`
-      // is substring-only. Mirrors what apply_rules_to_uncategorized already
-      // did at the matcher layer.
+      // Strip legacy `%` wildcards — the new condition's `op='contains'`
+      // is substring-only.
       const cleanedValue = match_payee.replace(/%/g, "");
-      // Synthesize a `name` (NOT NULL on transaction_rules). Truncate to fit
-      // text columns comfortably; the user's actual matching pattern lives in
-      // `match_value`, this is just the human label.
       const synthName = `Match "${cleanedValue}" → ${String(cat.name ?? "")}`.slice(0, 200);
       const todayISO = new Date().toISOString().split("T")[0];
 
+      // Synthesize the v2 rule shape from the legacy shorthand.
+      const conditions = { all: [{ field: "payee", op: "contains", value: cleanedValue }] };
+      const actions: Array<Record<string, unknown>> = [
+        { kind: "set_category", categoryId: Number(cat.id) },
+      ];
+      if (rename_to) actions.push({ kind: "rename_payee", to: rename_to });
+      if (assign_tags) actions.push({ kind: "set_tags", tags: assign_tags });
+
       await db.execute(sql`
         INSERT INTO transaction_rules
-          (user_id, name, match_field, match_type, match_value,
-           assign_category_id, rename_to, assign_tags, priority, is_active, created_at)
+          (user_id, name, conditions, actions, priority, is_active, created_at)
         VALUES
-          (${userId}, ${synthName}, 'payee', 'contains', ${cleanedValue},
-           ${cat.id}, ${rename_to ?? null}, ${assign_tags ?? null}, ${priority ?? 0}, true, ${todayISO})
+          (${userId}, ${synthName}, ${JSON.stringify(conditions)}::jsonb,
+           ${JSON.stringify(actions)}::jsonb, ${priority ?? 0}, true, ${todayISO})
       `);
-      return text({ success: true, data: { message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}` } });
+      return text({
+        success: true,
+        data: {
+          message: `Rule created: "${cleanedValue}" → ${cat.name}${rename_to ? ` (rename to "${rename_to}")` : ""}`,
+        },
+      });
     }
   );
 
@@ -5159,9 +5190,16 @@ export function registerPgTools(
   );
 
   // ── apply_rules_to_uncategorized ───────────────────────────────────────────
+  //
+  // FINLYNQ-84: rules are JSONB conditions+actions. This tool applies PURE
+  // actions only (set_category, set_tags, rename_payee, set_entered_currency,
+  // set_portfolio_holding). **Rules whose actions contain `set_account` or
+  // `create_transfer` are REFUSED** here — those need approve-time staging
+  // context to safely materialize without orphan balances / phantom debits.
+  // Refusals surface in `skipped[]` so the caller can see what was passed.
   server.tool(
     "apply_rules_to_uncategorized",
-    "Run all active categorization rules against uncategorized transactions",
+    "Run all active categorization rules against uncategorized transactions. Rules with side-effect actions (set_account, create_transfer) are refused and surfaced in skipped[]; they need approve-time context.",
     {
       dry_run: z.boolean().optional().describe("Preview matches without saving (default false)"),
       limit: z.number().optional().describe("Max transactions to process (default 500)"),
@@ -5169,77 +5207,145 @@ export function registerPgTools(
     async ({ dry_run, limit }) => {
       const maxRows = limit ?? 500;
       const txns = await q(db, sql`
-        SELECT id, payee, amount, tags FROM transactions
+        SELECT id, payee, amount, tags, account_id, date FROM transactions
         WHERE user_id = ${userId} AND (category_id IS NULL OR category_id = 0)
         ORDER BY date DESC LIMIT ${maxRows}
       `);
       if (!txns.length) return text({ success: true, data: { message: "No uncategorized transactions found", updated: 0 } });
 
-      // Issue #214 — schema is (match_field, match_type, match_value), NOT
-      // `match_payee`. Pull the new column set; SQL-filter to active rules
-      // and iterate in priority order in memory (same shape as the import
-      // pipeline preview at the bottom of this file).
-      const rules = await q(db, sql`
-        SELECT match_field, match_type, match_value,
-               assign_category_id, rename_to, assign_tags, priority
-        FROM transaction_rules
-        WHERE user_id = ${userId}
-          AND is_active = true
-          AND assign_category_id IS NOT NULL
-        ORDER BY priority DESC
+      const rawRules = await q(db, sql`
+        SELECT id, name, conditions, actions, priority
+          FROM transaction_rules
+         WHERE user_id = ${userId}
+           AND is_active = true
+         ORDER BY priority DESC
       `);
+      // Pre-classify rules: those with side-effect actions get an explicit
+      // `skipped[]` entry per match; the remaining rules go through the
+      // normal apply loop.
+      type ParsedRule = {
+        id: number;
+        name: string;
+        conditions: { all: Array<{ field?: string; op?: string; value?: string; min?: number; max?: number; accountId?: number; weekday?: number; day?: number; from?: string; to?: string }> };
+        actions: Array<{ kind: string; categoryId?: number; tags?: string; to?: string; currency?: string; holdingId?: number }>;
+        priority: number;
+        hasSideEffects: boolean;
+      };
+      const rules: ParsedRule[] = rawRules.map((r) => {
+        const actions = (Array.isArray(r.actions) ? r.actions : []) as ParsedRule["actions"];
+        const hasSideEffects = actions.some((a) => a.kind === "set_account" || a.kind === "create_transfer");
+        return {
+          id: Number(r.id),
+          name: String(r.name ?? ""),
+          conditions: (r.conditions ?? { all: [] }) as ParsedRule["conditions"],
+          actions,
+          priority: Number(r.priority ?? 0),
+          hasSideEffects,
+        };
+      });
+
+      // Inline matcher — supports payee/note/tags/amount/account/currency/date predicates.
+      function matchesProbe(probe: { payee: string; tags: string; amount: number; accountId: number | null; date: string }, conds: ParsedRule["conditions"]): boolean {
+        const all = conds.all ?? [];
+        if (all.length === 0) return false;
+        return all.every((c) => {
+          const field = c.field ?? "";
+          const op = c.op ?? "";
+          if (field === "payee" || field === "tags") {
+            const v = String(c.value ?? "");
+            const haystack = (field === "tags" ? probe.tags : probe.payee).toLowerCase();
+            const needle = v.toLowerCase();
+            if (op === "contains") return haystack.includes(needle);
+            if (op === "exact") return haystack === needle;
+            if (op === "regex") { try { return new RegExp(v, "i").test(field === "tags" ? probe.tags : probe.payee); } catch { return false; } }
+            return false;
+          }
+          if (field === "note") {
+            // record_transaction's autoCategory writes don't carry note; skip.
+            return false;
+          }
+          if (field === "amount") {
+            if (op === "between") return probe.amount >= (c.min ?? -Infinity) && probe.amount <= (c.max ?? Infinity);
+            const v = Number(c.value);
+            if (Number.isNaN(v)) return false;
+            if (op === "gt") return probe.amount > v;
+            if (op === "lt") return probe.amount < v;
+            if (op === "eq") return Math.abs(probe.amount - v) < 0.01;
+            return false;
+          }
+          if (field === "account") {
+            if (probe.accountId == null || c.accountId == null) return op === "is_not";
+            return op === "is" ? probe.accountId === c.accountId : probe.accountId !== c.accountId;
+          }
+          if (field === "currency") {
+            // Without a JOIN to accounts we can't probe entered currency here; skip.
+            return false;
+          }
+          if (field === "date") {
+            const dStr = probe.date;
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(dStr)) return false;
+            const d = new Date(`${dStr}T00:00:00Z`);
+            if (op === "weekday") return d.getUTCDay() === Number(c.weekday);
+            if (op === "day_of_month") return d.getUTCDate() === Number(c.day);
+            if (op === "between") return dStr >= String(c.from ?? "") && dStr <= String(c.to ?? "");
+            return false;
+          }
+          return false;
+        });
+      }
 
       let updated = 0;
       const preview: { id: number; payee: string; categoryId: number }[] = [];
+      const skipped: { ruleId: number; reason: string; txnId?: number }[] = [];
 
       for (const txn of txns) {
-        // Decrypt payee + tags in memory so we can match against plaintext
-        // rule values. Tags-rules need plaintext too (matchesRule reads
-        // `txn.tags` for `match_field='tags'`).
         const plainPayee = dek ? (decryptField(dek, String(txn.payee ?? "")) ?? "") : String(txn.payee ?? "");
         const plainTags = dek ? (decryptField(dek, String(txn.tags ?? "")) ?? "") : String(txn.tags ?? "");
-        const amt = Number(txn.amount);
+        const probe = {
+          payee: plainPayee,
+          tags: plainTags,
+          amount: Number(txn.amount),
+          accountId: txn.account_id == null ? null : Number(txn.account_id),
+          date: String(txn.date ?? ""),
+        };
         for (const rule of rules) {
-          const field = String(rule.match_field ?? "");
-          const type = String(rule.match_type ?? "");
-          const value = String(rule.match_value ?? "");
-          let hit = false;
-          if (field === "amount") {
-            const ruleAmount = parseFloat(value);
-            if (isNaN(ruleAmount)) { hit = false; }
-            else if (type === "greater_than") hit = amt > ruleAmount;
-            else if (type === "less_than") hit = amt < ruleAmount;
-            else if (type === "exact") hit = Math.abs(amt - ruleAmount) < 0.01;
-          } else {
-            const fieldVal = (field === "tags" ? plainTags : plainPayee).toLowerCase();
-            const valueLower = value.toLowerCase();
-            if (type === "contains") hit = fieldVal.includes(valueLower);
-            else if (type === "exact") hit = fieldVal === valueLower;
-            else if (type === "regex") {
-              try { hit = new RegExp(value, "i").test(field === "tags" ? plainTags : plainPayee); }
-              catch { hit = false; }
-            }
+          if (!matchesProbe(probe, rule.conditions)) continue;
+          if (rule.hasSideEffects) {
+            skipped.push({ ruleId: rule.id, reason: "requires_staging", txnId: Number(txn.id) });
+            break; // first-match-wins: same as legacy
           }
-          if (hit) {
-            if (!dry_run) {
-              // rule.rename_to / rule.assign_tags are plaintext; encrypt
-              // them before writing to the encrypted transaction columns.
-              const encRename = rule.rename_to && dek ? encryptField(dek, String(rule.rename_to)) : rule.rename_to;
-              const encTags = rule.assign_tags && dek ? encryptField(dek, String(rule.assign_tags)) : rule.assign_tags;
-              // Issue #28: rule application is a real mutation — bump
-              // updated_at like any other UPDATE. `source` stays untouched.
-              await db.execute(sql`
-                UPDATE transactions SET category_id = ${rule.assign_category_id}
-                ${rule.rename_to ? sql`, payee = ${encRename}` : sql``}
-                ${rule.assign_tags ? sql`, tags = ${encTags}` : sql``}
-                , updated_at = NOW()
-                WHERE id = ${txn.id} AND user_id = ${userId}
-              `);
-            }
-            preview.push({ id: Number(txn.id), payee: plainPayee, categoryId: Number(rule.assign_category_id) });
-            updated++;
-            break;
+          // Resolve the pure-action patch inline (mirrors computePureActionPatch).
+          let categoryId: number | undefined;
+          let renameTo: string | undefined;
+          let assignTags: string | undefined;
+          for (const a of rule.actions) {
+            if (a.kind === "set_category" && typeof a.categoryId === "number") categoryId = a.categoryId;
+            else if (a.kind === "rename_payee" && typeof a.to === "string") renameTo = a.to;
+            else if (a.kind === "set_tags" && typeof a.tags === "string") assignTags = a.tags;
           }
+          if (categoryId == null) {
+            // Rule matched but has no set_category action — pipeline-only
+            // actions (rename_payee / set_tags) on uncategorized rows aren't
+            // useful here; skip silently to give next-priority rule a chance.
+            continue;
+          }
+          if (!dry_run) {
+            const encRename = renameTo != null && dek ? encryptField(dek, renameTo) : renameTo;
+            const encTags = assignTags != null && dek ? encryptField(dek, assignTags) : assignTags;
+            // Audit trio: updated_at + source. source = mcp_http is INSERT-only
+            // per CLAUDE.md; on UPDATE we preserve the existing value. Stamp
+            // updated_at = NOW() per issue #28.
+            await db.execute(sql`
+              UPDATE transactions SET category_id = ${categoryId}
+              ${renameTo != null ? sql`, payee = ${encRename}` : sql``}
+              ${assignTags != null ? sql`, tags = ${encTags}` : sql``}
+              , updated_at = NOW()
+              WHERE id = ${txn.id} AND user_id = ${userId}
+            `);
+          }
+          preview.push({ id: Number(txn.id), payee: plainPayee, categoryId });
+          updated++;
+          break;
         }
       }
 
@@ -5251,6 +5357,7 @@ export function registerPgTools(
           updated,
           scanned: txns.length,
           matches: preview.slice(0, 20),
+          skipped,
           message: dry_run ? `Would update ${updated} of ${txns.length} transactions` : `Updated ${updated} of ${txns.length} transactions`,
         },
       });
@@ -5333,7 +5440,7 @@ export function registerPgTools(
             categories: "id, user_id, type(E/I/T), group, name, note",
             budgets: "id, user_id, category_id, month(YYYY-MM), amount, currency",
             goals: "id, user_id, name, type, target_amount, current_amount, deadline, status, account_id",
-            transaction_rules: "id, user_id, name, match_field, match_type, match_value, assign_category_id, rename_to, assign_tags, priority, is_active, created_at",
+            transaction_rules: "id, user_id, name, conditions (JSONB ConditionGroup, AND-only), actions (JSONB Action[]), priority, is_active, created_at, updated_at (FINLYNQ-84)",
             portfolio_holdings: "id, user_id, account_id, name, symbol, currency, note",
           },
           amount_convention: "Negative=expense/debit, Positive=income/credit",
@@ -7791,90 +7898,153 @@ export function registerPgTools(
   );
 
   // ── list_rules ────────────────────────────────────────────────────────────
+  // FINLYNQ-84: returns JSONB conditions + actions. Category/account/holding
+  // names referenced inside actions are decrypted in a single batch + attached
+  // as actionFKNames map for human-readable rendering.
   server.tool(
     "list_rules",
-    "List all auto-categorization rules with their match patterns and target categories",
+    "List all auto-categorization rules. Returns JSONB conditions + actions (FINLYNQ-84 v2 shape) plus decrypted FK names for human-readable rendering.",
     {},
     async () => {
-      // Stream D Phase 4: c.name dropped — read c.name_ct only.
-      // r.name is on transaction_rules, NOT in the Phase-4 drop scope.
       const rawRows = await q(db, sql`
-        SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
-               r.assign_category_id, c.name_ct AS category_name_ct,
-               r.assign_tags, r.rename_to, r.is_active, r.priority, r.created_at
-        FROM transaction_rules r
-        LEFT JOIN categories c ON c.id = r.assign_category_id
-        WHERE r.user_id = ${userId}
-        ORDER BY r.priority DESC, r.id
+        SELECT id, name, conditions, actions, is_active, priority, created_at, updated_at
+        FROM transaction_rules
+        WHERE user_id = ${userId}
+        ORDER BY priority DESC, id
       `);
-      const rows = rawRows.map((r) => {
-        const { category_name_ct, ...rest } = r;
-        return {
-          ...rest,
-          category_name: category_name_ct && dek ? decryptField(dek, category_name_ct) : null,
-        };
-      });
+      // Collect every FK referenced in actions across all rules.
+      const categoryIds = new Set<number>();
+      const accountIds = new Set<number>();
+      const holdingIds = new Set<number>();
+      for (const r of rawRows) {
+        const actions = Array.isArray(r.actions) ? r.actions as Array<Record<string, unknown>> : [];
+        for (const a of actions) {
+          if (a.kind === "set_category" && typeof a.categoryId === "number") categoryIds.add(a.categoryId);
+          else if (a.kind === "set_account" && typeof a.accountId === "number") accountIds.add(a.accountId);
+          else if (a.kind === "set_portfolio_holding" && typeof a.holdingId === "number") holdingIds.add(a.holdingId);
+          else if (a.kind === "create_transfer" && typeof a.destAccountId === "number") accountIds.add(a.destAccountId);
+        }
+      }
+      const categoryNames: Record<number, string | null> = {};
+      const accountNames: Record<number, string | null> = {};
+      const holdingNames: Record<number, string | null> = {};
+      if (categoryIds.size > 0) {
+        const catRows = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+        for (const r of catRows) {
+          if (!categoryIds.has(Number(r.id))) continue;
+          categoryNames[Number(r.id)] = r.name_ct && dek ? decryptField(dek, String(r.name_ct)) : null;
+        }
+      }
+      if (accountIds.size > 0) {
+        const acctRows = await q(db, sql`SELECT id, name_ct FROM accounts WHERE user_id = ${userId}`);
+        for (const r of acctRows) {
+          if (!accountIds.has(Number(r.id))) continue;
+          accountNames[Number(r.id)] = r.name_ct && dek ? decryptField(dek, String(r.name_ct)) : null;
+        }
+      }
+      if (holdingIds.size > 0) {
+        const holdRows = await q(db, sql`SELECT id, name_ct FROM portfolio_holdings WHERE user_id = ${userId}`);
+        for (const r of holdRows) {
+          if (!holdingIds.has(Number(r.id))) continue;
+          holdingNames[Number(r.id)] = r.name_ct && dek ? decryptField(dek, String(r.name_ct)) : null;
+        }
+      }
+      const rows = rawRows.map((r) => ({
+        id: Number(r.id),
+        name: String(r.name ?? ""),
+        conditions: r.conditions ?? { all: [] },
+        actions: Array.isArray(r.actions) ? r.actions : [],
+        is_active: r.is_active,
+        priority: Number(r.priority ?? 0),
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        actionFKNames: {
+          categories: categoryNames,
+          accounts: accountNames,
+          holdings: holdingNames,
+        },
+      }));
       return text({ success: true, data: rows });
     }
   );
 
   // ── update_rule ───────────────────────────────────────────────────────────
+  //
+  // FINLYNQ-84: update_rule accepts both (a) the legacy shorthand
+  // (match_payee + assign_category + rename_to? + assign_tags? + priority?)
+  // which SYNTHESIZES the full conditions+actions replacement, and (b) the
+  // v2 shape (conditions / actions). `name`, `is_active`, `priority` are
+  // always optional updates. The legacy fields (match_field/match_type/
+  // match_value/assign_category) are now ignored on the SQL side — they
+  // only feed the legacy-synthesis path.
   server.tool(
     "update_rule",
-    "Update any field of an existing transaction rule",
+    "Update an existing transaction rule. Accepts legacy shorthand (match_payee + assign_category) OR the v2 shape (conditions + actions, FINLYNQ-84).",
     {
       id: z.number().describe("Rule id"),
       name: z.string().optional(),
-      match_field: z.enum(["payee", "amount", "tags"]).optional(),
-      match_type: z.enum(["contains", "exact", "regex", "greater_than", "less_than"]).optional(),
-      match_value: z.string().optional(),
-      match_payee: z.string().optional().describe("Alias: sets match_field='payee', match_type='contains', match_value"),
-      assign_category: z.string().optional().describe("Category name (fuzzy matched). Empty string clears."),
-      assign_tags: z.string().optional(),
-      rename_to: z.string().optional(),
+      match_payee: z.string().optional().describe("Legacy alias: sets a single payee/contains condition + set_category action"),
+      assign_category: z.string().optional().describe("Legacy: category name (fuzzy matched)"),
+      assign_tags: z.string().optional().describe("Legacy: tags assigned by the rule"),
+      rename_to: z.string().optional().describe("Legacy: payee rename target"),
+      conditions: z.unknown().optional().describe("v2: full ConditionGroup JSON. Replaces conditions entirely."),
+      actions: z.unknown().optional().describe("v2: full Action[] JSON. Replaces actions entirely."),
       is_active: z.boolean().optional(),
       priority: z.number().optional(),
     },
-    async ({ id, name, match_field, match_type, match_value, match_payee, assign_category, assign_tags, rename_to, is_active, priority }) => {
+    async ({ id, name, match_payee, assign_category, assign_tags, rename_to, conditions, actions, is_active, priority }) => {
       const existing = await q(db, sql`SELECT id FROM transaction_rules WHERE id = ${id} AND user_id = ${userId}`);
       if (!existing.length) return err(`Rule #${id} not found`);
 
-      let assignCategoryIdUpdate: number | null | undefined;
-      if (assign_category !== undefined) {
-        if (assign_category === "") assignCategoryIdUpdate = null;
-        else {
+      // Resolve legacy shorthand into a conditions/actions replacement (if any
+      // legacy field is set). Mixing legacy + v2 in one call is rejected.
+      const hasLegacy = match_payee !== undefined || assign_category !== undefined
+        || assign_tags !== undefined || rename_to !== undefined;
+      const hasV2 = conditions !== undefined || actions !== undefined;
+      if (hasLegacy && hasV2) {
+        return err("Cannot mix legacy shorthand (match_payee/assign_category) with v2 shape (conditions/actions) on the same update_rule call");
+      }
+
+      let condsJson: string | undefined;
+      let actionsJson: string | undefined;
+
+      if (hasLegacy) {
+        // Synthesize the full replacement.
+        if (match_payee === undefined || assign_category === undefined) {
+          return err("Legacy shorthand requires both match_payee and assign_category");
+        }
+        let assignCategoryId: number | null = null;
+        if (assign_category !== "") {
           const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
           const allCats = decryptNameish(rawCats, dek);
           const cat = fuzzyFind(assign_category, allCats);
           if (!cat) return err(`Category "${assign_category}" not found`);
-          assignCategoryIdUpdate = Number(cat.id);
+          assignCategoryId = Number(cat.id);
         }
-      }
-
-      // match_payee is a convenience alias — expands to three field writes
-      let effMatchField = match_field;
-      let effMatchType = match_type;
-      let effMatchValue = match_value;
-      if (match_payee !== undefined) {
-        effMatchField = effMatchField ?? "payee";
-        effMatchType = effMatchType ?? "contains";
-        effMatchValue = match_payee;
+        const cleanedValue = match_payee.replace(/%/g, "");
+        condsJson = JSON.stringify({ all: [{ field: "payee", op: "contains", value: cleanedValue }] });
+        const actionsArr: Array<Record<string, unknown>> = [];
+        if (assignCategoryId != null) actionsArr.push({ kind: "set_category", categoryId: assignCategoryId });
+        if (rename_to != null) actionsArr.push({ kind: "rename_payee", to: rename_to });
+        if (assign_tags != null) actionsArr.push({ kind: "set_tags", tags: assign_tags });
+        if (actionsArr.length === 0) return err("Legacy shorthand resolves to an empty action list — pass assign_category");
+        actionsJson = JSON.stringify(actionsArr);
+      } else if (hasV2) {
+        if (conditions !== undefined) condsJson = JSON.stringify(conditions);
+        if (actions !== undefined) actionsJson = JSON.stringify(actions);
       }
 
       const updates: ReturnType<typeof sql>[] = [];
       if (name !== undefined) updates.push(sql`name = ${name}`);
-      if (effMatchField !== undefined) updates.push(sql`match_field = ${effMatchField}`);
-      if (effMatchType !== undefined) updates.push(sql`match_type = ${effMatchType}`);
-      if (effMatchValue !== undefined) updates.push(sql`match_value = ${effMatchValue}`);
-      if (assignCategoryIdUpdate !== undefined) updates.push(sql`assign_category_id = ${assignCategoryIdUpdate}`);
-      if (assign_tags !== undefined) updates.push(sql`assign_tags = ${assign_tags}`);
-      if (rename_to !== undefined) updates.push(sql`rename_to = ${rename_to}`);
+      if (condsJson !== undefined) updates.push(sql`conditions = ${condsJson}::jsonb`);
+      if (actionsJson !== undefined) updates.push(sql`actions = ${actionsJson}::jsonb`);
       if (is_active !== undefined) updates.push(sql`is_active = ${is_active}`);
       if (priority !== undefined) updates.push(sql`priority = ${priority}`);
-      if (!updates.length) return err("No fields to update");
+      updates.push(sql`updated_at = NOW()`);
+      if (updates.length === 1) return err("No fields to update");
 
       await db.execute(sql`UPDATE transaction_rules SET ${sql.join(updates, sql`, `)} WHERE id = ${id} AND user_id = ${userId}`);
-      return text({ success: true, data: { id, message: `Rule #${id} updated (${updates.length} field(s))` } });
+      return text({ success: true, data: { id, message: `Rule #${id} updated (${updates.length - 1} field(s))` } });
     }
   );
 
@@ -8031,36 +8201,63 @@ export function registerPgTools(
       const topN = top_n ?? 3;
       if (!payee.trim()) return err("payee is required");
 
-      // 1. Rule match — transaction_rules.match_value is plaintext, so SQL works.
+      // 1. Rule match — FINLYNQ-84 JSONB conditions+actions.
       const rules = await q(db, sql`
-        SELECT id, name, match_field, match_type, match_value, assign_category_id, assign_tags, rename_to, priority
+        SELECT id, name, conditions, actions, priority
         FROM transaction_rules
         WHERE user_id = ${userId} AND is_active = true
         ORDER BY priority DESC, id
       `);
       const payeeLower = payee.toLowerCase();
-      const matchedRules: Record<string, unknown>[] = [];
+      const matchedRules: Array<{ id: number; name: string; assignCategoryId: number | null; assignTags: string | null; renameTo: string | null }> = [];
       for (const r of rules) {
-        const field = String(r.match_field ?? "payee");
-        const type = String(r.match_type ?? "contains");
-        const value = String(r.match_value ?? "");
-        let hit = false;
-        if (field === "payee") {
-          const valLower = value.toLowerCase();
-          if (type === "contains") hit = payeeLower.includes(valLower) || valLower.includes(payeeLower);
-          else if (type === "exact") hit = payeeLower === valLower;
-          else if (type === "regex") {
-            try { hit = new RegExp(value, "i").test(payee); } catch { /* ignore bad regex */ }
+        const conditions = (r.conditions ?? { all: [] }) as { all: Array<Record<string, unknown>> };
+        const actions = (Array.isArray(r.actions) ? r.actions : []) as Array<Record<string, unknown>>;
+        // Probe — payee + amount only (this tool's input domain).
+        const conds = conditions.all ?? [];
+        if (conds.length === 0) continue;
+        const allMatched = conds.every((c) => {
+          const field = String(c.field ?? "");
+          const op = String(c.op ?? "");
+          if (field === "payee") {
+            const v = String(c.value ?? "");
+            const valLower = v.toLowerCase();
+            if (op === "contains") return payeeLower.includes(valLower) || valLower.includes(payeeLower);
+            if (op === "exact") return payeeLower === valLower;
+            if (op === "regex") {
+              try { return new RegExp(v, "i").test(payee); } catch { return false; }
+            }
+            return false;
           }
-        } else if (field === "amount" && amount !== undefined) {
-          const ruleAmt = parseFloat(value);
-          if (!isNaN(ruleAmt)) {
-            if (type === "greater_than") hit = amount > ruleAmt;
-            else if (type === "less_than") hit = amount < ruleAmt;
-            else if (type === "exact") hit = Math.abs(amount - ruleAmt) < 0.01;
+          if (field === "amount" && amount !== undefined) {
+            if (op === "between") return amount >= Number(c.min ?? -Infinity) && amount <= Number(c.max ?? Infinity);
+            const v = Number(c.value);
+            if (Number.isNaN(v)) return false;
+            if (op === "gt") return amount > v;
+            if (op === "lt") return amount < v;
+            if (op === "eq") return Math.abs(amount - v) < 0.01;
+            return false;
           }
+          // We don't have note/tags/account/currency/date in this surface.
+          return false;
+        });
+        if (!allMatched) continue;
+        // Surface the pure-action patch ids for caller convenience.
+        let assignCategoryId: number | null = null;
+        let assignTags: string | null = null;
+        let renameTo: string | null = null;
+        for (const a of actions) {
+          if (a.kind === "set_category" && typeof a.categoryId === "number") assignCategoryId = a.categoryId;
+          else if (a.kind === "set_tags" && typeof a.tags === "string") assignTags = a.tags;
+          else if (a.kind === "rename_payee" && typeof a.to === "string") renameTo = a.to;
         }
-        if (hit) matchedRules.push(r);
+        matchedRules.push({
+          id: Number(r.id),
+          name: String(r.name ?? ""),
+          assignCategoryId,
+          assignTags,
+          renameTo,
+        });
       }
 
       // 2. Historical frequency — payee may be encrypted, so decrypt+match in memory.
@@ -8106,7 +8303,7 @@ export function registerPgTools(
         success: true,
         data: {
           payee,
-          rules: matchedRules.map((r) => ({ id: Number(r.id), name: r.name, assignCategoryId: r.assign_category_id, assignTags: r.assign_tags, renameTo: r.rename_to })),
+          rules: matchedRules,
           categories: categorySuggestions,
           tags: topTags,
           historicalMatches: raw.length > 0 ? Array.from(catCounts.values()).reduce((s, n) => s + n, 0) : 0,

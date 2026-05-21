@@ -60,36 +60,48 @@ import {
   type CandidateRow,
 } from "../src/lib/mcp/duplicate-hints.js";
 
-// Helper for MCP rule matching
+// FINLYNQ-84: rules are JSONB conditions+actions. Stdio matcher mirrors
+// the structure from src/lib/auto-categorize.ts but trims to what stdio
+// transports can probe (payee/tags/amount — note/account/currency/date
+// not in this surface today).
+type StdioCondition = {
+  field?: string; op?: string; value?: string; min?: number; max?: number;
+};
+type StdioRuleSlim = {
+  conditions: { all: StdioCondition[] };
+  actions: Array<{ kind: string; categoryId?: number; tags?: string; to?: string }>;
+};
 function matchesRule(
   txn: { payee: string; amount: number; tags: string },
-  rule: { match_field: string; match_type: string; match_value: string },
+  rule: StdioRuleSlim,
 ): boolean {
-  const { match_field, match_type, match_value } = rule;
-
-  if (match_field === "amount") {
-    const ruleAmount = parseFloat(match_value);
-    if (isNaN(ruleAmount)) return false;
-    switch (match_type) {
-      case "greater_than": return txn.amount > ruleAmount;
-      case "less_than": return txn.amount < ruleAmount;
-      case "exact": return Math.abs(txn.amount - ruleAmount) < 0.01;
-      default: return false;
+  const conds = rule.conditions?.all ?? [];
+  if (conds.length === 0) return false;
+  return conds.every((c) => {
+    if (c.field === "payee" || c.field === "tags") {
+      const haystack = (c.field === "tags" ? (txn.tags ?? "") : (txn.payee ?? "")).toLowerCase();
+      const needle = String(c.value ?? "").toLowerCase();
+      if (c.op === "contains") return haystack.includes(needle);
+      if (c.op === "exact") return haystack === needle;
+      if (c.op === "regex") {
+        try { return new RegExp(String(c.value ?? ""), "i").test(c.field === "tags" ? (txn.tags ?? "") : (txn.payee ?? "")); }
+        catch { return false; }
+      }
+      return false;
     }
-  }
-
-  const fieldValue = match_field === "payee" ? (txn.payee ?? "") : (txn.tags ?? "");
-  const fieldLower = fieldValue.toLowerCase();
-  const valueLower = match_value.toLowerCase();
-
-  switch (match_type) {
-    case "contains": return fieldLower.includes(valueLower);
-    case "exact": return fieldLower === valueLower;
-    case "regex":
-      try { return new RegExp(match_value, "i").test(fieldValue); }
-      catch { return false; }
-    default: return false;
-  }
+    if (c.field === "amount") {
+      if (c.op === "between") return txn.amount >= Number(c.min ?? -Infinity) && txn.amount <= Number(c.max ?? Infinity);
+      const v = Number(c.value);
+      if (Number.isNaN(v)) return false;
+      if (c.op === "gt") return txn.amount > v;
+      if (c.op === "lt") return txn.amount < v;
+      if (c.op === "eq") return Math.abs(txn.amount - v) < 0.01;
+      return false;
+    }
+    // note/account/currency/date predicates fall through (stdio surface
+    // doesn't carry these fields in the autoCategory write path).
+    return false;
+  });
 }
 
 type SqliteRow = Record<string, unknown>;
@@ -306,33 +318,40 @@ function resolvePortfolioHoldingStrict(input: string, options: SqliteRow[]): Std
 /** Auto-categorize payee: rules → historical frequency (both user-scoped) */
 async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): Promise<number | null> {
   if (!payee) return null;
-  // Issue #214 — schema is (match_field, match_type, match_value), NOT
-  // `match_payee`. The previous SELECT 500'd on every record_transaction call
-  // when the user had any active rule (column "match_payee" does not exist).
-  // SQL-filter active payee-rules with an assigned category, then evaluate
-  // contains/exact/regex semantics in memory using the shared `matchesRule`
-  // helper. Identical pattern to the HTTP `autoCategory` fix in
-  // register-tools-pg.ts (commit 7d70677).
+  // FINLYNQ-84: rules are JSONB conditions+actions. autoCategory's stdio
+  // write-time scope is intentionally narrow:
+  //   - Only payee conditions count (amount/account/currency/date predicates
+  //     evaluate to false here because we don't have those values in scope).
+  //   - Only set_category actions land a categoryId (other action kinds —
+  //     rename_payee, set_tags, set_account, create_transfer,
+  //     set_portfolio_holding, set_entered_currency — are IGNORED so the
+  //     stdio write path can't fire a side-effect action without the user's
+  //     explicit hand on the wheel).
   const rules = await sqlite.prepare(
-    `SELECT id, name, match_field, match_type, match_value,
-            assign_category_id, assign_tags, rename_to, is_active, priority
+    `SELECT id, name, conditions, actions, is_active, priority
      FROM transaction_rules
      WHERE user_id = ?
        AND is_active = true
-       AND match_field = 'payee'
-       AND assign_category_id IS NOT NULL
      ORDER BY priority DESC`
   ).all(userId) as Array<{
-    id: number; name: string; match_field: string; match_type: string;
-    match_value: string; assign_category_id: number | null;
-    assign_tags: string | null; rename_to: string | null;
+    id: number; name: string; conditions: unknown; actions: unknown;
     is_active: boolean; priority: number;
   }>;
   for (const rule of rules) {
-    // autoCategory only resolves on payee at write-time; amount/tags rules
-    // run at apply_rules_to_uncategorized time after the row is committed.
-    if (matchesRule({ payee, amount: 0, tags: "" }, rule) && rule.assign_category_id) {
-      return rule.assign_category_id;
+    const conditions = (rule.conditions ?? { all: [] }) as { all: StdioCondition[] };
+    const actions = (Array.isArray(rule.actions) ? rule.actions : []) as Array<{ kind: string; categoryId?: number }>;
+    // Stdio surface restricts to payee-only conditions: a rule that
+    // requires amount/account/currency/date data can't fire here.
+    const conds = conditions.all ?? [];
+    if (conds.length === 0) continue;
+    if (!conds.every((c) => c.field === "payee")) continue;
+    // Probe.
+    if (!matchesRule({ payee, amount: 0, tags: "" }, { conditions, actions: [] })) continue;
+    // Take the first set_category action.
+    for (const a of actions) {
+      if (a.kind === "set_category" && typeof a.categoryId === "number") {
+        return a.categoryId;
+      }
     }
   }
   const hist = await sqlite.prepare(
@@ -641,16 +660,14 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
   server.tool(
     "get_transaction_rules",
-    "List all transaction auto-categorization rules. Stream D Phase 4: stdio cannot decrypt the joined category name — `category_name` field is omitted; `assign_category_id` is still returned.",
+    "List all transaction auto-categorization rules. FINLYNQ-84: returns JSONB conditions+actions. Stream D Phase 4: stdio cannot decrypt the joined category name; only the action FK ids are returned.",
     {},
     async () => {
       const rows = await sqlite.prepare(
-        `SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
-                r.assign_category_id,
-                r.assign_tags, r.rename_to, r.is_active, r.priority
-         FROM transaction_rules r
-         WHERE r.user_id = ?
-         ORDER BY r.priority DESC`
+        `SELECT id, name, conditions, actions, is_active, priority, created_at, updated_at
+         FROM transaction_rules
+         WHERE user_id = ?
+         ORDER BY priority DESC`
       ).all(userId);
       return dataResponse(rows);
     }
@@ -658,23 +675,38 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
   server.tool(
     "apply_rules_to_uncategorized",
-    "Find uncategorized transactions and apply matching rules to categorize them",
+    "Find uncategorized transactions and apply matching rules to categorize them. FINLYNQ-84: skips rules with side-effect actions (set_account, create_transfer); skipped rules surface in the response.",
     {
       limit: z.number().optional().describe("Max transactions to process (default 500)"),
     },
     async ({ limit }) => {
       const maxRows = limit ?? 500;
 
-      const rules = await sqlite.prepare(
-        `SELECT id, name, match_field, match_type, match_value,
-                assign_category_id, assign_tags, rename_to, is_active, priority
+      const rawRules = await sqlite.prepare(
+        `SELECT id, name, conditions, actions, is_active, priority
          FROM transaction_rules WHERE user_id = ? AND is_active = true ORDER BY priority DESC`
       ).all(userId) as Array<{
-        id: number; name: string; match_field: string; match_type: string;
-        match_value: string; assign_category_id: number | null;
-        assign_tags: string | null; rename_to: string | null;
+        id: number; name: string; conditions: unknown; actions: unknown;
         is_active: boolean; priority: number;
       }>;
+
+      type ParsedRule = {
+        id: number;
+        name: string;
+        conditions: { all: StdioCondition[] };
+        actions: Array<{ kind: string; categoryId?: number; tags?: string; to?: string }>;
+        hasSideEffects: boolean;
+      };
+      const rules: ParsedRule[] = rawRules.map((r) => {
+        const actions = (Array.isArray(r.actions) ? r.actions : []) as ParsedRule["actions"];
+        return {
+          id: Number(r.id),
+          name: String(r.name ?? ""),
+          conditions: (r.conditions ?? { all: [] }) as ParsedRule["conditions"],
+          actions,
+          hasSideEffects: actions.some((a) => a.kind === "set_account" || a.kind === "create_transfer"),
+        };
+      });
 
       if (rules.length === 0) {
         return dataResponse({ message: "No active rules found.", applied: 0 });
@@ -690,8 +722,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }
 
       let applied = 0;
+      const skipped: { ruleId: number; reason: string; txnId: number }[] = [];
       // Issue #28: stdio MCP UPDATE bumps updated_at like every other UPDATE.
-      // pg-compat shim resolves NOW() to PG, no SQLite branch needed here.
       const updateStmt = sqlite.prepare(
         `UPDATE transactions SET category_id = ?, tags = CASE WHEN ? IS NOT NULL THEN ? ELSE tags END,
          payee = CASE WHEN ? IS NOT NULL THEN ? ELSE payee END,
@@ -700,18 +732,29 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
       for (const txn of uncategorized) {
         for (const rule of rules) {
-          if (matchesRule(txn, rule)) {
-            if (rule.assign_category_id) {
-              await updateStmt.run(
-                rule.assign_category_id,
-                rule.assign_tags, rule.assign_tags ?? txn.tags,
-                rule.rename_to, rule.rename_to ?? txn.payee,
-                txn.id, userId
-              );
-              applied++;
-            }
+          if (!matchesRule(txn, rule)) continue;
+          if (rule.hasSideEffects) {
+            skipped.push({ ruleId: rule.id, reason: "requires_staging", txnId: txn.id });
             break;
           }
+          // Resolve pure actions inline.
+          let categoryId: number | undefined;
+          let assignTags: string | undefined;
+          let renameTo: string | undefined;
+          for (const a of rule.actions) {
+            if (a.kind === "set_category" && typeof a.categoryId === "number") categoryId = a.categoryId;
+            else if (a.kind === "set_tags" && typeof a.tags === "string") assignTags = a.tags;
+            else if (a.kind === "rename_payee" && typeof a.to === "string") renameTo = a.to;
+          }
+          if (categoryId == null) continue; // Pure no-categorize actions don't help here.
+          await updateStmt.run(
+            categoryId,
+            assignTags ?? null, assignTags ?? txn.tags,
+            renameTo ?? null, renameTo ?? txn.payee,
+            txn.id, userId
+          );
+          applied++;
+          break;
         }
       }
 
@@ -719,6 +762,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       return dataResponse({
         scanned: uncategorized.length,
         applied,
+        skipped,
         message: `Processed ${uncategorized.length} uncategorized transactions. Applied rules to ${applied} transactions.`,
       });
     }
@@ -1322,9 +1366,12 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       const txCount = (await sqlite.prepare(
         `SELECT COUNT(*) as cnt FROM transactions WHERE user_id = ? AND category_id = ?`
       ).get(userId, id) as { cnt: number }).cnt;
+      // FINLYNQ-84: actions are JSONB. Count rules whose actions JSONB array
+      // contains a set_category action with this category id.
       const ruleCount = (await sqlite.prepare(
-        `SELECT COUNT(*) as cnt FROM transaction_rules WHERE user_id = ? AND assign_category_id = ?`
-      ).get(userId, id) as { cnt: number }).cnt;
+        `SELECT COUNT(*) as cnt FROM transaction_rules
+         WHERE user_id = ? AND actions @> ?::jsonb`
+      ).get(userId, JSON.stringify([{ kind: "set_category", categoryId: id }])) as { cnt: number }).cnt;
       const subscriptionCount = (await sqlite.prepare(
         `SELECT COUNT(*) as cnt FROM subscriptions WHERE user_id = ? AND category_id = ?`
       ).get(userId, id) as { cnt: number }).cnt;
@@ -1496,19 +1543,21 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         `SELECT id FROM categories WHERE user_id = ? AND id = ?`
       ).get(userId, assign_category_id) as { id: number } | undefined;
       if (!cat) return sqliteErr(`Category #${assign_category_id} not found or not owned by you.`);
-      // Issue #214 — schema is (match_field, match_type, match_value), NOT
-      // `match_payee`. Synthesize the new triplet from the user-facing
-      // `match_payee` alias (legacy `%` wildcards stripped) and stamp the
-      // synthesized name + created_at (both NOT NULL with no DB default).
+      // FINLYNQ-84: synthesize the v2 JSONB shape from the stdio shorthand.
       const cleanedValue = match_payee.replace(/%/g, "");
       const synthName = `Match "${cleanedValue}" → category #${Number(cat.id)}`.slice(0, 200);
       const todayISO = new Date().toISOString().split("T")[0];
+      const conditions = { all: [{ field: "payee", op: "contains", value: cleanedValue }] };
+      const actions: Array<Record<string, unknown>> = [
+        { kind: "set_category", categoryId: Number(cat.id) },
+      ];
+      if (rename_to) actions.push({ kind: "rename_payee", to: rename_to });
+      if (assign_tags) actions.push({ kind: "set_tags", tags: assign_tags });
       await sqlite.prepare(
         `INSERT INTO transaction_rules
-           (user_id, name, match_field, match_type, match_value,
-            assign_category_id, rename_to, assign_tags, priority, is_active, created_at)
-         VALUES (?, ?, 'payee', 'contains', ?, ?, ?, ?, ?, true, ?)`
-      ).run(userId, synthName, cleanedValue, cat.id, rename_to ?? null, assign_tags ?? null, priority ?? 0, todayISO);
+           (user_id, name, conditions, actions, priority, is_active, created_at)
+         VALUES (?, ?, ?, ?, ?, true, ?)`
+      ).run(userId, synthName, JSON.stringify(conditions), JSON.stringify(actions), priority ?? 0, todayISO);
       return txt({ success: true, data: { message: `Rule created: "${cleanedValue}" → category #${Number(cat.id)}` } });
     }
   );
@@ -1826,7 +1875,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           categories: "id, type(E/I/T), group, name, note",
           budgets: "id, category_id, month(YYYY-MM), amount",
           goals: "id, name, type, target_amount, deadline, status, account_id",
-          transaction_rules: "id, name, match_field, match_type, match_value, assign_category_id, rename_to, assign_tags, priority, is_active, created_at",
+          transaction_rules: "id, name, conditions (JSONB ConditionGroup, AND-only), actions (JSONB Action[]), priority, is_active, created_at, updated_at (FINLYNQ-84)",
         },
         amount_convention: "Negative=expense/debit, Positive=income/credit",
         date_format: "YYYY-MM-DD strings",
@@ -2306,15 +2355,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── list_rules ────────────────────────────────────────────────────────────
   server.tool(
     "list_rules",
-    "List all auto-categorization rules. Stream D Phase 4: `category_name` is omitted on stdio (cannot decrypt categories.name_ct); `assign_category_id` is still returned.",
+    "List all auto-categorization rules. FINLYNQ-84: returns JSONB conditions+actions. Stream D Phase 4: stdio cannot decrypt category/account/holding names.",
     {},
     async () => {
       const rows = await sqlite.prepare(
-        `SELECT r.id, r.name, r.match_field, r.match_type, r.match_value,
-                r.assign_category_id,
-                r.assign_tags, r.rename_to, r.is_active, r.priority, r.created_at
-         FROM transaction_rules r
-         WHERE r.user_id = ? ORDER BY r.priority DESC, r.id`
+        `SELECT id, name, conditions, actions, is_active, priority, created_at, updated_at
+         FROM transaction_rules
+         WHERE user_id = ? ORDER BY priority DESC, id`
       ).all(userId);
       return txt({ success: true, data: rows });
     }
@@ -2323,64 +2370,72 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // ── update_rule ───────────────────────────────────────────────────────────
   server.tool(
     "update_rule",
-    "Update any field of an existing transaction rule. Stream D Phase 4 (stdio): pass `assign_category_id` (numeric) — `assign_category` (name) is refused.",
+    "Update a transaction rule. FINLYNQ-84: accepts the legacy shorthand (match_payee + assign_category_id) which is synthesized into the v2 JSONB shape, or the v2 fields (conditions / actions). Stream D Phase 4: `assign_category` by NAME is refused on stdio; pass numeric id.",
     {
       id: z.number(),
       name: z.string().optional(),
-      match_field: z.enum(["payee", "amount", "tags"]).optional(),
-      match_type: z.enum(["contains", "exact", "regex", "greater_than", "less_than"]).optional(),
-      match_value: z.string().optional(),
-      match_payee: z.string().optional(),
+      match_payee: z.string().optional().describe("Legacy: payee/contains condition"),
       assign_category: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `assign_category_id` instead."),
-      assign_category_id: z.number().int().nullable().optional().describe("Category FK (categories.id). Pass null to clear."),
+      assign_category_id: z.number().int().nullable().optional().describe("Legacy: category FK for set_category action"),
       assign_tags: z.string().optional(),
       rename_to: z.string().optional(),
+      conditions: z.unknown().optional().describe("v2: ConditionGroup JSON. Replaces conditions entirely."),
+      actions: z.unknown().optional().describe("v2: Action[] JSON. Replaces actions entirely."),
       is_active: z.boolean().optional(),
       priority: z.number().optional(),
     },
-    async ({ id, name, match_field, match_type, match_value, match_payee, assign_category, assign_category_id, assign_tags, rename_to, is_active, priority }) => {
+    async ({ id, name, match_payee, assign_category, assign_category_id, assign_tags, rename_to, conditions, actions, is_active, priority }) => {
       if (assign_category !== undefined) {
         return sqliteErr("`assign_category` (name) is refused on stdio after Stream D Phase 4. Pass `assign_category_id` instead.");
       }
       const existing = await sqlite.prepare(`SELECT id FROM transaction_rules WHERE id = ? AND user_id = ?`).get(id, userId);
       if (!existing) return sqliteErr(`Rule #${id} not found`);
 
-      let assignCategoryIdUpdate: number | null | undefined;
-      if (assign_category_id !== undefined) {
-        if (assign_category_id === null) assignCategoryIdUpdate = null;
-        else {
+      const hasLegacy = match_payee !== undefined || assign_category_id !== undefined
+        || assign_tags !== undefined || rename_to !== undefined;
+      const hasV2 = conditions !== undefined || actions !== undefined;
+      if (hasLegacy && hasV2) {
+        return sqliteErr("Cannot mix legacy shorthand with v2 conditions/actions on the same update_rule call");
+      }
+
+      let condsJson: string | undefined;
+      let actionsJson: string | undefined;
+
+      if (hasLegacy) {
+        if (match_payee === undefined || assign_category_id === undefined) {
+          return sqliteErr("Legacy shorthand requires both match_payee and assign_category_id");
+        }
+        if (assign_category_id !== null) {
           const cat = await sqlite.prepare(
             `SELECT id FROM categories WHERE user_id = ? AND id = ?`
           ).get(userId, assign_category_id) as { id: number } | undefined;
           if (!cat) return sqliteErr(`Category #${assign_category_id} not found or not owned by you.`);
-          assignCategoryIdUpdate = Number(cat.id);
         }
-      }
-
-      let effMatchField = match_field;
-      let effMatchType = match_type;
-      let effMatchValue = match_value;
-      if (match_payee !== undefined) {
-        effMatchField = effMatchField ?? "payee";
-        effMatchType = effMatchType ?? "contains";
-        effMatchValue = match_payee;
+        const cleanedValue = match_payee.replace(/%/g, "");
+        condsJson = JSON.stringify({ all: [{ field: "payee", op: "contains", value: cleanedValue }] });
+        const actionsArr: Array<Record<string, unknown>> = [];
+        if (assign_category_id != null) actionsArr.push({ kind: "set_category", categoryId: Number(assign_category_id) });
+        if (rename_to != null) actionsArr.push({ kind: "rename_payee", to: rename_to });
+        if (assign_tags != null) actionsArr.push({ kind: "set_tags", tags: assign_tags });
+        if (actionsArr.length === 0) return sqliteErr("Legacy shorthand resolves to an empty action list");
+        actionsJson = JSON.stringify(actionsArr);
+      } else if (hasV2) {
+        if (conditions !== undefined) condsJson = JSON.stringify(conditions);
+        if (actions !== undefined) actionsJson = JSON.stringify(actions);
       }
 
       const updates: string[] = [];
       const params: unknown[] = [];
       if (name !== undefined) { updates.push(`name = ?`); params.push(name); }
-      if (effMatchField !== undefined) { updates.push(`match_field = ?`); params.push(effMatchField); }
-      if (effMatchType !== undefined) { updates.push(`match_type = ?`); params.push(effMatchType); }
-      if (effMatchValue !== undefined) { updates.push(`match_value = ?`); params.push(effMatchValue); }
-      if (assignCategoryIdUpdate !== undefined) { updates.push(`assign_category_id = ?`); params.push(assignCategoryIdUpdate); }
-      if (assign_tags !== undefined) { updates.push(`assign_tags = ?`); params.push(assign_tags); }
-      if (rename_to !== undefined) { updates.push(`rename_to = ?`); params.push(rename_to); }
+      if (condsJson !== undefined) { updates.push(`conditions = ?::jsonb`); params.push(condsJson); }
+      if (actionsJson !== undefined) { updates.push(`actions = ?::jsonb`); params.push(actionsJson); }
       if (is_active !== undefined) { updates.push(`is_active = ?`); params.push(is_active); }
       if (priority !== undefined) { updates.push(`priority = ?`); params.push(priority); }
-      if (!updates.length) return sqliteErr("No fields to update");
+      updates.push(`updated_at = NOW()`);
+      if (updates.length === 1) return sqliteErr("No fields to update");
       params.push(id, userId);
       await sqlite.prepare(`UPDATE transaction_rules SET ${updates.join(", ")} WHERE id = ? AND user_id = ?`).run(...params);
-      return txt({ success: true, data: { id, message: `Rule #${id} updated (${updates.length} field(s))` } });
+      return txt({ success: true, data: { id, message: `Rule #${id} updated (${updates.length - 1} field(s))` } });
     }
   );
 
