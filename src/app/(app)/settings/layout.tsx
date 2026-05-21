@@ -24,6 +24,7 @@ import {
   Sliders,
   Server,
   Wrench,
+  Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -35,6 +36,9 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/settings/account", label: "Account & Security", icon: Shield },
   { href: "/settings/data", label: "Data", icon: Database },
   { href: "/settings/categorization", label: "Categorization", icon: Tag },
+  // FINLYNQ-84 — rules moved out of /settings/categorization into their own
+  // sub-page with a multi-condition + multi-action editor.
+  { href: "/settings/rules", label: "Rules", icon: Zap },
   { href: "/settings/investments", label: "Investments", icon: Briefcase },
   { href: "/settings/display", label: "Display & Ordering", icon: Sliders },
   { href: "/settings/integrations", label: "Integrations", icon: Server },
