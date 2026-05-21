@@ -162,6 +162,8 @@ Backup-restore (`/api/data/import` `strip()`) gained a `transactionIdMap` remap 
 
 ### Reader / writer routes (FINLYNQ-56)
 
+> Living feature doc for the `/import/pending` two-pane reconciliation surface is at [`pf-app/docs/reconciliation.md`](../reconciliation.md) — what's shipped, components, load-bearing rules, roadmap. This subsection is the schema-side companion.
+
 The two-pane reconciliation UI on `/import/pending` reads + writes these columns through three endpoints:
 
 - **PATCH [`/api/import/staged/[id]/rows/[rowId]`](../../src/app/api/import/staged/%5Bid%5D/rows/%5BrowId%5D/route.ts)** — accepts optional `reconcileState` + `linkedTransactionId` fields. Cross-tenant `linkedTransactionId` returns 404 (never 403 — no existence disclosure). State `'linked'` requires a non-null `linkedTransactionId`; non-`'linked'` state forces it to null on write. `import_hash` and `encryption_tier` are NEVER touched by this PATCH. Half-pair transfer rule is enforced at APPROVE time, not PATCH (two sequential PATCHes for paired legs would deadlock on post-state validation; the approve-side classifier already handles it).
