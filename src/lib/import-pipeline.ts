@@ -1,6 +1,13 @@
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
-import { generateImportHash, checkDuplicates, checkFitIdDuplicates } from "./import-hash";
+import {
+  generateImportHash,
+  checkDuplicates,
+  checkFitIdDuplicates,
+  findDuplicateMatches,
+  findFitIdMatches,
+  type ExactDuplicateMatchInfo,
+} from "./import-hash";
 import { applyRulesToBatch, type TransactionRule } from "./auto-categorize";
 import { normalizeDate, parseAmount as parseAmountStr } from "./csv-parser";
 import { encryptField, decryptField, tryDecryptField } from "./crypto/envelope";
@@ -62,9 +69,24 @@ export interface RawTransaction {
   linkId?: string;
 }
 
+/** Per-row explanation for an exact-match duplicate, mirrors `DuplicateMatch`. */
+export interface ExactDuplicateMatch {
+  rowIndex: number;
+  /** Which key triggered the match. */
+  matchBasis: "fit_id" | "import_hash";
+  /** Metadata about the existing transaction that this row collided with. */
+  matchedTx: ExactDuplicateMatchInfo;
+}
+
 export interface PreviewResult {
   valid: Array<RawTransaction & { hash: string; rowIndex: number }>;
   duplicates: Array<RawTransaction & { hash: string; rowIndex: number }>;
+  /**
+   * Per-row "Matches transaction #X" detail for the exact-match duplicates
+   * above. Same lookup pattern as `probableDuplicates` — UI cross-references
+   * via `rowIndex`. Empty when there are no exact duplicates.
+   */
+  duplicateMatches: ExactDuplicateMatch[];
   /**
    * Issue #65: rows that survived exact-match dedup but look like a fuzzy
    * match against an existing transaction (FX-spread + settlement-vs-posting
@@ -143,7 +165,7 @@ export async function previewImport(
 
   if (rows.length === 0) {
     errors.push({ rowIndex: 0, message: "No data to import" });
-    return { valid: [], duplicates: [], probableDuplicates: [], errors };
+    return { valid: [], duplicates: [], duplicateMatches: [], probableDuplicates: [], errors };
   }
 
   if (rows.length > MAX_IMPORT_ROWS) {
@@ -151,7 +173,7 @@ export async function previewImport(
       rowIndex: 0,
       message: `File contains ${rows.length.toLocaleString()} rows, which exceeds the ${MAX_IMPORT_ROWS.toLocaleString()} row limit. Please split the file into smaller chunks.`,
     });
-    return { valid: [], duplicates: [], probableDuplicates: [], errors };
+    return { valid: [], duplicates: [], duplicateMatches: [], probableDuplicates: [], errors };
   }
 
   for (let i = 0; i < rows.length; i++) {
@@ -200,28 +222,41 @@ export async function previewImport(
     valid.push({ ...row, hash, rowIndex: i });
   }
 
-  // Check duplicates — use fitId when available, fall back to content hash
+  // Check duplicates — use fitId when available, fall back to content hash.
+  // Both branches use the *match-returning* helpers so the preview UI can
+  // show "Matches existing transaction #X" alongside each flagged row.
   const fitIdRows = valid.filter((v) => v.fitId);
   const hashOnlyRows = valid.filter((v) => !v.fitId);
 
-  // fitId-based dedup
-  const existingFitIds = await checkFitIdDuplicates(fitIdRows.map((v) => v.fitId!), userId);
-  // hash-based dedup
-  const existingHashes = await checkDuplicates(hashOnlyRows.map((v) => v.hash), userId);
+  const fitIdMatches = await findFitIdMatches(fitIdRows.map((v) => v.fitId!), userId);
+  const hashMatches = await findDuplicateMatches(hashOnlyRows.map((v) => v.hash), userId);
 
   const duplicates: PreviewResult["valid"] = [];
+  const duplicateMatches: ExactDuplicateMatch[] = [];
   const nonDuplicates: PreviewResult["valid"] = [];
 
   for (const row of fitIdRows) {
-    if (existingFitIds.has(row.fitId!)) {
+    const match = fitIdMatches.get(row.fitId!);
+    if (match) {
       duplicates.push(row);
+      duplicateMatches.push({
+        rowIndex: row.rowIndex,
+        matchBasis: "fit_id",
+        matchedTx: match,
+      });
     } else {
       nonDuplicates.push(row);
     }
   }
   for (const row of hashOnlyRows) {
-    if (existingHashes.has(row.hash)) {
+    const match = hashMatches.get(row.hash);
+    if (match) {
       duplicates.push(row);
+      duplicateMatches.push({
+        rowIndex: row.rowIndex,
+        matchBasis: "import_hash",
+        matchedTx: match,
+      });
     } else {
       nonDuplicates.push(row);
     }
@@ -238,7 +273,7 @@ export async function previewImport(
     dek ?? null,
   );
 
-  return { valid: nonDuplicates, duplicates, probableDuplicates, errors };
+  return { valid: nonDuplicates, duplicates, duplicateMatches, probableDuplicates, errors };
 }
 
 /**

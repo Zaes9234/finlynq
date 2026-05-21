@@ -80,3 +80,104 @@ export async function checkFitIdDuplicates(fitIds: string[], userId: string): Pr
 
   return existing;
 }
+
+/** Metadata about an existing transaction that an incoming row matched. */
+export interface ExactDuplicateMatchInfo {
+  id: number;
+  date: string;
+  amount: number;
+  source: string | null;
+}
+
+/**
+ * Like `checkDuplicates`, but also returns the matched transaction's id /
+ * date / amount / source so the UI can show "Matches existing transaction #X".
+ * Picks the lowest-id match per hash on collision (stable, deterministic).
+ *
+ * The Set-returning helper above is unchanged so other callers (csv-parser,
+ * staging upload, reconcile) keep their current contract.
+ */
+export async function findDuplicateMatches(
+  hashes: string[],
+  userId: string,
+): Promise<Map<string, ExactDuplicateMatchInfo>> {
+  const out = new Map<string, ExactDuplicateMatchInfo>();
+  if (hashes.length === 0) return out;
+
+  const batchSize = 900;
+  for (let i = 0; i < hashes.length; i += batchSize) {
+    const batch = hashes.slice(i, i + batchSize);
+    const rows = await db
+      .select({
+        id: schema.transactions.id,
+        hash: schema.transactions.importHash,
+        date: schema.transactions.date,
+        amount: schema.transactions.amount,
+        source: schema.transactions.source,
+      })
+      .from(schema.transactions)
+      .where(
+        and(
+          eq(schema.transactions.userId, userId),
+          inArray(schema.transactions.importHash, batch),
+        ),
+      )
+      .all();
+    for (const row of rows) {
+      if (!row.hash) continue;
+      const existing = out.get(row.hash);
+      if (!existing || row.id < existing.id) {
+        out.set(row.hash, {
+          id: row.id,
+          date: row.date,
+          amount: Number(row.amount),
+          source: row.source ?? null,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/** fitId-keyed sibling of `findDuplicateMatches`. */
+export async function findFitIdMatches(
+  fitIds: string[],
+  userId: string,
+): Promise<Map<string, ExactDuplicateMatchInfo>> {
+  const out = new Map<string, ExactDuplicateMatchInfo>();
+  if (fitIds.length === 0) return out;
+
+  const batchSize = 900;
+  for (let i = 0; i < fitIds.length; i += batchSize) {
+    const batch = fitIds.slice(i, i + batchSize);
+    const rows = await db
+      .select({
+        id: schema.transactions.id,
+        fitId: schema.transactions.fitId,
+        date: schema.transactions.date,
+        amount: schema.transactions.amount,
+        source: schema.transactions.source,
+      })
+      .from(schema.transactions)
+      .where(
+        and(
+          eq(schema.transactions.userId, userId),
+          inArray(schema.transactions.fitId, batch),
+        ),
+      )
+      .all();
+    for (const row of rows) {
+      if (!row.fitId) continue;
+      const existing = out.get(row.fitId);
+      if (!existing || row.id < existing.id) {
+        out.set(row.fitId, {
+          id: row.id,
+          date: row.date,
+          amount: Number(row.amount),
+          source: row.source ?? null,
+        });
+      }
+    }
+  }
+  return out;
+}

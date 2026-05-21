@@ -25,7 +25,11 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { FileDropZone } from "./components/file-drop-zone";
-import { ImportPreviewDialog, type ProbableDuplicateMatch } from "./components/import-preview-dialog";
+import {
+  ImportPreviewDialog,
+  type ProbableDuplicateMatch,
+  type ExactDuplicateMatch,
+} from "./components/import-preview-dialog";
 import { OfxPreview } from "./components/ofx-preview";
 import {
   InvestmentStatementPreview,
@@ -52,6 +56,7 @@ export default function ImportPage() {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [validRows, setValidRows] = useState<PreviewRow[]>([]);
   const [duplicateRows, setDuplicateRows] = useState<PreviewRow[]>([]);
+  const [duplicateMatches, setDuplicateMatches] = useState<ExactDuplicateMatch[]>([]);
   const [probableDuplicates, setProbableDuplicates] = useState<ProbableDuplicateMatch[]>([]);
   const [errorRows, setErrorRows] = useState<Array<{ rowIndex: number; message: string }>>([]);
   const [isImporting, setIsImporting] = useState(false);
@@ -182,6 +187,7 @@ export default function ImportPage() {
         setAppliedTemplateId(data.appliedTemplateId ?? null);
         setValidRows(data.valid ?? []);
         setDuplicateRows(data.duplicates ?? []);
+        setDuplicateMatches(data.duplicateMatches ?? []);
         setProbableDuplicates(data.probableDuplicates ?? []);
         setErrorRows(data.errors ?? []);
         setPreviewOpen(true);
@@ -300,6 +306,7 @@ export default function ImportPage() {
         setCsvHeaders(data.headers ?? []);
         setValidRows(data.valid ?? []);
         setDuplicateRows(data.duplicates ?? []);
+        setDuplicateMatches(data.duplicateMatches ?? []);
         setProbableDuplicates(data.probableDuplicates ?? []);
         setErrorRows(data.errors ?? []);
         setMappingDialogOpen(false);
@@ -661,6 +668,7 @@ export default function ImportPage() {
         onOpenChange={setPreviewOpen}
         validRows={validRows}
         duplicateRows={duplicateRows}
+        duplicateMatches={duplicateMatches}
         probableDuplicates={probableDuplicates}
         errorRows={errorRows}
         onConfirm={handleImportConfirm}

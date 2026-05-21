@@ -45,12 +45,26 @@ export interface ProbableDuplicateMatch {
   };
 }
 
+/** Exact-match duplicate (fitId or import_hash) — surfaced for UI explanation. */
+export interface ExactDuplicateMatch {
+  rowIndex: number;
+  matchBasis: "fit_id" | "import_hash";
+  matchedTx: {
+    id: number;
+    date: string;
+    amount: number;
+    source: string | null;
+  };
+}
+
 interface ImportPreviewDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   validRows: PreviewRow[];
   duplicateRows: PreviewRow[];
   errorRows: Array<{ rowIndex: number; message: string }>;
+  /** Per-row "Matches existing transaction #X" detail for exact duplicates. */
+  duplicateMatches?: ExactDuplicateMatch[];
   /** Issue #65: warning surface — these stay in valid and commit unless skipped. */
   probableDuplicates?: ProbableDuplicateMatch[];
   onConfirm: (rows: RawTransaction[], forceImportIndices: number[], skipIndices: number[]) => void;
@@ -70,6 +84,7 @@ export function ImportPreviewDialog({
   validRows,
   duplicateRows,
   errorRows,
+  duplicateMatches = [],
   probableDuplicates = [],
   onConfirm,
   isImporting,
@@ -82,6 +97,7 @@ export function ImportPreviewDialog({
   const [includeDuplicates, setIncludeDuplicates] = useState<Set<number>>(new Set());
   const [skipProbable, setSkipProbable] = useState<Set<number>>(new Set());
   const [expandedProbable, setExpandedProbable] = useState<Set<number>>(new Set());
+  const [expandedDuplicate, setExpandedDuplicate] = useState<Set<number>>(new Set());
   const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
 
   const toggleDuplicate = (rowIndex: number) => {
@@ -111,6 +127,15 @@ export function ImportPreviewDialog({
     });
   };
 
+  const toggleExpandDuplicate = (rowIndex: number) => {
+    setExpandedDuplicate((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowIndex)) next.delete(rowIndex);
+      else next.add(rowIndex);
+      return next;
+    });
+  };
+
   const skipAllProbable = () => {
     setSkipProbable(new Set(probableDuplicates.map((p) => p.rowIndex)));
   };
@@ -123,6 +148,8 @@ export function ImportPreviewDialog({
   const duplicateIndices = new Set(duplicateRows.map((r) => r.rowIndex));
   const probableByRowIndex = new Map<number, ProbableDuplicateMatch>();
   for (const p of probableDuplicates) probableByRowIndex.set(p.rowIndex, p);
+  const duplicateByRowIndex = new Map<number, ExactDuplicateMatch>();
+  for (const d of duplicateMatches) duplicateByRowIndex.set(d.rowIndex, d);
 
   const probableNotSkipped = probableDuplicates.length - skipProbable.size;
   const importCount = validRows.length - skipProbable.size + includeDuplicates.size;
@@ -241,6 +268,8 @@ export function ImportPreviewDialog({
                 const isProbable = !isDuplicate && !!probable;
                 const isSkipped = isProbable && skipProbable.has(row.rowIndex);
                 const isExpanded = isProbable && expandedProbable.has(row.rowIndex);
+                const dupMatch = isDuplicate ? duplicateByRowIndex.get(row.rowIndex) : undefined;
+                const isDupExpanded = isDuplicate && expandedDuplicate.has(row.rowIndex);
                 const rowClass = isDuplicate && !isForced
                   ? "bg-amber-500/10 text-muted-foreground"
                   : isProbable
@@ -280,9 +309,22 @@ export function ImportPreviewDialog({
                       <TableCell className="text-xs">{row.category || "—"}</TableCell>
                       <TableCell>
                         {isDuplicate ? (
-                          <Badge variant="secondary" className="text-[10px] bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30">
-                            Duplicate
-                          </Badge>
+                          dupMatch ? (
+                            <button
+                              type="button"
+                              onClick={() => toggleExpandDuplicate(row.rowIndex)}
+                              className="inline-flex items-center gap-1"
+                              title="Click to view match details"
+                            >
+                              <Badge variant="secondary" className="text-[10px] bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30 cursor-pointer hover:bg-amber-500/30">
+                                Duplicate
+                              </Badge>
+                            </button>
+                          ) : (
+                            <Badge variant="secondary" className="text-[10px] bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30">
+                              Duplicate
+                            </Badge>
+                          )
                         ) : isProbable ? (
                           <button
                             type="button"
@@ -319,6 +361,29 @@ export function ImportPreviewDialog({
                             </div>
                             <div className="text-orange-700 dark:text-orange-300 font-medium">
                               Score {probable.matchScore.toFixed(2)} · {probable.matchReason}
+                            </div>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    {isDuplicate && isDupExpanded && dupMatch && (
+                      <TableRow key={`${row.rowIndex}-dup-detail`} className="bg-amber-500/10 border-l-2 border-amber-500/50">
+                        <TableCell colSpan={7} className="text-xs text-foreground px-6 py-3">
+                          <div className="space-y-1">
+                            <div>
+                              Matches existing transaction <span className="font-mono text-amber-700 dark:text-amber-300">#{dupMatch.matchedTx.id}</span>
+                              {dupMatch.matchedTx.source && (
+                                <> (source: <span className="font-mono">{dupMatch.matchedTx.source}</span>)</>
+                              )}
+                            </div>
+                            <div className="text-muted-foreground">
+                              Existing: <span className="font-mono text-foreground">{dupMatch.matchedTx.date}</span> <span className="font-mono text-foreground">${dupMatch.matchedTx.amount.toFixed(2)}</span>
+                            </div>
+                            <div className="text-amber-700 dark:text-amber-300 font-medium">
+                              {dupMatch.matchBasis === "fit_id"
+                                ? "Exact match · bank-provided fitId"
+                                : "Exact match · date + account + amount + payee"}
+                              {!isForced && " · check the box above to import anyway"}
                             </div>
                           </div>
                         </TableCell>
