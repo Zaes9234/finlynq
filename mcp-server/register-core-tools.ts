@@ -402,7 +402,7 @@ const supportedCurrencyEnum = z.enum(
  */
 function streamDRefuse(table: "accounts" | "categories" | "goals" | "loans" | "subscriptions" | "portfolio_holdings") {
   return sqliteErr(
-    `Stdio MCP cannot create or update ${table} after Stream D Phase 4. The display name requires a DEK that the stdio transport doesn't carry. Use the HTTP MCP transport instead, or set the row up via the web UI.`,
+    `Stdio MCP cannot create or update ${table} after Stream D Phase 4. The display name requires a DEK that the stdio transport doesn't carry. Use the HTTP MCP transport instead, or set the row up via the web UI.\n\nSee pf-app/docs/architecture/stdio-mcp-write-decision.md for the permanent-vs-fixable tradeoff analysis (Option A, FINLYNQ-5).`,
   );
 }
 
