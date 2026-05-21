@@ -210,6 +210,48 @@ function csrfCheck(request: NextRequest): NextResponse | null {
 }
 
 /**
+ * SHA-256 hashes of framework-injected inline <style> blocks (FINLYNQ-83 phase 3).
+ *
+ * These are the inline CSS blocks emitted into the SSR HTML by Next.js itself
+ * — today there's exactly one, the 222-byte stylesheet Next.js bakes into its
+ * default `_global-error.html` (the 500 page) and the equivalent `<style>` that
+ * the in-bundle error / not-found React boundary injects at runtime. Both
+ * render the identical CSS string, so a single hash covers both surfaces.
+ *
+ * Extraction: `node` walked `.next/server/app/_global-error.html` plus the
+ * SSR chunks under `.next/server/chunks/ssr/`, regex-matched every
+ * `<style>...</style>` block, and hashed the inner text with SHA-256.
+ *
+ * The hash is appended to BOTH the enforcing `style-src` (after phase 5 flips
+ * `'unsafe-inline'` out) AND the Report-Only `style-src` today (so the
+ * Report-Only sink stops logging the not-found / 500 pages as violations).
+ *
+ * Re-snapshotting: any Next.js minor bump that touches the error-page CSS
+ * (rare — the string hasn't changed since Next 12) will surface as
+ * `[csp-report]` lines on /not-found / /error after deploy. Re-run the
+ * extraction and update this const.
+ *
+ * Hash for the current Next.js (^16, app router): the 222-byte error CSS.
+ */
+const FRAMEWORK_STYLE_HASHES = [
+  "'sha256-ybR9Y4T3awQNBE4FheACcusKsc8nree1t2vQRl3tP7w='",
+] as const;
+
+/**
+ * SHA-256 hashes of library-injected inline styles — Recharts SVG attrs,
+ * framer-motion runtime <style> blocks, etc. (FINLYNQ-83 phase 4).
+ *
+ * Currently empty: phase 4 lands AFTER ≥7 days of Report-Only telemetry from
+ * prod, at which point we journalctl-grep `[csp-report]` lines, extract every
+ * distinct `style-sample` from the violations, and populate this list. Keeping
+ * the const here so phase 4 is a one-file edit.
+ *
+ * HASH SNAPSHOT FOR <recharts@TBD, framer-motion@TBD> — when populated, name
+ * the exact versions in this comment so dep bumps surface as drift.
+ */
+const LIBRARY_STYLE_HASHES: readonly string[] = [];
+
+/**
  * Generate a cryptographically random nonce for per-request CSP.
  * 16 random bytes encoded as base64 — meets the CSP spec's recommendation
  * (≥128 bits of entropy). `crypto.randomUUID` would also work but base64
@@ -387,10 +429,21 @@ export function middleware(request: NextRequest) {
   // Route-aware in the same way as the enforcing CSP: `scriptSrc`,
   // `imgSrc`, and `connectSrc` are already computed per-request based on
   // `isWebsite`, so reusing them here keeps the two policies in sync.
+  // Report-Only style-src includes the framework + library hash sets (phase
+  // 3 + 4 deliverables). Each hash drops a known framework / library inline
+  // <style> block from the violation log. Today phase 3 covers the Next.js
+  // error-page hash; phase 4 will append the Recharts / framer-motion set
+  // after ≥7 days of prod telemetry.
+  const reportOnlyStyleSrc = [
+    "style-src 'self'",
+    ...FRAMEWORK_STYLE_HASHES,
+    ...LIBRARY_STYLE_HASHES,
+  ].join(" ");
+
   const reportOnlyDirectives = [
     "default-src 'self'",
     scriptSrc,
-    "style-src 'self'",
+    reportOnlyStyleSrc,
     imgSrc,
     "font-src 'self'",
     connectSrc,
