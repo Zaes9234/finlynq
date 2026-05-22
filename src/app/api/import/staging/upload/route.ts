@@ -46,7 +46,7 @@
 import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
@@ -62,8 +62,11 @@ import { isSupportedCurrency } from "@/lib/fx/supported-currencies";
 import type { DateFormatOverride } from "@/lib/csv-parser";
 import { parseOfxToCanonical } from "@/lib/external-import/parsers/ofx";
 import { parseQfxToCanonical } from "@/lib/external-import/parsers/qfx";
-import { detectProbableDuplicates } from "@/lib/external-import/duplicate-detect";
-import { buildDuplicateCandidatePool } from "@/lib/external-import/duplicate-detect-pool";
+// Removed in the 2026-05-22 two-ledger refactor: probable-duplicate fuzzy
+// matching (buildDuplicateCandidatePool / detectProbableDuplicates) is no
+// longer run at file-upload time. Exact match against bank_transactions
+// is the only file-side dedup; fuzzy matching belongs on the bank-ledger
+// → transactions reconciliation surface (future).
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
 
@@ -352,90 +355,36 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Exact-match dedup pass (fit_id + import_hash). Same as reconcile
-    // classifier — rows that already exist in `transactions` flip to EXISTING.
+    // ─── File → bank_transactions dedup (exact-only) ─────────────────────
+    //
+    // Two-ledger refactor (2026-05-22): file-to-bank-ledger dedup is
+    // exact-match only. The previous probable-duplicate (fuzzy) pass
+    // queried `transactions` for FX-spread / date-drift heuristics — but
+    // that conflated "what the bank reported" with "what's in my live
+    // view." Post-refactor:
+    //
+    //   - File → bank_transactions: exact match only (import_hash + fit_id
+    //     via checkDuplicates / checkFitIdDuplicates, both now reading
+    //     bank_transactions).
+    //   - bank_transactions → transactions: future reconciliation surface
+    //     with multiple match strategies (out of scope for this route;
+    //     the staged-detail GET surfaces auto-match suggestions between
+    //     staged rows and live transactions for the two-pane UI).
+    //
+    // `dedupStatus` stays a three-value column on staged_transactions for
+    // schema stability — the `'probable_duplicate'` value is no longer
+    // produced by this route but the DB CHECK constraint still permits it
+    // (legacy rows from before the refactor may still carry it).
     const fitIds = shaped.filter((r) => r.fitId).map((r) => r.fitId!);
     const hashes = shaped.filter((r) => r.accountId !== null).map((r) => r.hash);
     const existingFitIds = await checkFitIdDuplicates(fitIds, userId);
     const existingHashes = await checkDuplicates(hashes, userId);
 
-    const exactMatchedTxIds = new Set<number>();
-    const fitIdHits = fitIds.filter((f) => existingFitIds.has(f));
-    const hashHits = hashes.filter((h) => existingHashes.has(h));
-    if (fitIdHits.length > 0 || hashHits.length > 0) {
-      // Pull the matched transaction ids so the probable-duplicate pass
-      // doesn't also flag the same existing row. Mirrors reconcile.ts.
-      // inArray(col, []) renders as `false` in drizzle so OR is safe to use
-      // unconditionally — the empty arm just contributes nothing.
-      const matchRows = await db
-        .select({ id: schema.transactions.id })
-        .from(schema.transactions)
-        .where(
-          and(
-            eq(schema.transactions.userId, userId),
-            or(
-              inArray(schema.transactions.fitId, fitIdHits),
-              inArray(schema.transactions.importHash, hashHits),
-            ),
-          ),
-        )
-        .all();
-      for (const m of matchRows) exactMatchedTxIds.add(m.id);
-    }
     for (const r of shaped) {
       const isFitHit = !!r.fitId && existingFitIds.has(r.fitId);
       const isHashHit = r.accountId !== null && existingHashes.has(r.hash);
       if (isFitHit || isHashHit) {
         r.dedupStatus = "existing";
-      }
-    }
-
-    // Probable-duplicate pass: rows still NEW with a resolved account.
-    const candidates = shaped.filter(
-      (r) => r.dedupStatus === "new" && r.accountId !== null,
-    );
-    if (candidates.length > 0) {
-      const accountIds = Array.from(new Set(candidates.map((r) => r.accountId!)));
-      const dates = candidates.map((r) => r.date).sort();
-      const dateMin = dates[0];
-      const dateMax = dates[dates.length - 1];
-      const pool = await buildDuplicateCandidatePool({
-        userId,
-        dek,
-        accountIds,
-        dateMin,
-        dateMax,
-        dateToleranceDays: tolerance,
-      });
-      if (exactMatchedTxIds.size > 0) {
-        for (const arr of pool.byAccount.values()) {
-          for (let i = arr.length - 1; i >= 0; i--) {
-            if (exactMatchedTxIds.has(arr[i].id)) arr.splice(i, 1);
-          }
-        }
-      }
-      const matches = detectProbableDuplicates(
-        candidates.map((c) => ({
-          rowIndex: c.rowIndex,
-          date: c.date,
-          accountId: c.accountId!,
-          amount: c.amount,
-          payeePlain: c.payee,
-          importHash: c.hash,
-        })),
-        pool,
-        {
-          dateToleranceDays: tolerance,
-          amountTolerancePct: 0,
-          amountToleranceFloor: 0.005,
-          scoreThreshold: 0.5,
-        },
-      );
-      const matchedRowIndices = new Set(matches.map((m) => m.rowIndex));
-      for (const r of candidates) {
-        if (matchedRowIndices.has(r.rowIndex)) {
-          r.dedupStatus = "probable_duplicate";
-        }
       }
     }
 
