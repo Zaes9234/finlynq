@@ -91,6 +91,23 @@ export function BalanceSummaryCard({
         ? "text-rose-700"
         : "text-sky-700";
 
+  // Tone-paired label + value colors. `text-muted-foreground` looked dim
+  // in dark mode on the tinted backgrounds (the card uses light-tone
+  // bg-*-50/60 colors which stay light in dark mode); explicit *-900 /
+  // *-700 pairs read cleanly in both themes.
+  const labelTone =
+    status === "balanced"
+      ? "text-emerald-700"
+      : status === "mismatch"
+        ? "text-rose-700"
+        : "text-sky-700";
+  const valueTone =
+    status === "balanced"
+      ? "text-emerald-900"
+      : status === "mismatch"
+        ? "text-rose-900"
+        : "text-sky-900";
+
   return (
     <Card className={tone}>
       <CardContent className="py-2.5 px-3">
@@ -98,7 +115,7 @@ export function BalanceSummaryCard({
           <Icon className={`h-4 w-4 ${iconTone} shrink-0 mt-1`} />
           <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-2 text-sm">
             <div>
-              <div className="text-xs text-muted-foreground">
+              <div className={`text-xs ${labelTone}`}>
                 {latestAnchor ? (
                   <>
                     Bank says (as of{" "}
@@ -108,18 +125,18 @@ export function BalanceSummaryCard({
                   <>Bank says (no anchor yet)</>
                 )}
               </div>
-              <div className="font-mono font-medium">
+              <div className={`font-mono font-medium ${valueTone}`}>
                 {fmt(bankSideLatest, currency)}
               </div>
             </div>
             <div>
-              <div className="text-xs text-muted-foreground">Finlynq has</div>
-              <div className="font-mono font-medium">
+              <div className={`text-xs ${labelTone}`}>Finlynq has</div>
+              <div className={`font-mono font-medium ${valueTone}`}>
                 {fmt(systemSideLatest, currency)}
               </div>
             </div>
             <div>
-              <div className="text-xs text-muted-foreground">
+              <div className={`text-xs ${labelTone}`}>
                 {status === "no_anchor" ? "Status" : "Delta"}
               </div>
               {status === "balanced" && (

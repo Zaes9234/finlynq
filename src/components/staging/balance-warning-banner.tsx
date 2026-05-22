@@ -107,13 +107,13 @@ export function BalanceWarningBanner({
                   <th className="text-right px-2 py-1.5 font-medium">Δ</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-amber-100">
+              <tbody className="divide-y divide-amber-100 text-amber-950">
                 {warnings.map((w) => (
                   <tr key={w.date}>
                     <td className="px-2 py-1.5 font-mono">{w.date}</td>
                     <td className="px-2 py-1.5">
                       <span className="font-mono">{w.priorAnchorDate}</span>
-                      <span className="text-muted-foreground ml-1">
+                      <span className="text-amber-800/80 ml-1">
                         ({fmt(w.priorAnchorBalance, currency)})
                       </span>
                     </td>
