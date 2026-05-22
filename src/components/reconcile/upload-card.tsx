@@ -18,6 +18,12 @@ export interface TemplateOption {
   skipFooterRows?: number;
   dateFormatOverride?: DateFormatOverrideUi | null;
   defaultCurrency?: string | null;
+  /** The default account configured on the template (account name string
+   *  from `import_templates.default_account`). Picking the template pre-fills
+   *  the account dropdown when this name matches one of the user's accounts.
+   *  Without this, anchor upserts skipped (staged_imports.bound_account_id
+   *  stays NULL → approve-time gate fails). */
+  defaultAccount?: string | null;
 }
 
 /**
@@ -73,9 +79,12 @@ export function ReconcileUploadCard({
     useState<DateFormatOverrideUi>("auto");
   const [defaultCurrency, setDefaultCurrency] = useState<string>("");
 
-  /** Apply a picked template's parser knobs to the panel. Template wins;
-   *  any value the user typed before picking is overwritten. Statement
-   *  balance is intentionally NOT touched — that changes per upload. */
+  /** Apply a picked template's parser knobs + default account to the form.
+   *  Template wins; any value the user typed before picking is overwritten.
+   *  Statement balance is intentionally NOT touched — that changes per
+   *  upload. The default-account resolution matches by name against the
+   *  `accounts` prop; a no-match (renamed/deleted account) leaves the
+   *  account dropdown untouched so the user can pick manually. */
   const applyTemplateKnobs = (templateId: string) => {
     if (!templateId) return;
     const tpl = templates.find((t) => String(t.id) === templateId);
@@ -84,6 +93,10 @@ export function ReconcileUploadCard({
     setSkipFooterRows(String(tpl.skipFooterRows ?? 0));
     setDateFormatOverride(tpl.dateFormatOverride ?? "auto");
     setDefaultCurrency(tpl.defaultCurrency ?? "");
+    if (tpl.defaultAccount) {
+      const match = accounts.find((a) => a.name === tpl.defaultAccount);
+      if (match) setSelectedAccountId(String(match.id));
+    }
   };
 
   const accountItems = accounts.map((a) => ({

@@ -308,6 +308,10 @@ export default function ReconcilePage() {
         skipFooterRows: t.skipFooterRows,
         dateFormatOverride: t.dateFormatOverride,
         defaultCurrency: t.defaultCurrency,
+        // 2026-05-22 — propagate so picking a template auto-fills the
+        // account dropdown. Without this, staged_imports.bound_account_id
+        // stays NULL → anchor upsert skipped at approve time.
+        defaultAccount: t.defaultAccount ?? null,
       })),
     [templates],
   );
