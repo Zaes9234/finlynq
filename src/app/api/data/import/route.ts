@@ -38,6 +38,8 @@ interface BackupData {
     transactions?: Row[];
     transactionSplits?: Row[];
     portfolioHoldings?: Row[];
+    /** Two-ledger refactor (2026-05-22) — bank-side persistent ledger. */
+    bankTransactions?: Row[];
     budgets?: Row[];
     budgetTemplates?: Row[];
     loans?: Row[];
@@ -294,6 +296,11 @@ export async function POST(request: NextRequest) {
     }
 
     await db.delete(schema.transactions).where(eq(schema.transactions.userId, userId));
+    // Two-ledger refactor (2026-05-22) — delete bank_transactions AFTER
+    // transactions since `transactions.bank_transaction_id` has ON DELETE
+    // SET NULL; deleting transactions first leaves the bank-ledger rows
+    // unreferenced, then the user_id-scoped delete drops them cleanly.
+    await db.delete(schema.bankTransactions).where(eq(schema.bankTransactions.userId, userId));
     await db.delete(schema.portfolioHoldings).where(eq(schema.portfolioHoldings.userId, userId));
     await db.delete(schema.categories).where(eq(schema.categories.userId, userId));
     await db.delete(schema.accounts).where(eq(schema.accounts.userId, userId));
@@ -354,6 +361,64 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Two-ledger refactor (2026-05-22) — restore bank_transactions BEFORE
+    // transactions so the FK target exists when transactions.bank_transaction_id
+    // is remapped through the bankTxIdMap below. Per-row remap mirrors the
+    // transactions pattern: accountId is required (NULL would break the
+    // unique index per CLAUDE.md "account_id precondition"), payee/note/tags/
+    // account_name re-encrypt under user DEK, source coerces to the bank-
+    // ledger subset of TransactionSource. UUIDs are remapped (gen_random_uuid()
+    // default in the migration will assign fresh ones via .returning()).
+    const bankTxIdMap = new Map<string, string>();
+    if (d.bankTransactions?.length) {
+      const BANK_LEDGER_SOURCES_RESTORE = new Set(["import", "connector", "backup_restore"]);
+      const BANK_TX_ENC_FIELDS = ["payee", "note", "tags", "accountName"] as const;
+      const remapped = d.bankTransactions
+        .map((row) => {
+          const { id: _id, userId: _uid, accountId, source: rawSource, ...rest } = row;
+          if (accountId == null) return null;
+          const newAccountId = accountIdMap.get(accountId as number);
+          if (newAccountId == null) {
+            throw new Error(
+              `Backup bank_transactions references unknown accountId=${String(accountId)} — accounts section missing or inconsistent`,
+            );
+          }
+          const src =
+            typeof rawSource === "string" && BANK_LEDGER_SOURCES_RESTORE.has(rawSource)
+              ? rawSource
+              : "backup_restore";
+          const withFks = {
+            ...rest,
+            userId,
+            accountId: newAccountId,
+            source: src,
+            // Force encryption_tier='user' on restore — the operator is
+            // restoring into an authenticated session with a DEK in scope,
+            // and the original-tier may have been mid-upgrade in the
+            // source DB. Re-encrypt under the local user DEK below.
+            encryptionTier: "user",
+          };
+          return encryptRowFields(dek, withFks, BANK_TX_ENC_FIELDS);
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null);
+      if (remapped.length > 0) {
+        const inserted = await db
+          .insert(schema.bankTransactions)
+          .values(remapped as (typeof schema.bankTransactions.$inferInsert)[])
+          .returning({ id: schema.bankTransactions.id });
+        // Walk parallel arrays — `remapped` skipped null-accountId rows so we
+        // need an index that tracks the same skipping pattern on the source.
+        let outIdx = 0;
+        for (const old of d.bankTransactions) {
+          if (old.accountId == null) continue;
+          if (inserted[outIdx]) {
+            bankTxIdMap.set(String(old.id), inserted[outIdx].id as string);
+          }
+          outIdx++;
+        }
+      }
+    }
+
     // Insert transactions, remapping FK references. Plaintext text fields are
     // encrypted at the boundary; `v1:` ciphertext from a same-account backup
     // passes through unchanged.
@@ -365,7 +430,7 @@ export async function POST(request: NextRequest) {
     // happened to match.
     const txnIdMap = new Map<number, number>();
     if (d.transactions?.length) {
-      const remapped = d.transactions.map(({ id: _id, userId: _uid, accountId, categoryId, source: rawSource, ...rest }) => {
+      const remapped = d.transactions.map(({ id: _id, userId: _uid, accountId, categoryId, bankTransactionId: rawBankTxId, source: rawSource, ...rest }) => {
         // Issue #28: a backup that pre-dates the audit-fields migration has
         // no `source` per row — fall back to 'backup_restore'. Newer
         // backups round-trip the original surface (CSV-imported stays
@@ -395,12 +460,24 @@ export async function POST(request: NextRequest) {
           }
           mappedCategoryId = newId;
         }
+        // Two-ledger refactor — remap bank_transaction_id via bankTxIdMap
+        // (UUID → UUID). Pre-refactor backups have no column; the property
+        // is absent and `mappedBankTxId` stays NULL (acceptable lineage
+        // loss for old backups, same shape as pre-audit-trio rows).
+        let mappedBankTxId: string | null = null;
+        if (typeof rawBankTxId === "string" && rawBankTxId) {
+          mappedBankTxId = bankTxIdMap.get(rawBankTxId) ?? null;
+          // No throw on miss — the bank_transactions section may be absent
+          // in older backups, in which case lineage is lost but the
+          // transaction still restores correctly.
+        }
         const withFks = {
           ...rest,
           userId,
           accountId: mappedAccountId,
           categoryId: mappedCategoryId,
           source: coerceSourceForRestore(rawSource),
+          bankTransactionId: mappedBankTxId,
         };
         return encryptRowFields(dek, withFks, TX_ENC_FIELDS);
       });

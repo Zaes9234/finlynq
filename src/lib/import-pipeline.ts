@@ -6,8 +6,10 @@ import {
   checkFitIdDuplicates,
   findDuplicateMatches,
   findFitIdMatches,
+  assignOccurrenceIndices,
   type ExactDuplicateMatchInfo,
 } from "./import-hash";
+import { upsertBankTransaction, type BankLedgerSource } from "./bank-ledger";
 import { applyRulesToBatch, type TransactionRule } from "./auto-categorize";
 import { computePureActionPatch } from "./rules/execute";
 import type { ConditionGroup, Action } from "./rules/schema";
@@ -69,6 +71,14 @@ export interface RawTransaction {
    *  so the UI can display them as linked siblings. Every row in one group
    *  shares the same linkId; unset for standalone transactions. */
   linkId?: string;
+  /**
+   * Two-ledger refactor (2026-05-22) — pre-resolved `bank_transactions.id`
+   * lineage. Honored only when `executeImport` is called with
+   * `bankLedgerMode: 'preserve_ids'` (backup-restore flow). For the default
+   * `'merge'` mode this field is ignored; the helper computes a fresh
+   * upsert id per row.
+   */
+  bankTransactionId?: string | null;
 }
 
 /** Per-row explanation for an exact-match duplicate, mirrors `DuplicateMatch`. */
@@ -337,6 +347,36 @@ async function runProbableDuplicateDetection(
   }
 }
 
+/**
+ * Bank-ledger integration mode for {@link executeImport}.
+ *
+ *  - `'merge'` (default for new imports): each non-duplicate row is
+ *     upserted into `bank_transactions` and its returned id stamped onto
+ *     the `transactions` INSERT as `bank_transaction_id`.
+ *  - `'preserve_ids'` (backup-restore): the caller has already resolved
+ *     `bankTransactionId` on each `RawTransaction` via the `bankTxIdMap`
+ *     remap. The per-row upsert is skipped; the FK is stamped through.
+ *  - `'skip'` (test / opt-out): no bank-ledger writes at all.
+ *     `transactions.bank_transaction_id` stays NULL.
+ */
+export type BankLedgerMode = "merge" | "preserve_ids" | "skip";
+
+export interface ExecuteImportOptions {
+  /** Default: 'merge'. */
+  bankLedgerMode?: BankLedgerMode;
+  /**
+   * Display-filename for `bank_transactions.source_filenames`. Appended
+   * via `array_append` on every re-import hit. NULL skips the append.
+   */
+  filename?: string | null;
+  /**
+   * Lineage hint — the `staged_imports` row this batch came from. NULL
+   * for direct-import paths (legacy self-hosted email webhook,
+   * backup-restore).
+   */
+  stagedImportId?: string | null;
+}
+
 export async function executeImport(
   rows: RawTransaction[],
   forceImportIndices: number[] = [],
@@ -347,7 +387,11 @@ export async function executeImport(
   // import flow. Connector orchestrators (WP, future brokerages) call into
   // reconciliation.ts directly and pass 'connector' on those INSERTs.
   txSource: "import" | "connector" = "import",
+  options: ExecuteImportOptions = {},
 ): Promise<ImportResult> {
+  const bankLedgerMode: BankLedgerMode = options.bankLedgerMode ?? "merge";
+  const filename = options.filename ?? null;
+  const stagedImportId = options.stagedImportId ?? null;
   if (rows.length === 0) {
     return { total: 0, imported: 0, skippedDuplicates: 0 };
   }
@@ -411,6 +455,14 @@ export async function executeImport(
     importHash: string;
     fitId: string | null;
     linkId: string | null;
+    /** Filled in below before INSERT, depending on `bankLedgerMode`. */
+    bankTransactionId: string | null;
+    /** Plaintext payee — needed for {@link upsertBankTransaction} since
+     *  the bank-ledger row is encrypted under the same DEK as the
+     *  transactions.payee column. */
+    payeePlaintext: string;
+    notePlaintext: string;
+    tagsPlaintext: string;
     rowIndex: number;
   }> = [];
 
@@ -492,6 +544,10 @@ export async function executeImport(
       importHash: hash,
       fitId: row.fitId ?? null,
       linkId: row.linkId ?? null,
+      bankTransactionId: row.bankTransactionId ?? null,
+      payeePlaintext: row.payee ?? "",
+      notePlaintext: row.note ?? "",
+      tagsPlaintext: row.tags ?? "",
       rowIndex: i,
     });
   }
@@ -699,6 +755,72 @@ export async function executeImport(
     }
   }
 
+  // ─── Bank-ledger upsert pass (2026-05-22 two-ledger refactor) ────────
+  //
+  // For every row about to land in `transactions`, ensure a matching row
+  // exists in `bank_transactions` and capture its id for the lineage FK.
+  // Occurrence indices are deterministic within this batch via
+  // `assignOccurrenceIndices` — same-day collisions across rows in the
+  // SAME upload get distinct 0,1,2,… so the unique constraint
+  // (user_id, account_id, import_hash, occurrence_index) doesn't collapse
+  // them. Cross-batch collisions (re-uploading a file with already-
+  // approved rows) are idempotent via ON CONFLICT DO UPDATE inside the
+  // helper — but those rows are filtered out as duplicates upstream
+  // already (the bank-ledger dedup check), so this loop only sees fresh
+  // rows in steady state.
+  //
+  // `bankLedgerMode === 'preserve_ids'` (backup-restore) skips the upsert
+  // entirely and trusts the caller to have stamped the FK via the
+  // bankTxIdMap remap. `'skip'` leaves the FK NULL on every row (test /
+  // opt-out).
+  //
+  // `txSource` ('import' | 'connector') maps directly to the bank-ledger
+  // source enum — `BankLedgerSource` is a strict subset of
+  // `TransactionSource`.
+  if (bankLedgerMode === "merge" && toInsert.length > 0) {
+    const bankSource: BankLedgerSource = txSource;
+    const occurrenceIndices = assignOccurrenceIndices(
+      toInsert.map((r) => ({ accountId: r.accountId, hash: r.importHash })),
+    );
+    for (let j = 0; j < toInsert.length; j++) {
+      const row = toInsert[j];
+      // Skip rows whose caller pre-resolved the FK (e.g., the staging
+      // approve flow's transfer-pair bucket, which mints both legs'
+      // bank-ledger rows server-side before calling executeImport).
+      if (row.bankTransactionId) continue;
+      try {
+        const { id } = await upsertBankTransaction(userDek ?? null, {
+          userId,
+          accountId: row.accountId,
+          importHash: row.importHash,
+          occurrenceIndex: occurrenceIndices[j],
+          fitId: row.fitId,
+          date: row.date,
+          amount: row.amount,
+          currency: row.currency,
+          enteredAmount: row.enteredAmount,
+          enteredCurrency: row.enteredCurrency,
+          enteredFxRate: row.enteredFxRate,
+          quantity: row.quantity,
+          payee: row.payeePlaintext,
+          note: row.notePlaintext || null,
+          tags: row.tagsPlaintext || null,
+          source: bankSource,
+          filename,
+          originalStagedImportId: stagedImportId,
+        });
+        row.bankTransactionId = id;
+      } catch (err) {
+        importErrors.push(
+          `Row ${row.rowIndex + 1}: bank-ledger upsert failed (${err instanceof Error ? err.message : "Unknown error"})`,
+        );
+        // Continue — the transaction row will land with NULL
+        // bank_transaction_id; lineage is lost but the import still
+        // succeeds. The audit-invariants check (Phase 5) surfaces this.
+      }
+    }
+  }
+
   // Batch insert — encrypt text fields at the boundary (hash was computed on
   // plaintext above, so dedup stays stable across imports). Phase 6
   // (2026-04-29) dropped the legacy portfolio_holding text column; the
@@ -706,7 +828,14 @@ export async function executeImport(
   // is stripped before each insert via destructuring.
   for (let i = 0; i < toInsert.length; i += batchSize) {
     const batch = toInsert.slice(i, i + batchSize);
-    const values = batch.map(({ rowIndex: _, portfolioHolding: _ph, ...rest }) => {
+    const values = batch.map(({
+      rowIndex: _,
+      portfolioHolding: _ph,
+      payeePlaintext: _pp,
+      notePlaintext: _np,
+      tagsPlaintext: _tp,
+      ...rest
+    }) => {
       // Issue #28: stamp the writer surface explicitly. Default 'import'
       // covers CSV/Excel/PDF/OFX/email; connector orchestrators pass
       // 'connector' so reconciliation lineage stays distinct from

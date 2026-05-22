@@ -49,13 +49,30 @@ type TxRow = {
   tags: string;
   importHash: string | null;
   fitId: string | null;
+  bankTransactionId?: string | null;
+};
+
+type BankTxRow = {
+  id: string;
+  userId: string;
+  accountId: number;
+  importHash: string;
+  occurrenceIndex: number;
+  fitId: string | null;
+  date: string;
+  amount: number;
+  currency: string;
+  payee: string;
+  source: string;
+  encryptionTier: string;
 };
 
 const store: {
   accounts: AccountRow[];
   categories: CategoryRow[];
   transactions: TxRow[];
-} = { accounts: [], categories: [], transactions: [] };
+  bankTransactions: BankTxRow[];
+} = { accounts: [], categories: [], transactions: [], bankTransactions: [] };
 
 type Cond =
   | { __kind: "eq"; col: unknown; val: unknown }
@@ -104,12 +121,13 @@ vi.mock("@/lib/crypto/envelope", async () => {
 vi.mock("@/db", () => {
   const schema = schemaModule;
 
-  type TableKey = "accounts" | "categories" | "transactions";
+  type TableKey = "accounts" | "categories" | "transactions" | "bankTransactions";
 
   function matchTable(table: unknown): TableKey | null {
     if (table === schema.accounts) return "accounts";
     if (table === schema.categories) return "categories";
     if (table === schema.transactions) return "transactions";
+    if (table === schema.bankTransactions) return "bankTransactions";
     return null;
   }
 
@@ -133,6 +151,15 @@ vi.mock("@/db", () => {
     [schema.transactions.date, "date"],
     [schema.transactions.importHash, "importHash"],
     [schema.transactions.fitId, "fitId"],
+    // Two-ledger refactor (2026-05-22) — dedup queries hit bank_transactions
+    // now, not transactions. The H-9 tests seed `store.bankTransactions`.
+    [schema.bankTransactions.userId, "userId"],
+    [schema.bankTransactions.importHash, "importHash"],
+    [schema.bankTransactions.fitId, "fitId"],
+    [schema.bankTransactions.id, "id"],
+    [schema.bankTransactions.date, "date"],
+    [schema.bankTransactions.amount, "amount"],
+    [schema.bankTransactions.source, "source"],
   ]);
 
   function evalCond(cond: Cond | null, row: Record<string, unknown>): boolean {
@@ -222,6 +249,7 @@ describe("security: tenant isolation", () => {
     store.accounts.length = 0;
     store.categories.length = 0;
     store.transactions.length = 0;
+    store.bankTransactions.length = 0;
   });
 
   // ── C-3: chat-engine cross-tenant aggregates ──────────────────────
@@ -384,20 +412,22 @@ describe("security: tenant isolation", () => {
 
   describe("import-hash checkDuplicates / checkFitIdDuplicates scope by userId (H-9)", () => {
     it("checkDuplicates does not leak hashes from another user", async () => {
-      // User B has a transaction with a known hash.
-      store.transactions.push({
-        id: 1,
+      // User B has a bank-ledger row with a known hash. Dedup source-of-
+      // truth moved from `transactions` to `bank_transactions` in the
+      // 2026-05-22 two-ledger refactor (see CLAUDE.md / bank-ledger.md).
+      store.bankTransactions.push({
+        id: "00000000-0000-0000-0000-000000000001",
         userId: "user-b",
         accountId: 1,
-        categoryId: null,
+        importHash: "deadbeefcafebabe1234567890abcdef",
+        occurrenceIndex: 0,
+        fitId: null,
         date: "2026-05-01",
         amount: -50,
         currency: "CAD",
         payee: "",
-        note: "",
-        tags: "",
-        importHash: "deadbeefcafebabe1234567890abcdef",
-        fitId: null,
+        source: "import",
+        encryptionTier: "user",
       });
 
       const { checkDuplicates } = await import("@/lib/import-hash");
@@ -417,19 +447,19 @@ describe("security: tenant isolation", () => {
     });
 
     it("checkFitIdDuplicates does not leak fitIds from another user", async () => {
-      store.transactions.push({
-        id: 1,
+      store.bankTransactions.push({
+        id: "00000000-0000-0000-0000-000000000002",
         userId: "user-b",
         accountId: 1,
-        categoryId: null,
+        importHash: "deadbeefcafebabe1234567890abcdef",
+        occurrenceIndex: 0,
+        fitId: "BANK-FIT-001",
         date: "2026-05-01",
         amount: -50,
         currency: "CAD",
         payee: "",
-        note: "",
-        tags: "",
-        importHash: null,
-        fitId: "BANK-FIT-001",
+        source: "import",
+        encryptionTier: "user",
       });
 
       const { checkFitIdDuplicates } = await import("@/lib/import-hash");

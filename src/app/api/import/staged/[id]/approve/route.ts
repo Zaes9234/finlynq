@@ -63,7 +63,8 @@ import {
   defaultHoldingForInvestmentAccount,
   getInvestmentAccountIds,
 } from "@/lib/investment-account";
-import { generateImportHash } from "@/lib/import-hash";
+import { generateImportHash, assignOccurrenceIndices } from "@/lib/import-hash";
+import { upsertBankTransaction } from "@/lib/bank-ledger";
 import { matchesRule, type TransactionRule } from "@/lib/auto-categorize";
 import { computePureActionPatch } from "@/lib/rules/execute";
 import type { ConditionGroup, Action } from "@/lib/rules/schema";
@@ -100,6 +101,7 @@ export async function POST(
       id: schema.stagedImports.id,
       source: schema.stagedImports.source,
       fileFormat: schema.stagedImports.fileFormat,
+      originalFilename: schema.stagedImports.originalFilename,
     })
     .from(schema.stagedImports)
     .where(and(
@@ -450,7 +452,18 @@ export async function POST(
   }));
 
   if (rawForPipeline.length > 0) {
-    const result = await executeImport(rawForPipeline, forceImportIndices, userId, dek);
+    const result = await executeImport(
+      rawForPipeline,
+      forceImportIndices,
+      userId,
+      dek,
+      "import",
+      {
+        bankLedgerMode: "merge",
+        filename: staged.originalFilename ?? null,
+        stagedImportId: staged.id,
+      },
+    );
     imported += result.imported;
     if (result.errors) importErrors.push(...result.errors);
     // Mark cash rows as materialized for the partial-approve cleanup. We
@@ -534,6 +547,61 @@ export async function POST(
       const aHash = generateImportHash(pair.a.date, aAcctId, pair.a.amount, aPayee);
       const bHash = generateImportHash(pair.b.date, bAcctId, pair.b.amount, bPayee);
 
+      // Two-ledger refactor: mint a bank_transactions row for each leg
+      // before the INSERT and stamp the FK onto the transactions row.
+      // Both legs come from the bank's record of the same transfer, so
+      // both get their own immutable bank-ledger entries.
+      const aOccIdx = assignOccurrenceIndices([{ accountId: aAcctId, hash: aHash }])[0];
+      const bOccIdx = assignOccurrenceIndices([{ accountId: bAcctId, hash: bHash }])[0];
+      let aBankTxId: string | null = null;
+      let bBankTxId: string | null = null;
+      try {
+        const aResult = await upsertBankTransaction(dek, {
+          userId,
+          accountId: aAcctId,
+          importHash: aHash,
+          occurrenceIndex: aOccIdx,
+          fitId: pair.a.fitId ?? null,
+          date: pair.a.date,
+          amount: pair.a.amount,
+          currency: (pair.a.currency ?? "CAD").toUpperCase(),
+          enteredAmount: pair.a.enteredAmount ?? null,
+          enteredCurrency: pair.a.enteredCurrency ?? null,
+          quantity: pair.a.quantity ?? null,
+          payee: aPayee,
+          note: aNote || null,
+          source: "import",
+          filename: staged.originalFilename ?? null,
+          originalStagedImportId: staged.id,
+        });
+        aBankTxId = aResult.id;
+        const bResult = await upsertBankTransaction(dek, {
+          userId,
+          accountId: bAcctId,
+          importHash: bHash,
+          occurrenceIndex: bOccIdx,
+          fitId: pair.b.fitId ?? null,
+          date: pair.b.date,
+          amount: pair.b.amount,
+          currency: (pair.b.currency ?? "CAD").toUpperCase(),
+          enteredAmount: pair.b.enteredAmount ?? null,
+          enteredCurrency: pair.b.enteredCurrency ?? null,
+          quantity: pair.b.quantity ?? null,
+          payee: bPayee,
+          note: bNote || null,
+          source: "import",
+          filename: staged.originalFilename ?? null,
+          originalStagedImportId: staged.id,
+        });
+        bBankTxId = bResult.id;
+      } catch (err) {
+        importErrors.push(
+          `Transfer pair ${pair.a.rowIndex + 1}/${pair.b.rowIndex + 1}: bank-ledger upsert failed (${err instanceof Error ? err.message : "Unknown error"})`,
+        );
+        // Continue — both legs land with NULL bank_transaction_id; lineage
+        // is lost but the transfer pair still materializes correctly.
+      }
+
       const aValues = {
         userId,
         date: pair.a.date,
@@ -552,6 +620,7 @@ export async function POST(
         importHash: aHash,
         fitId: pair.a.fitId ?? null,
         linkId,
+        bankTransactionId: aBankTxId,
         source: "import" as const,
       };
       const bValues = {
@@ -572,6 +641,7 @@ export async function POST(
         importHash: bHash,
         fitId: pair.b.fitId ?? null,
         linkId,
+        bankTransactionId: bBankTxId,
         source: "import" as const,
       };
       // Single INSERT with both rows. Drizzle's PG driver runs this as
@@ -618,6 +688,50 @@ export async function POST(
       const isIncoming = Number(r.amount) > 0;
       const fromAccountId = isIncoming ? r.targetAccountId! : fromAcctId;
       const toAccountId = isIncoming ? fromAcctId : r.targetAccountId!;
+
+      // Two-ledger refactor: mint a bank-ledger row for the leg whose data
+      // came from the staged row (the bank's record of the transfer). The
+      // synthetic peer leg gets NULL — it's not in any bank statement we
+      // have. When isIncoming, the staged side is the TO leg; otherwise
+      // the FROM leg.
+      const stagedPayee = decode(r.payee, r.encryptionTier) ?? "";
+      const stagedHash = generateImportHash(
+        r.date,
+        fromAcctId,
+        r.amount,
+        stagedPayee,
+      );
+      const stagedOccIdx = assignOccurrenceIndices([
+        { accountId: fromAcctId, hash: stagedHash },
+      ])[0];
+      let stagedBankTxId: string | null = null;
+      try {
+        const upsertResult = await upsertBankTransaction(dek, {
+          userId,
+          accountId: fromAcctId,
+          importHash: stagedHash,
+          occurrenceIndex: stagedOccIdx,
+          fitId: r.fitId ?? null,
+          date: r.date,
+          amount: r.amount,
+          currency: (r.currency ?? "CAD").toUpperCase(),
+          enteredAmount: r.enteredAmount ?? null,
+          enteredCurrency: r.enteredCurrency ?? null,
+          quantity: r.quantity ?? null,
+          payee: stagedPayee,
+          note: decode(r.note, r.encryptionTier) || null,
+          source: "import",
+          filename: staged.originalFilename ?? null,
+          originalStagedImportId: staged.id,
+        });
+        stagedBankTxId = upsertResult.id;
+      } catch (err) {
+        importErrors.push(
+          `Row ${r.rowIndex + 1}: bank-ledger upsert failed (${err instanceof Error ? err.message : "Unknown error"})`,
+        );
+        // Continue — transfer pair still materializes; FK left null.
+      }
+
       const result = await createTransferPair({
         userId,
         dek,
@@ -634,6 +748,8 @@ export async function POST(
           return undefined;
         })(),
         txSource: "import",
+        fromLegBankTransactionId: !isIncoming ? stagedBankTxId : null,
+        toLegBankTransactionId: isIncoming ? stagedBankTxId : null,
       });
       if (!result.ok) {
         importErrors.push(

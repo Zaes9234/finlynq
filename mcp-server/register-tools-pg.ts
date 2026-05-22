@@ -75,6 +75,7 @@ import {
 import { parseOfx } from "../src/lib/ofx-parser";
 import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline";
 import { generateImportHash } from "../src/lib/import-hash";
+import { upsertBankTransaction } from "../src/lib/bank-ledger";
 import {
   detectProbableDuplicates,
   type DuplicateCandidatePool,
@@ -10472,7 +10473,7 @@ export function registerPgTools(
       const stagedRows = await q(
         db,
         sql`
-          SELECT id, source, file_format, status FROM staged_imports
+          SELECT id, source, file_format, status, original_filename FROM staged_imports
           WHERE id = ${stagedImportId} AND user_id = ${userId}
         `,
       );
@@ -10698,6 +10699,12 @@ export function registerPgTools(
             canonicalForce,
             userId,
             dek,
+            "import",
+            {
+              bankLedgerMode: "merge",
+              filename: (staged.original_filename as string | null) ?? null,
+              stagedImportId: String(staged.id),
+            },
           );
           imported += result.imported ?? 0;
           if (result.errors) importErrors.push(...result.errors);
@@ -10772,13 +10779,62 @@ export function registerPgTools(
             bPayee,
           );
 
+          // Two-ledger refactor — mint a bank_transactions row per leg.
+          let aBankTxId: string | null = null;
+          let bBankTxId: string | null = null;
+          try {
+            const aResult = await upsertBankTransaction(dek, {
+              userId,
+              accountId: aAcctId,
+              importHash: aHash,
+              occurrenceIndex: 0,
+              fitId: pair.a.fit_id ? String(pair.a.fit_id) : null,
+              date: String(pair.a.date),
+              amount: Number(pair.a.amount),
+              currency: (String(pair.a.currency ?? "CAD")).toUpperCase(),
+              enteredAmount: pair.a.entered_amount != null ? Number(pair.a.entered_amount) : null,
+              enteredCurrency: pair.a.entered_currency ? String(pair.a.entered_currency) : null,
+              quantity: pair.a.quantity != null ? Number(pair.a.quantity) : null,
+              payee: aPayee,
+              note: aNote || null,
+              source: "import",
+              filename: (staged.original_filename as string | null) ?? null,
+              originalStagedImportId: String(staged.id),
+            });
+            aBankTxId = aResult.id;
+            const bResult = await upsertBankTransaction(dek, {
+              userId,
+              accountId: bAcctId,
+              importHash: bHash,
+              occurrenceIndex: 0,
+              fitId: pair.b.fit_id ? String(pair.b.fit_id) : null,
+              date: String(pair.b.date),
+              amount: Number(pair.b.amount),
+              currency: (String(pair.b.currency ?? "CAD")).toUpperCase(),
+              enteredAmount: pair.b.entered_amount != null ? Number(pair.b.entered_amount) : null,
+              enteredCurrency: pair.b.entered_currency ? String(pair.b.entered_currency) : null,
+              quantity: pair.b.quantity != null ? Number(pair.b.quantity) : null,
+              payee: bPayee,
+              note: bNote || null,
+              source: "import",
+              filename: (staged.original_filename as string | null) ?? null,
+              originalStagedImportId: String(staged.id),
+            });
+            bBankTxId = bResult.id;
+          } catch (err) {
+            importErrors.push(
+              `Transfer pair: bank-ledger upsert failed (${err instanceof Error ? err.message : "Unknown error"})`,
+            );
+            // Fall through — legs land with NULL bank_transaction_id.
+          }
+
           // Single INSERT — both legs land or neither.
           await db.execute(sql`
             INSERT INTO transactions (
               user_id, date, account_id, category_id, currency, amount,
               entered_currency, entered_amount, entered_fx_rate, quantity,
               portfolio_holding_id, note, payee, tags, import_hash, fit_id,
-              link_id, source
+              link_id, source, bank_transaction_id
             ) VALUES (
               ${userId}, ${String(pair.a.date)}, ${aAcctId}, ${categoryId},
               ${(String(pair.a.currency ?? "CAD")).toUpperCase()}, ${Number(pair.a.amount)},
@@ -10788,7 +10844,7 @@ export function registerPgTools(
               ${aHoldingId}, ${encryptField(dek, aNote) ?? ""},
               ${encryptField(dek, aPayee) ?? ""},
               ${encryptField(dek, mergeTags(pair.a.tags as string | null | undefined, sourceTag)) ?? ""},
-              ${aHash}, ${pair.a.fit_id ?? null}, ${linkId}, 'import'
+              ${aHash}, ${pair.a.fit_id ?? null}, ${linkId}, 'import', ${aBankTxId}
             ), (
               ${userId}, ${String(pair.b.date)}, ${bAcctId}, ${categoryId},
               ${(String(pair.b.currency ?? "CAD")).toUpperCase()}, ${Number(pair.b.amount)},
@@ -10798,7 +10854,7 @@ export function registerPgTools(
               ${bHoldingId}, ${encryptField(dek, bNote) ?? ""},
               ${encryptField(dek, bPayee) ?? ""},
               ${encryptField(dek, mergeTags(pair.b.tags as string | null | undefined, sourceTag)) ?? ""},
-              ${bHash}, ${pair.b.fit_id ?? null}, ${linkId}, 'import'
+              ${bHash}, ${pair.b.fit_id ?? null}, ${linkId}, 'import', ${bBankTxId}
             )
           `);
           imported += 2;
@@ -10834,6 +10890,42 @@ export function registerPgTools(
           const fromAccountId = isIncoming ? Number(r.target_account_id) : fromAcctId;
           const toAccountId = isIncoming ? fromAcctId : Number(r.target_account_id);
           const tagsForRow = mergeTags(r.tags as string | null | undefined, sourceTag);
+
+          // Two-ledger refactor — bank-ledger upsert for the staged side.
+          const stagedPayee = decodeStagedField(r.payee as string | null, tier) ?? "";
+          const stagedHash = generateImportHash(
+            String(r.date),
+            fromAcctId,
+            Number(r.amount),
+            stagedPayee,
+          );
+          let stagedBankTxId: string | null = null;
+          try {
+            const upsertResult = await upsertBankTransaction(dek, {
+              userId,
+              accountId: fromAcctId,
+              importHash: stagedHash,
+              occurrenceIndex: 0,
+              fitId: r.fit_id ? String(r.fit_id) : null,
+              date: String(r.date),
+              amount: Number(r.amount),
+              currency: (String(r.currency ?? "CAD")).toUpperCase(),
+              enteredAmount: r.entered_amount != null ? Number(r.entered_amount) : null,
+              enteredCurrency: r.entered_currency ? String(r.entered_currency) : null,
+              quantity: r.quantity != null ? Number(r.quantity) : null,
+              payee: stagedPayee,
+              note: decodeStagedField(r.note as string | null, tier) || null,
+              source: "import",
+              filename: (staged.original_filename as string | null) ?? null,
+              originalStagedImportId: String(staged.id),
+            });
+            stagedBankTxId = upsertResult.id;
+          } catch (err) {
+            importErrors.push(
+              `Row ${Number(r.row_index) + 1}: bank-ledger upsert failed (${err instanceof Error ? err.message : "Unknown error"})`,
+            );
+          }
+
           const result = await createTransferPair({
             userId,
             dek,
@@ -10850,6 +10942,8 @@ export function registerPgTools(
               return undefined;
             })(),
             txSource: "import",
+            fromLegBankTransactionId: !isIncoming ? stagedBankTxId : null,
+            toLegBankTransactionId: isIncoming ? stagedBankTxId : null,
           });
           if (!result.ok) {
             importErrors.push(

@@ -12,23 +12,9 @@
  *   templateId        — optional saved CSV column mapping
  *   tolerance         — optional probable-duplicate fuzz window (days, default 3)
  *   statementBalance  — optional, CSV-only — user-typed statement balance
- *   action            — F-53E (FINLYNQ-58) merge prompt control:
- *                       'merge'  — append to existing pending batch named in `mergeIntoStagedImportId`
- *                       'new'    — bypass overlap detection, create a new batch
- *                       absent   — first-pass: server detects overlap and returns
- *                                  `{ data: { mergeCandidate } }` instead of inserting.
- *   mergeIntoStagedImportId — required when action='merge'; UUID of the target
- *                       `staged_imports` row (must belong to caller + status='pending').
  *
  * Returns:
- *   First-pass (no action) when overlap detected:
- *     { success: true, data: { mergeCandidate: { stagedImportId, dateRangeStart,
- *       dateRangeEnd, rowCount } } }     // HTTP 200; no DB write
- *   First-pass (no overlap) OR action='new':
- *     { stagedImportId, redirectTo, format, counts, tolerance }   // 200; new batch
- *   action='merge':
- *     { stagedImportId, redirectTo, format, counts: { appended, alreadyInBatch,
- *       skippedDuplicate, errors }, merged: true }                // 200; appended
+ *   { stagedImportId, redirectTo, format, counts, tolerance }   // HTTP 200
  *
  * Encryption tier: uploads happen inside an authenticated session, so the
  * DEK is available — staged rows land directly at `encryption_tier='user'`
@@ -38,14 +24,17 @@
  *
  * `import_hash` is computed at ingest from plaintext payee — load-bearing
  * per CLAUDE.md (the hash is dedup-stable and must NEVER be recomputed).
- * Merge-append rows carry the SAME hash they'd carry in a fresh batch.
  *
- * F-53E (FINLYNQ-58) — Already-imported marker: every newly-staged row is
- * probed against `transactions.import_hash` for the same user+accountId;
- * hits land at `reconcile_state='skipped_duplicate'` (default-excluded
- * from approve). Per CLAUDE.md "Do NOT silently flip skipped_duplicate
- * back to unmatched": the marker is only set at INSERT time; subsequent
- * row PATCHes preserve whatever value the user toggled to.
+ * Already-imported marker: every newly-staged row is probed against
+ * `bank_transactions.import_hash` for the same user (dedup source moved
+ * from `transactions` in the 2026-05-22 two-ledger refactor — a deleted
+ * system-side transaction no longer creates a re-import gap); hits land at
+ * `reconcile_state='skipped_duplicate'` (default-excluded from approve).
+ * Re-uploading an identical file produces a staged batch whose rows are
+ * all flagged `skipped_duplicate`; the user rejects with one click. Per
+ * CLAUDE.md "Do NOT silently flip skipped_duplicate back to unmatched":
+ * the marker is only set at INSERT time; subsequent row PATCHes preserve
+ * whatever value the user toggled to.
  *
  * `transactions.source` is stamped at approve time in the existing
  * `/api/import/staged/[id]/approve` endpoint. This route writes the
@@ -57,7 +46,7 @@
 import { randomUUID } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { and, eq, gte, inArray, lte, or } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
@@ -152,41 +141,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ─── F-53E merge prompt control (FINLYNQ-58) ─────────────────────────
-    // action='merge' → append non-collision rows to an existing pending
-    //                  staged_imports row named in mergeIntoStagedImportId.
-    // action='new'   → bypass overlap detection (user picked "Create new
-    //                  batch" in the merge modal).
-    // absent         → first-pass; server runs overlap detection and may
-    //                  return { mergeCandidate } instead of inserting.
-    const actionRaw = formData.get("action");
-    const action =
-      actionRaw && typeof actionRaw === "string" && actionRaw.trim()
-        ? actionRaw.trim().toLowerCase()
-        : null;
-    if (action !== null && action !== "merge" && action !== "new") {
-      return NextResponse.json(
-        { error: "action must be one of: 'merge', 'new' (or absent)" },
-        { status: 400 },
-      );
-    }
-    const mergeTargetIdRaw = formData.get("mergeIntoStagedImportId");
-    const mergeTargetId =
-      mergeTargetIdRaw && typeof mergeTargetIdRaw === "string" && mergeTargetIdRaw.trim()
-        ? mergeTargetIdRaw.trim()
-        : null;
-    if (action === "merge" && !mergeTargetId) {
-      return NextResponse.json(
-        { error: "action='merge' requires mergeIntoStagedImportId" },
-        { status: 400 },
-      );
-    }
-    if (action !== "merge" && mergeTargetId) {
-      return NextResponse.json(
-        { error: "mergeIntoStagedImportId is only valid when action='merge'" },
-        { status: 400 },
-      );
-    }
     // ─── FINLYNQ-54 parser knobs ─────────────────────────────────────
     // All five are optional; the form sends defaults when collapsed.
     const skipHeaderRowsRaw = formData.get("skipHeaderRows");
@@ -260,37 +214,6 @@ export async function POST(request: NextRequest) {
         );
       }
       userStatementBalance = n;
-    }
-
-    // ─── F-53E merge target pre-validation (FINLYNQ-58) ──────────────────
-    // When action='merge', verify the target staged_import belongs to this
-    // user AND is still in status='pending' BEFORE parsing the file.
-    // CLAUDE.md "Do NOT merge across users" + "Do NOT merge into a batch in
-    // status != 'pending'". Cross-tenant attacks 404 here. We re-load the
-    // row inside the transaction below, but failing fast saves a parse
-    // round-trip when the target is obviously wrong.
-    let mergeTarget: typeof schema.stagedImports.$inferSelect | null = null;
-    if (action === "merge" && mergeTargetId) {
-      const candidate = await db
-        .select()
-        .from(schema.stagedImports)
-        .where(and(
-          eq(schema.stagedImports.id, mergeTargetId),
-          eq(schema.stagedImports.userId, userId),
-        ))
-        .get();
-      if (!candidate) {
-        // Same 404 shape as the rest of the staging surface — never leak
-        // whether the id exists for another tenant.
-        return NextResponse.json({ error: "Merge target not found" }, { status: 404 });
-      }
-      if (candidate.status !== "pending") {
-        return NextResponse.json(
-          { error: "Merge target is not pending — partially-approved batches are immutable" },
-          { status: 409 },
-        );
-      }
-      mergeTarget = candidate;
     }
 
     // Resolve the bound account name if accountId is supplied. OFX/QFX
@@ -544,46 +467,6 @@ export async function POST(request: NextRequest) {
     //
     // Skips when accountId is null (CSV without a bound account — no useful
     // grain for overlap detection; the user reviews per-row in /import/pending).
-    if (action === null && accountId !== null && dateRangeStart && dateRangeEnd) {
-      const overlapping = await db
-        .select({
-          id: schema.stagedImports.id,
-          dateRangeStart: schema.stagedImports.dateRangeStart,
-          dateRangeEnd: schema.stagedImports.dateRangeEnd,
-          rowCount: schema.stagedImports.totalRowCount,
-          originalFilename: schema.stagedImports.originalFilename,
-        })
-        .from(schema.stagedImports)
-        .where(and(
-          eq(schema.stagedImports.userId, userId),
-          eq(schema.stagedImports.boundAccountId, accountId),
-          eq(schema.stagedImports.status, "pending"),
-          // YYYY-MM-DD strings sort lexicographically as dates do. Drizzle
-          // `lte`/`gte` on a text column does the right thing here.
-          lte(schema.stagedImports.dateRangeStart, dateRangeEnd),
-          gte(schema.stagedImports.dateRangeEnd, dateRangeStart),
-        ))
-        .all();
-      if (overlapping.length > 0) {
-        // Surface the most-recent candidate (lexically-largest id is a
-        // reasonable proxy — UUID v4 doesn't sort by creation but the
-        // first match is fine for the modal; the user picks).
-        const candidate = overlapping[0];
-        return NextResponse.json({
-          success: true,
-          data: {
-            mergeCandidate: {
-              stagedImportId: candidate.id,
-              dateRangeStart: candidate.dateRangeStart,
-              dateRangeEnd: candidate.dateRangeEnd,
-              rowCount: candidate.rowCount,
-              originalFilename: candidate.originalFilename,
-            },
-          },
-        });
-      }
-    }
-
     // ─── F-53E already-imported probe (FINLYNQ-58) ───────────────────────
     // Per-row: does any `transactions.import_hash` already match this
     // user+account? If yes, the staged row lands at
@@ -606,14 +489,16 @@ export async function POST(request: NextRequest) {
         .filter((r) => r.accountId !== null)
         .map((r) => r.hash);
       if (hashesToProbe.length > 0) {
-        // Uses the new idx_transactions_user_import_hash index. SELECT
-        // import_hash because we only need the column we're matching on.
+        // Two-ledger refactor (2026-05-22) — dedup source moved from
+        // `transactions.import_hash` to `bank_transactions.import_hash`.
+        // A deleted system-side transaction no longer creates a re-import
+        // gap; the bank ledger remembers every approved row.
         const hits = await db
-          .select({ importHash: schema.transactions.importHash })
-          .from(schema.transactions)
+          .select({ importHash: schema.bankTransactions.importHash })
+          .from(schema.bankTransactions)
           .where(and(
-            eq(schema.transactions.userId, userId),
-            inArray(schema.transactions.importHash, hashesToProbe),
+            eq(schema.bankTransactions.userId, userId),
+            inArray(schema.bankTransactions.importHash, hashesToProbe),
           ))
           .all();
         for (const h of hits) {
@@ -688,97 +573,15 @@ export async function POST(request: NextRequest) {
       reconcileState: alreadyImportedHashes.has(r.hash) ? "skipped_duplicate" : "unmatched",
     });
 
-    // ─── F-53E merge-append path (FINLYNQ-58) ────────────────────────────
-    // action='merge' — append non-collision rows to mergeTarget instead of
-    // creating a new staged_imports row. Collisions are dropped silently
-    // (surfaced as a count in the response). Load-bearing rules:
-    //   - import_hash is NOT recomputed (build-row uses r.hash verbatim).
-    //   - Existing staged_imports row is NOT deleted/replaced (append-only).
-    //   - The target's `created_at`, parser knobs, statement_period_*, etc.
-    //     stay untouched; we only bump totalRowCount + duplicateCount and
-    //     widen date_range_* to encompass the new rows.
-    if (action === "merge" && mergeTarget) {
-      // Inside the same `dev` row, collisions can come from two sources:
-      //  (a) collisions with rows already in the existing staged batch
-      //      (import_hash match) — drop silently with a count.
-      //  (b) collisions with rows in the live `transactions` table —
-      //      already handled by the alreadyImportedHashes probe above;
-      //      those rows ARE appended but flagged 'skipped_duplicate'.
-      const existingInBatch = await db
-        .select({ importHash: schema.stagedTransactions.importHash })
-        .from(schema.stagedTransactions)
-        .where(eq(schema.stagedTransactions.stagedImportId, mergeTarget.id))
-        .all();
-      const existingHashSet = new Set<string>(
-        existingInBatch.map((r) => r.importHash).filter((h): h is string => !!h),
-      );
-      const appendable = shaped.filter((r) => !existingHashSet.has(r.hash));
-      const alreadyInBatch = shaped.length - appendable.length;
-
-      // Widen the target's date_range to encompass appendable rows. NULL
-      // pre-existing range_* (legacy batches) takes the new range outright.
-      const appendableDates = appendable.map((r) => r.date).sort();
-      const newRangeStart = appendableDates[0] ?? null;
-      const newRangeEnd = appendableDates[appendableDates.length - 1] ?? null;
-      const widenedStart =
-        mergeTarget.dateRangeStart && newRangeStart
-          ? (mergeTarget.dateRangeStart < newRangeStart ? mergeTarget.dateRangeStart : newRangeStart)
-          : (mergeTarget.dateRangeStart ?? newRangeStart);
-      const widenedEnd =
-        mergeTarget.dateRangeEnd && newRangeEnd
-          ? (mergeTarget.dateRangeEnd > newRangeEnd ? mergeTarget.dateRangeEnd : newRangeEnd)
-          : (mergeTarget.dateRangeEnd ?? newRangeEnd);
-
-      let appendedSkippedDuplicate = 0;
-      await db.transaction(async (tx) => {
-        if (appendable.length > 0) {
-          const chunk = 500;
-          for (let i = 0; i < appendable.length; i += chunk) {
-            const slice = appendable.slice(i, i + chunk);
-            await tx.insert(schema.stagedTransactions).values(
-              slice.map((r) => buildStagedRow(r, mergeTarget!.id)),
-            );
-          }
-          appendedSkippedDuplicate = appendable.filter(
-            (r) => alreadyImportedHashes.has(r.hash),
-          ).length;
-        }
-        // Bump totalRowCount + duplicateCount on the target. Re-read inside
-        // the transaction to avoid a lost-update race vs other writers.
-        await tx
-          .update(schema.stagedImports)
-          .set({
-            totalRowCount: mergeTarget!.totalRowCount + appendable.length,
-            duplicateCount:
-              mergeTarget!.duplicateCount +
-              appendable.filter((r) => r.dedupStatus !== "new").length,
-            dateRangeStart: widenedStart,
-            dateRangeEnd: widenedEnd,
-          })
-          .where(and(
-            eq(schema.stagedImports.id, mergeTarget!.id),
-            eq(schema.stagedImports.userId, userId),
-          ));
-      });
-
-      return NextResponse.json({
-        stagedImportId: mergeTarget.id,
-        redirectTo: `/import/pending?id=${encodeURIComponent(mergeTarget.id)}`,
-        format: parseResult.format,
-        merged: true,
-        counts: {
-          appended: appendable.length,
-          alreadyInBatch,
-          skippedDuplicate: appendedSkippedDuplicate,
-          errors: rowErrors.length + parseResult.errors.length,
-        },
-        tolerance,
-      });
-    }
-
-    // ─── Default path: create a new staged_imports row ───────────────────
-    // Reached when action='new' (overlap modal said "Create new batch") OR
-    // when no overlap was detected on the first pass.
+    // ─── Create a new staged_imports row ─────────────────────────────────
+    // Two-ledger refactor (2026-05-22) — the F-53E overlap-merge prompt
+    // was removed. Re-uploads of an identical file still produce a staged
+    // batch, but every row is auto-flagged `reconcile_state='skipped_duplicate'`
+    // via the bank-ledger probe above (the `alreadyImportedHashes` set);
+    // the user sees "X of N already in your bank ledger" and rejects the
+    // batch with one click. Row-level dedup against `bank_transactions`
+    // subsumes both the previous "merge into pending batch" and "create
+    // alongside" cases.
     const stagedImportId = randomUUID();
     const expiresAt = new Date(Date.now() + STAGE_TTL_MS);
     const dupCount = shaped.filter((r) => r.dedupStatus !== "new").length;

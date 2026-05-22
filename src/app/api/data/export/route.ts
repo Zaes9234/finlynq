@@ -5,6 +5,7 @@ import { pbkdf2Sync, randomBytes, createCipheriv } from "crypto";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { tryDecryptField } from "@/lib/crypto/envelope";
+import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { safeErrorMessage } from "@/lib/validate";
 import { validatePasswordStrength } from "@/lib/auth/password-policy";
 
@@ -83,6 +84,46 @@ export function decryptRowFields(
 // it in this list ran `tryDecryptField` over `undefined` strings forever.
 const TX_FIELDS = ["payee", "note", "tags"] as const;
 const SPLIT_FIELDS = ["note", "description", "tags"] as const;
+// Two-ledger refactor (2026-05-22) — bank-ledger rows are encrypted-in-place
+// under either the user DEK ('user' tier, v1: envelope) or PF_STAGING_KEY
+// ('service' tier, sv1: envelope from the email-webhook ingest path). The
+// export decrypts both tiers to plaintext for backup portability.
+const BANK_TX_FIELDS = ["payee", "note", "tags", "accountName"] as const;
+
+/**
+ * Tier-aware row decrypt for bank_transactions. `encryption_tier` column
+ * selects v1: (user DEK) vs sv1: (PF_STAGING_KEY) decryption. Mirrors the
+ * tier-branching read paths in src/app/api/import/staged/[id]/route.ts.
+ */
+function decryptBankLedgerRow(
+  dek: Buffer | null,
+  row: Record<string, unknown>,
+  failures: { count: number },
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...row };
+  const tier = String(row.encryptionTier ?? "user");
+  for (const f of BANK_TX_FIELDS) {
+    const v = out[f];
+    if (typeof v !== "string") continue;
+    if (tier === "service") {
+      try {
+        out[f] = decryptStaged(v) ?? v;
+      } catch {
+        failures.count++;
+        out[f] = null;
+      }
+    } else if (dek) {
+      const dec = tryDecryptField(dek, v, `export.bank_transactions.${f}`);
+      if (dec === null && v.startsWith("v1:")) {
+        out[f] = null;
+        failures.count++;
+      } else {
+        out[f] = dec ?? v;
+      }
+    }
+  }
+  return out;
+}
 
 // POST accepts `{ passphrase: string }` to passphrase-wrap the export â€”
 // Finding #8. Both GET and POST share the same body builder below.
@@ -108,6 +149,7 @@ async function handleExport(request: NextRequest) {
       categories,
       transactions,
       portfolioHoldings,
+      bankTransactions,
       budgets,
       budgetTemplates,
       loans,
@@ -127,6 +169,7 @@ async function handleExport(request: NextRequest) {
       db.select().from(schema.categories).where(eq(schema.categories.userId, userId)),
       db.select().from(schema.transactions).where(eq(schema.transactions.userId, userId)),
       db.select().from(schema.portfolioHoldings).where(eq(schema.portfolioHoldings.userId, userId)),
+      db.select().from(schema.bankTransactions).where(eq(schema.bankTransactions.userId, userId)),
       db.select().from(schema.budgets).where(eq(schema.budgets.userId, userId)),
       db.select().from(schema.budgetTemplates).where(eq(schema.budgetTemplates.userId, userId)),
       db.select().from(schema.loans).where(eq(schema.loans.userId, userId)),
@@ -160,6 +203,9 @@ async function handleExport(request: NextRequest) {
     const decryptedSplits = transactionSplits.map((s) =>
       decryptRowFields(dek, s, SPLIT_FIELDS, failures)
     );
+    const decryptedBankTransactions = bankTransactions.map((b) =>
+      decryptBankLedgerRow(dek, b as Record<string, unknown>, failures)
+    );
 
     const dateStr = new Date().toISOString().slice(0, 10);
     const backup = {
@@ -173,6 +219,7 @@ async function handleExport(request: NextRequest) {
         transactions: decryptedTransactions,
         transactionSplits: decryptedSplits,
         portfolioHoldings,
+        bankTransactions: decryptedBankTransactions,
         budgets,
         budgetTemplates,
         loans,

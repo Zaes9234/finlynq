@@ -258,3 +258,4 @@ What's NOT shipped, ordered by likelihood of next pickup:
 | 2026-05-20 | F-53E overlap-merge prompt + already-imported marker | FINLYNQ-58 |
 | 2026-05-20 | Approve gate: refuse unresolved categories | FINLYNQ-57 |
 | 2026-05-20 | Parser knobs on upload UI | FINLYNQ-54 |
+| 2026-05-22 | **Two-ledger refactor**: F-53E overlap-merge dialog removed; dedup source moved from `transactions.import_hash` → `bank_transactions.import_hash`. Re-uploads still produce a staged batch but every row auto-flagged `skipped_duplicate`. See [bank-ledger.md](architecture/bank-ledger.md). | — |

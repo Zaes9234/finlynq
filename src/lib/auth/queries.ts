@@ -465,6 +465,12 @@ export async function wipeUserDataAndRewrap(
     await tx.delete(s.transactionRules).where(eq(s.transactionRules.userId, userId));
     await tx.delete(s.importTemplates).where(eq(s.importTemplates.userId, userId));
     await tx.delete(s.transactions).where(eq(s.transactions.userId, userId));
+    // Two-ledger refactor (2026-05-22) — delete the bank-side ledger
+    // AFTER transactions because `transactions.bank_transaction_id` has
+    // ON DELETE SET NULL; deleting transactions first means the bank-
+    // ledger rows are no longer referenced and can be safely dropped via
+    // the user_id filter alone (no cross-tenant cascade risk).
+    await tx.delete(s.bankTransactions).where(eq(s.bankTransactions.userId, userId));
     await tx.delete(s.portfolioHoldings).where(eq(s.portfolioHoldings.userId, userId));
     await tx.delete(s.categories).where(eq(s.categories.userId, userId));
     await tx.delete(s.accounts).where(eq(s.accounts.userId, userId));

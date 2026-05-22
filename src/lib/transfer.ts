@@ -200,6 +200,17 @@ export type CreateTransferOpts = {
    * "transfer". Defaults to 'manual' when omitted.
    */
   txSource?: TransactionSource;
+  /**
+   * Two-ledger refactor (2026-05-22) — bank-ledger lineage FKs. The
+   * staging-approve route mints a `bank_transactions` row from the staged
+   * row's data (the bank's record of the transfer) and stamps the id on
+   * whichever leg corresponds to the source statement — typically just
+   * one of the two. The synthetic peer leg is NOT bank-recorded, so its
+   * FK stays NULL. Manual-UI calls and MCP calls don't set either —
+   * they're not import-sourced.
+   */
+  fromLegBankTransactionId?: string | null;
+  toLegBankTransactionId?: string | null;
 };
 
 export type UpdateTransferOpts = {
@@ -742,6 +753,10 @@ export async function createTransferPair(
           source: txSource,
           ...sourceRow,
           linkId,
+          // Two-ledger refactor: bank-statement lineage. Set only by the
+          // staging-approve route's target-account transfer path; manual
+          // UI / MCP calls leave it null.
+          bankTransactionId: opts.fromLegBankTransactionId ?? null,
         })
         .returning({ id: schema.transactions.id });
 
@@ -764,6 +779,7 @@ export async function createTransferPair(
           source: txSource,
           ...destRow,
           linkId,
+          bankTransactionId: opts.toLegBankTransactionId ?? null,
         })
         .returning({ id: schema.transactions.id });
 
@@ -2037,14 +2053,14 @@ export async function createTransferPairViaSql(
             entered_currency, entered_amount, entered_fx_rate,
             payee, note, tags, link_id,
             portfolio_holding_id, quantity,
-            source
+            source, bank_transaction_id
          ) VALUES (
             $1, $2, $3, $4,
             $5, $6,
             $7, $8, $9,
             $10, $11, $12, $13,
             $14, $15,
-            $16
+            $16, $17
          ) RETURNING id`,
         [
           userId, date, fromAcct.id, categoryId,
@@ -2054,6 +2070,10 @@ export async function createTransferPairViaSql(
           fromHoldingId,
           sourceQty,
           txSource,
+          // Two-ledger refactor — bank-statement lineage. Set only by the
+          // staging-approve route (not exposed on MCP stdio today since
+          // stdio doesn't carry a DEK + bank_transactions encryption).
+          opts.fromLegBankTransactionId ?? null,
         ],
       );
       fromTransactionId = sourceIns.rows[0].id;
@@ -2065,14 +2085,14 @@ export async function createTransferPairViaSql(
             entered_currency, entered_amount, entered_fx_rate,
             payee, note, tags, link_id,
             portfolio_holding_id, quantity,
-            source
+            source, bank_transaction_id
          ) VALUES (
             $1, $2, $3, $4,
             $5, $6,
             $7, $8, $9,
             $10, $11, $12, $13,
             $14, $15,
-            $16
+            $16, $17
          ) RETURNING id`,
         [
           userId, date, toAcct.id, categoryId,
@@ -2083,6 +2103,7 @@ export async function createTransferPairViaSql(
           // destQuantity may differ from source quantity (split / merger).
           destQty,
           txSource,
+          opts.toLegBankTransactionId ?? null,
         ],
       );
       toTransactionId = destIns.rows[0].id;

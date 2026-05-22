@@ -371,7 +371,13 @@ export function ImportPreviewDialog({
                         <TableCell colSpan={7} className="text-xs text-foreground px-6 py-3">
                           <div className="space-y-1">
                             <div>
-                              Matches existing transaction <span className="font-mono text-amber-700 dark:text-amber-300">#{dupMatch.matchedTx.id}</span>
+                              {dupMatch.matchedTx.id != null ? (
+                                <>
+                                  Matches existing transaction <span className="font-mono text-amber-700 dark:text-amber-300">#{dupMatch.matchedTx.id}</span>
+                                </>
+                              ) : (
+                                <span className="text-amber-700 dark:text-amber-300">Previously imported (no current transaction)</span>
+                              )}
                               {dupMatch.matchedTx.source && (
                                 <> (source: <span className="font-mono">{dupMatch.matchedTx.source}</span>)</>
                               )}

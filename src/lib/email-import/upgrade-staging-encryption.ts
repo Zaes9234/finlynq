@@ -49,6 +49,8 @@ export interface UpgradeStagingResult {
   scanned: number;
   upgraded: number;
   failed: number;
+  /** Two-ledger refactor (2026-05-22) — same shape, scoped to bank_transactions. */
+  bankLedger?: { scanned: number; upgraded: number; failed: number };
 }
 
 /**
@@ -114,6 +116,84 @@ export async function upgradeStagingEncryption(
     } catch (err) {
       failed++;
       console.warn("[staging-upgrade] row failed", {
+        id: r.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // ─── Bank-ledger upgrade pass (2026-05-22 two-ledger refactor) ───────
+  //
+  // Bank_transactions written by the email-webhook ingest path land at
+  // service-tier (no DEK at receive time). Same logic as staged_transactions:
+  // login-time decrypt under PF_STAGING_KEY, re-encrypt under the user's
+  // DEK, flip the column. `import_hash` and `fit_id` are NEVER touched —
+  // both are plaintext and dedup-stable across the upgrade.
+  //
+  // Per-row try/catch + optimistic WHERE guard mirrors the staging pass.
+  const bankLedger = await upgradeBankLedgerEncryption(userId, dek);
+
+  return { scanned: rows.length, upgraded, failed, bankLedger };
+}
+
+async function upgradeBankLedgerEncryption(
+  userId: string,
+  dek: Buffer,
+): Promise<{ scanned: number; upgraded: number; failed: number }> {
+  const rows = await db
+    .select({
+      id: schema.bankTransactions.id,
+      payee: schema.bankTransactions.payee,
+      note: schema.bankTransactions.note,
+      tags: schema.bankTransactions.tags,
+      accountName: schema.bankTransactions.accountName,
+    })
+    .from(schema.bankTransactions)
+    .where(
+      and(
+        eq(schema.bankTransactions.userId, userId),
+        eq(schema.bankTransactions.encryptionTier, "service"),
+      ),
+    );
+
+  let upgraded = 0;
+  let failed = 0;
+
+  for (const r of rows) {
+    try {
+      const payeePt = decryptStaged(r.payee);
+      const notePt = decryptStaged(r.note);
+      const tagsPt = decryptStaged(r.tags);
+      const acctPt = decryptStaged(r.accountName);
+
+      // payee is NOT NULL on bank_transactions; fall back to empty string
+      // if decrypt returns null (shouldn't happen, but the type is text
+      // not text|null).
+      const payeeCt = encryptField(dek, payeePt ?? "") ?? "";
+      const noteCt = notePt != null ? encryptField(dek, notePt) : null;
+      const tagsCt = tagsPt != null ? encryptField(dek, tagsPt) : null;
+      const acctCt = acctPt != null ? encryptField(dek, acctPt) : null;
+
+      await db
+        .update(schema.bankTransactions)
+        .set({
+          payee: payeeCt,
+          note: noteCt,
+          tags: tagsCt,
+          accountName: acctCt,
+          encryptionTier: "user",
+        })
+        .where(
+          and(
+            eq(schema.bankTransactions.id, r.id),
+            // Optimistic guard — concurrent login already upgraded this row.
+            eq(schema.bankTransactions.encryptionTier, "service"),
+          ),
+        );
+      upgraded++;
+    } catch (err) {
+      failed++;
+      console.warn("[staging-upgrade] bank_transactions row failed", {
         id: r.id,
         err: err instanceof Error ? err.message : String(err),
       });

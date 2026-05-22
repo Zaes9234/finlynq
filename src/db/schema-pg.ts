@@ -118,6 +118,17 @@ export const transactions = pgTable("transactions", {
   // from `link_id`, which the four-check transfer-pair rule reserves for
   // `record_transfer` siblings.
   tradeLinkId: text("trade_link_id"),
+  // Two-ledger import refactor (2026-05-22) — lineage FK back to the bank-
+  // side record of this row. Set on import-sourced INSERTs (executeImport,
+  // createTransferPair source leg, approve route's three buckets); NULL on
+  // manual entries (REST POST /transactions, MCP HTTP record_transaction /
+  // bulk_record_transactions / record_transfer / record_trade). ON DELETE
+  // SET NULL — the bank ledger and the system-side transaction have
+  // independent lifecycles; deleting either does not cascade. After a user
+  // account-move, transactions.account_id may diverge from
+  // bank_transactions.account_id — that's intentional, the FK is lineage
+  // only. Do NOT auto-relink. See docs/architecture/bank-ledger.md.
+  bankTransactionId: uuid("bank_transaction_id"),
 });
 
 // tx_currency_audit — flagged rows where transactions.currency != accounts.currency
@@ -738,6 +749,93 @@ export const stagedTransactions = pgTable("staged_transactions", {
   // to re-link.
   linkedTransactionId: integer("linked_transaction_id").references(
     () => transactions.id,
+    { onDelete: "set null" },
+  ),
+});
+
+// ─── bank_transactions — persistent bank-side ledger (2026-05-22)
+//
+// Two-ledger import refactor. Records every row from every statement the
+// user has ever approved. Re-importing an already-approved row silently
+// bumps `seen_count` / `last_seen_at` / `source_filenames` instead of
+// overwriting anything — content (import_hash, fit_id, date, amount,
+// payee, tx_type) is immutable once written.
+//
+// The `transactions.bank_transaction_id` FK above links the system-side
+// row back to its bank-side lineage. User edits to `transactions` (rename
+// payee, recategorize, split, transfer-pair) never propagate to the bank
+// ledger; bank-side updates from re-imports never overwrite the user's
+// transaction. After a user account-move, `transactions.account_id` and
+// `bank_transactions.account_id` may diverge — that's intentional.
+//
+// Two-tier encryption mirrors staged_transactions:
+//   - 'service' (default at ingest): wrapped with PF_STAGING_KEY (sv1:).
+//     Used by the email-webhook ingest path where no user DEK is in scope.
+//   - 'user': wrapped with the user's DEK (v1:). Approve-time ingest writes
+//     directly to user-tier; the login-time upgrade job
+//     (upgradeStagingEncryption) flips service-tier rows to user-tier when
+//     the DEK becomes available.
+// Read paths branch on `encryption_tier` to pick decryptStaged() vs
+// tryDecryptField(dek, ...).
+//
+// Dedup key is `(user_id, account_id, import_hash, occurrence_index)` —
+// the `occurrence_index` disambiguates intentional same-day duplicates.
+// `(user_id, account_id, fit_id)` is the partial-unique fallback when the
+// bank provides a FITID. CHECK constraints on `encryption_tier` and
+// `source` enforce the enum membership.
+//
+// See pf-app/docs/architecture/bank-ledger.md for the full design and the
+// load-bearing invariants in CLAUDE.md "Two-ledger import model".
+export const bankTransactions = pgTable("bank_transactions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: text("user_id")
+    .notNull()
+    .references(() => users.id, { onDelete: "cascade" }),
+  accountId: integer("account_id")
+    .notNull()
+    .references(() => accounts.id, { onDelete: "cascade" }),
+  importHash: text("import_hash").notNull(),
+  occurrenceIndex: integer("occurrence_index").notNull().default(0),
+  fitId: text("fit_id"),
+  date: text("date").notNull(), // YYYY-MM-DD, matches transactions.date
+  amount: doublePrecision("amount").notNull(),
+  currency: text("currency").notNull(),
+  enteredAmount: doublePrecision("entered_amount"),
+  enteredCurrency: text("entered_currency"),
+  enteredFxRate: doublePrecision("entered_fx_rate"),
+  quantity: doublePrecision("quantity"),
+  // Encrypted-in-place text columns (v1: or sv1: envelope per encryption_tier).
+  payee: text("payee").notNull(),
+  note: text("note"),
+  tags: text("tags"),
+  // Free-text account label from the source file's header. Display-only —
+  // the `account_id` FK is the truth.
+  accountName: text("account_name"),
+  // 'service' | 'user' — CHECK enforced in SQL.
+  encryptionTier: text("encryption_tier").notNull().default("service"),
+  // 'upload' | 'email' | 'connector' | 'mcp_import' | 'backup_restore' —
+  // subset of the SOURCES tuple in src/lib/tx-source.ts. Manual entries
+  // never carry bank-statement lineage; they bypass this table entirely.
+  source: text("source").notNull(),
+  firstSeenAt: timestamp("first_seen_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  lastSeenAt: timestamp("last_seen_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  seenCount: integer("seen_count").notNull().default(1),
+  // Array of filenames this row has appeared in. Append-only. Bumped on
+  // every re-import hit via array_append(EXCLUDED.source_filenames[1]).
+  sourceFilenames: text("source_filenames")
+    .array()
+    .notNull()
+    .default(sql`ARRAY[]::TEXT[]`),
+  // Lineage hint — which staged_imports row first introduced this. NULL
+  // for backfilled rows and for direct-import paths (legacy self-hosted
+  // email webhook + backup-restore) that bypass staging. ON DELETE SET
+  // NULL because staged_imports rows are TTL'd at 60 days.
+  originalStagedImportId: text("original_staged_import_id").references(
+    () => stagedImports.id,
     { onDelete: "set null" },
   ),
 });
