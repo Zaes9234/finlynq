@@ -112,25 +112,21 @@ export function DbPane({
     );
   }
 
-  // 2026-05-24 — "one balance per day" rule: show runningBalance only on
-  // the FIRST row of each day in display order (rows are already sorted
-  // newest-first by the server). Track which dates we've already shown.
+  // 2026-05-24 — "one balance per day" rule: show balances only on the
+  // FIRST row of each day in display order (rows are sorted newest-first
+  // server-side). Tracked independently per column so a date with only a
+  // calculated value still renders something on the first row of the day.
   //
-  // 2026-05-22 — the Balance column header is ALWAYS rendered (was: hidden
-  // when no row had a runningBalance). When no anchor exists, every cell
-  // would be empty otherwise, which made the column look like it didn't
-  // exist at all — confusing on fresh accounts mid-anchor-upload. Now we
-  // render "—" on the first row of each day in that case, signaling
-  // "column exists, balances will land here once an anchor is loaded".
-  const balanceShownForDate = new Set<string>();
-  const dayFirstSeenForFallback = new Set<string>();
-  const anchorShownForDate = new Set<string>();
-
-  // Format the loaded anchor as a small sub-line, e.g. "📌 $1,234.56 (csv)".
-  // Tolerance match against the computed running balance gets a ✓ glyph
-  // to flag "system agrees with the bank" at a glance; a non-match shows
-  // the actual loaded value so the user sees both numbers.
-  const EPSILON = 0.005;
+  // 2026-05-22 — TWO separate columns: "Calculated" (runningBalance,
+  // computed from the latest anchor walking transactions) vs "Loaded"
+  // (anchorBalance, the bank's reported value for the exact date). Headers
+  // always render; cells show "—" when the value is null. Side-by-side
+  // visibility lets the user spot mismatches at a glance — the system's
+  // running sum vs the bank's own report.
+  const calcShownForDate = new Set<string>();
+  const loadedShownForDate = new Set<string>();
+  const dayFirstSeenForCalc = new Set<string>();
+  const dayFirstSeenForLoaded = new Set<string>();
 
   return (
     <div className="flex flex-col h-full">
@@ -143,29 +139,40 @@ export function DbPane({
               <TableHead>Payee</TableHead>
               <TableHead>Type</TableHead>
               <TableHead className="text-right">Amount</TableHead>
-              <TableHead className="text-right">Balance</TableHead>
+              <TableHead
+                className="text-right"
+                title="System's running balance — derived by walking bank rows from the latest loaded anchor"
+              >
+                Calculated
+              </TableHead>
+              <TableHead
+                className="text-right"
+                title="Bank's reported balance — the actual value loaded from a statement anchor for that exact date"
+              >
+                Loaded
+              </TableHead>
               {rowActions && <TableHead className="w-32 text-right">Actions</TableHead>}
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.map((r) => {
               const dimmed = r.linkedStagedRowId != null ? "opacity-70" : "";
-              const showBalance =
-                r.runningBalance != null && !balanceShownForDate.has(r.date);
-              if (showBalance) balanceShownForDate.add(r.date);
-              // Dash fallback — first row of each day when no anchor.
-              const isFirstOfDayNoAnchor =
-                r.runningBalance == null && !dayFirstSeenForFallback.has(r.date);
-              if (isFirstOfDayNoAnchor) dayFirstSeenForFallback.add(r.date);
-              // Loaded anchor for this date — only render once per day.
-              const showAnchor =
-                r.anchorBalance != null && !anchorShownForDate.has(r.date);
-              if (showAnchor) anchorShownForDate.add(r.date);
-              const anchorMatches =
-                showAnchor &&
-                r.runningBalance != null &&
-                r.anchorBalance != null &&
-                Math.abs(r.runningBalance - r.anchorBalance) <= EPSILON;
+              // Calculated column — first row of the day shows the value
+              // when one is computed, otherwise "—" so the column still
+              // signals where balances will appear.
+              const showCalc =
+                r.runningBalance != null && !calcShownForDate.has(r.date);
+              if (showCalc) calcShownForDate.add(r.date);
+              const isFirstOfDayCalcEmpty =
+                r.runningBalance == null && !dayFirstSeenForCalc.has(r.date);
+              if (isFirstOfDayCalcEmpty) dayFirstSeenForCalc.add(r.date);
+              // Loaded column — same pattern: value or "—" on first of day.
+              const showLoaded =
+                r.anchorBalance != null && !loadedShownForDate.has(r.date);
+              if (showLoaded) loadedShownForDate.add(r.date);
+              const isFirstOfDayLoadedEmpty =
+                r.anchorBalance == null && !dayFirstSeenForLoaded.has(r.date);
+              if (isFirstOfDayLoadedEmpty) dayFirstSeenForLoaded.add(r.date);
               return (
                 <TableRow key={r.id} className={dimmed}>
                   <TableCell className="font-mono text-xs">{r.date}</TableCell>
@@ -225,43 +232,34 @@ export function DbPane({
                   <TableCell
                     className="text-right font-mono text-xs"
                     title={
-                      showBalance
-                        ? `End-of-day running balance for ${r.date}`
-                        : isFirstOfDayNoAnchor
-                          ? "No bank-side anchor yet — approve a statement to load balances"
+                      showCalc
+                        ? `Calculated end-of-day balance for ${r.date} (anchor + transactions)`
+                        : isFirstOfDayCalcEmpty
+                          ? "No anchor loaded yet — calculated balance can't be derived"
                           : undefined
                     }
                   >
-                    <div className="flex flex-col items-end leading-tight">
-                      <span>
-                        {showBalance && r.runningBalance != null
-                          ? formatCurrency(r.runningBalance, r.currency || "CAD")
-                          : isFirstOfDayNoAnchor
-                            ? <span className="text-muted-foreground">—</span>
-                            : ""}
-                      </span>
-                      {showAnchor && r.anchorBalance != null && (
-                        <span
-                          className={
-                            anchorMatches
-                              ? "text-[10px] text-emerald-700"
-                              : "text-[10px] text-sky-700"
-                          }
-                          title={
-                            anchorMatches
-                              ? `Bank-loaded anchor (${r.anchorSource ?? "anchor"}) matches`
-                              : `Bank-loaded anchor (${r.anchorSource ?? "anchor"})`
-                          }
-                        >
-                          {anchorMatches ? "✓ anchor" : (
-                            <>
-                              📌{" "}
-                              {formatCurrency(r.anchorBalance, r.currency || "CAD")}
-                            </>
-                          )}
-                        </span>
-                      )}
-                    </div>
+                    {showCalc && r.runningBalance != null
+                      ? formatCurrency(r.runningBalance, r.currency || "CAD")
+                      : isFirstOfDayCalcEmpty
+                        ? <span className="text-muted-foreground">—</span>
+                        : ""}
+                  </TableCell>
+                  <TableCell
+                    className="text-right font-mono text-xs"
+                    title={
+                      showLoaded && r.anchorBalance != null
+                        ? `Bank-reported balance for ${r.date}${r.anchorSource ? ` (${r.anchorSource})` : ""}`
+                        : isFirstOfDayLoadedEmpty
+                          ? "No bank-reported anchor for this date"
+                          : undefined
+                    }
+                  >
+                    {showLoaded && r.anchorBalance != null
+                      ? formatCurrency(r.anchorBalance, r.currency || "CAD")
+                      : isFirstOfDayLoadedEmpty
+                        ? <span className="text-muted-foreground">—</span>
+                        : ""}
                   </TableCell>
                   {rowActions && (
                     <TableCell className="text-right">{rowActions(r)}</TableCell>
