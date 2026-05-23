@@ -1307,6 +1307,31 @@ export const portfolioLotsStatus = pgTable("portfolio_lots_status", {
   notes: text("notes").notNull().default(""),
 });
 
+// ─── portfolio_snapshots — daily per-user/account value (Phase 3, 2026-06-01)
+//
+// One row per (user, day, account). account_id NULL = whole-portfolio
+// aggregate. Stored in the user's reporting currency AT SNAP TIME —
+// retroactive reporting-ccy switches don't re-FX historical bars (TWRR
+// is dimensionless, so a value-chart-currency discontinuity is the
+// only artifact, surfaced via a tooltip).
+//
+// `gaps_filled=true` marks days where price_cache or fx_rates fell
+// back to last-known. UI shows "incomplete history" on ranges
+// containing any gap-filled day.
+export const portfolioSnapshots = pgTable("portfolio_snapshots", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  snapDate: text("snap_date").notNull(),
+  accountId: integer("account_id").references(() => accounts.id, { onDelete: "cascade" }),
+  marketValue: doublePrecision("market_value").notNull(),
+  costBasis: doublePrecision("cost_basis").notNull(),
+  netContribution: doublePrecision("net_contribution").notNull().default(0),
+  currency: text("currency").notNull(),
+  gapsFilled: boolean("gaps_filled").notNull().default(false),
+  source: text("source").notNull().default("cron"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // ─── portfolio_legacy_realized_gain_snapshot — pre-cutover avg-cost gain
 //
 // Avg-cost realized gain ≠ FIFO realized gain on partial-sell users. This

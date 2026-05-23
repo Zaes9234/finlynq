@@ -5474,6 +5474,124 @@ export function registerPgTools(
     }
   );
 
+  // ── get_portfolio_performance_v2 ───────────────────────────────────────────
+  // Phase 3 of plan/portfolio-lots-and-performance.md — TWRR + MWRR + daily
+  // value series from portfolio_snapshots. Distinct from get_portfolio_performance
+  // (which is the avg-cost legacy aggregate); v2 reads pre-built snapshots
+  // populated by the nightly cron + backfill script.
+  server.tool(
+    "get_portfolio_performance_v2",
+    "Time-series performance for the portfolio: daily market_value + cost_basis series, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR. Reads `portfolio_snapshots` populated by the nightly cron + admin backfill script. `gapsFilledDays` count flags any range where price_cache or fx_rates fell back to last-known values.",
+    {
+      period: z.enum(["1m", "3m", "6m", "ytd", "1y", "all"]).optional().describe("Lookback period; defaults to '1y'"),
+      accountId: z.number().int().optional().describe("Scope to one accounts.id; omit for whole-portfolio aggregate"),
+    },
+    async ({ period, accountId }) => {
+      const PERIOD_DAYS: Record<string, number | null> = {
+        "1m": 30, "3m": 90, "6m": 180, ytd: -1, "1y": 365, all: null,
+      };
+      const asOfDate = new Date().toISOString().slice(0, 10);
+      const p = period ?? "1y";
+      let from: string;
+      if (p === "ytd") from = `${asOfDate.slice(0, 4)}-01-01`;
+      else {
+        const days = PERIOD_DAYS[p];
+        if (days == null) from = "1900-01-01";
+        else {
+          const d = new Date(`${asOfDate}T00:00:00Z`);
+          d.setUTCDate(d.getUTCDate() - days);
+          from = d.toISOString().slice(0, 10);
+        }
+      }
+
+      const rowsRaw = await q(db, sql`
+        SELECT
+          snap_date AS date,
+          market_value,
+          cost_basis,
+          net_contribution AS contribution,
+          currency,
+          gaps_filled
+        FROM portfolio_snapshots
+        WHERE user_id = ${userId}
+          AND snap_date >= ${from}
+          AND snap_date <= ${asOfDate}
+          AND ${accountId != null ? sql`account_id = ${accountId}` : sql`account_id IS NULL`}
+        ORDER BY snap_date
+      `);
+      const series = (rowsRaw as Array<{
+        date: string;
+        market_value: number;
+        cost_basis: number;
+        contribution: number;
+        currency: string;
+        gaps_filled: boolean;
+      }>).map((r) => ({
+        date: r.date,
+        marketValue: Number(r.market_value),
+        costBasis: Number(r.cost_basis),
+        contribution: Number(r.contribution),
+        gapsFilled: r.gaps_filled,
+      }));
+
+      const { computeTwrr, annualizeReturn } = await import(
+        "../src/lib/portfolio/performance/twrr"
+      );
+      const { computeMwrr } = await import(
+        "../src/lib/portfolio/performance/mwrr"
+      );
+      const { computeNetContributions } = await import(
+        "../src/lib/portfolio/performance/contributions"
+      );
+
+      const twrr = computeTwrr(
+        series.map((p) => ({
+          date: p.date,
+          marketValue: p.marketValue,
+          contribution: p.contribution,
+        })),
+      );
+      let mwrr: { irr: number; converged: boolean } = { irr: 0, converged: false };
+      if (series.length > 0) {
+        const flows = await computeNetContributions({
+          userId,
+          accountId: accountId ?? null,
+          fromDate: from,
+          toDate: asOfDate,
+        });
+        const startMv = series[0]?.marketValue ?? 0;
+        if (startMv > 0) flows.unshift({ date: from, amount: -startMv });
+        const finalMv = series[series.length - 1]?.marketValue ?? 0;
+        const result = computeMwrr(flows, finalMv, asOfDate);
+        mwrr = { irr: result.irr, converged: result.converged };
+      }
+
+      const periodDays = series.length >= 2
+        ? Math.max(1, Math.round((Date.parse(series[series.length - 1].date) - Date.parse(series[0].date)) / 86400000))
+        : 0;
+      const twrrAnnualized = annualizeReturn(twrr.periodReturn, periodDays);
+
+      return text({
+        success: true,
+        data: {
+          period: p,
+          accountId: accountId ?? null,
+          from,
+          to: asOfDate,
+          currency: (rowsRaw as Array<{ currency?: string }>)[0]?.currency ?? "USD",
+          series,
+          twrr: {
+            period: twrr.periodReturn,
+            annualized: twrrAnnualized,
+            hadContributions: twrr.hadContributions,
+          },
+          mwrr,
+          gapsFilledDays: series.filter((p) => p.gapsFilled).length,
+        },
+      });
+    },
+  );
+
   // ── get_realized_gains ─────────────────────────────────────────────────────
   // Phase 2 of plan/portfolio-lots-and-performance.md — reads
   // `holding_lot_closures` populated by Phase 1's lot engine.

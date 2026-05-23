@@ -26,6 +26,7 @@ import {
   type HoldingEditFormHolding,
 } from "@/components/holdings/holding-edit-form";
 import { ColorDot, CspSafeColorBar } from "@/components/csp-safe-bar";
+import { PerformanceChart } from "@/components/portfolio/PerformanceChart";
 
 // Mirror of /api/portfolio/overview's `canonicalKey()`. Keep in sync with
 // the server-side function — both must produce the same key for a given
@@ -590,6 +591,11 @@ export default function PortfolioPage() {
           </Button>
         </div>
       </div>
+
+      {/* Phase 3 performance chart — TWRR/MWRR + daily value series.
+          Empty-state copy in the component explains how to populate
+          /portfolio_snapshots via the nightly cron + admin backfill. */}
+      <PerformanceChart accountId={null} />
 
       {/* Re-login prompt — surfaces when the server couldn't decrypt
           tx.portfolio_holding (cold DEK cache after a server restart).

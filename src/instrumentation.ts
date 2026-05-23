@@ -29,4 +29,32 @@ export async function register() {
   setDialect("postgres");
 
   console.log("[instrumentation] PostgreSQL adapter initialized (managed mode)");
+
+  // ─── Cron registration ──────────────────────────────────────────────────
+  // Phase 3 of plan/portfolio-lots-and-performance.md — nightly snapshot
+  // builder. Uses setInterval with a 24h period; first run fires 24h
+  // after server start. For the proper 21:00-UTC schedule, a follow-up
+  // can compute the delay to next 21:00 UTC and seed with setTimeout.
+  //
+  // Note: the older crons (settle-future-fx, sweep-mcp-idempotency,
+  // sweep-revoked-jtis) export startSettleFutureFxTimer() etc. but
+  // aren't currently invoked from anywhere — a pre-existing latent
+  // issue separate from this phase. Fixing them is out of scope here.
+  try {
+    const { runSnapshotsCron } = await import(
+      "./lib/cron/portfolio-snapshots"
+    );
+    const ONE_DAY = 24 * 60 * 60 * 1000;
+    const timer: NodeJS.Timeout = setInterval(() => {
+      runSnapshotsCron().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error("[portfolio-snapshots-cron] run failed:", err);
+      });
+    }, ONE_DAY);
+    if (timer.unref) timer.unref();
+    console.log("[instrumentation] portfolio-snapshots cron registered (24h interval)");
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[instrumentation] failed to register portfolio-snapshots cron:", err);
+  }
 }
