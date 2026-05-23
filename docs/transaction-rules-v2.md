@@ -96,7 +96,7 @@ Every POST / PUT walks `actions[]` + `conditions.all[]` for FK ids and calls `ve
 - **Legacy shorthand**: `{ matchField: 'payee', matchType, matchValue, assignCategoryId }` — synthesized internally into the v2 shape with a single payee condition + a single `set_category` action.
 - **Advanced v2 shape**: `{ conditions, actions }` with optional `name`.
 
-Side-effect actions (`set_account`, `create_transfer`) are REFUSED on this endpoint with `code: 'side_effect_action_disallowed'`. They need approve-time staging context (the materialization classifier in the approve route).
+Side-effect actions (`set_account`, `create_transfer`) on the v2 payload are **accepted as of FINLYNQ-88 (2026-05-22)**. The endpoint inserts the rule, then calls `applyRulesToStagedBatch(db, userId, dek, id, { onlyRuleId: ruleId })` which folds the actions into a tier-preserving UPDATE on matched rows. `create_transfer` flips `tx_type='R'` + sets `target_account_id`; `set_account` reassigns `account_id` + re-encrypts `account_name_ct` at the row's existing tier. `link_id` is NOT minted here — the existing approve-time `createTransferPair` mints it per the four-check rule once the user clicks Approve.
 
 ### MCP tools
 
@@ -151,6 +151,110 @@ Skeleton implementation. **Not wired into any production caller today.** The sta
 
 The runner currently throws "not wired into a caller yet" on both `set_account` and `create_transfer` — this is intentional: we want callers to wire through to `createTransferPair` knowingly so the four-check transfer-pair rule, the audit trio, and the investment-account guard all stay in the same callsite.
 
+## Rule application on staged batches
+
+FINLYNQ-88 (2026-05-22) extended the v2 surface so side-effect actions
+(`set_account`, `create_transfer`) fire BEFORE the user clicks Approve —
+the rule effects land in `staged_transactions` itself rather than only at
+materialization time. The dedicated helper at
+[pf-app/src/lib/rules/apply-to-staged-batch.ts](../src/lib/rules/apply-to-staged-batch.ts)
+is the single owner of this logic; three callsites invoke it:
+
+### When rules apply
+
+1. **Upload time** — `POST /api/import/staging/upload` calls
+   `applyRulesToStagedBatch(tx, userId, dek, stagedImportId)` inside the
+   same DB transaction as the row INSERT. The user lands on
+   `/import/pending` with rule effects already visible (renamed payees,
+   flipped `tx_type='R'` + `target_account_id` for `create_transfer`
+   rules, reassigned account for `set_account` rules, etc.). Helper
+   failures are caught at the route boundary; the upload still succeeds
+   and `counts.ruleApplied` becomes `null` + `ruleApplyWarning` surfaces
+   in the response payload.
+
+2. **Manual "Re-apply rules" button** on `/import/pending` — `POST
+   /api/import/staged/[id]/apply-rules` operates over the entire batch
+   (no `rowIds` filter; this is the "refresh" button). Returns
+   `{ success: true, data: { rowsTouched, matches: Array<{rowId, ruleId}> } }`.
+   The UI surfaces a confirmation modal warning that the action "may
+   overwrite manual edits to payee, category, tags, type, or account on
+   matched rows" — modal is the safety net for the no-track-touched-fields
+   tradeoff (deferred to roadmap).
+
+3. **Inline `/create-rule`** — `POST /api/import/staged/[id]/create-rule`
+   inserts the new rule then calls the helper with
+   `{ onlyRuleId: ruleId }` so re-running this endpoint doesn't blow away
+   other rules' effects on user-edited rows. The pre-FINLYNQ-88
+   `side_effect_action_disallowed` refusal is GONE; side-effect actions
+   on this surface now fire normally.
+
+### Load-bearing invariants enforced inside the helper
+
+These are baked into the helper's UPDATE shape and asserted in its file
+header comment. Every callsite gets them for free; new callers that want
+to bypass the helper must re-enforce them by hand.
+
+- **`import_hash` is NEVER recomputed** — even when `rename_payee` fires.
+  The hash is over plaintext payee at ingest; dedup keys on the
+  ingest-time hash.
+- **`encryption_tier` is NEVER flipped** — text columns re-encrypted at
+  the row's EXISTING tier (`tryDecryptField`/`encryptField` for `user`,
+  `decryptStaged`/`encryptStaged` for `service`). The login-time
+  service→user upgrade job is the only path that promotes tiers.
+- **`reconcile_state` is preserved** — rows where
+  `reconcile_state IN ('linked', 'skipped_duplicate')` are SKIPPED
+  entirely. Linked rows point at a live transaction (rules can't override
+  that); skipped_duplicate rows are already excluded from default approve
+  (applying rules to them has no observable effect and could confuse the
+  user if they un-skip later).
+- **`link_id` / `trade_link_id` are NEVER touched** — `create_transfer`
+  only sets `tx_type='R'` + `target_account_id`; the UUID mint happens
+  later inside `createTransferPair` at approve time per the four-check
+  rule.
+- **Cross-tenant FK guards** — every `destAccountId` / `categoryId` /
+  `holdingId` referenced inside a matched rule's actions is verified
+  against the user's owned ids (3 batched ownership SELECTs). Actions
+  whose FK isn't owned are silently SKIPPED at apply time; other actions
+  on the same rule still fire.
+- **Sign-vs-category mismatch on `set_category`** — skips just that
+  action, not the whole row (per user decision 2026-05-22). The user can
+  fix at approve time. Other actions on the same rule still apply.
+
+### Re-apply button semantics
+
+- Operates over the entire batch — no per-row scope.
+- SKIPS `reconcile_state='linked'` rows (linked to a live transaction).
+- SKIPS `reconcile_state='skipped_duplicate'` rows (already in the bank
+  ledger; excluded from default approve).
+- Re-evaluates every other row (`unmatched` and `auto_suggested`) against
+  every active rule. First-match-wins by `priority` DESC + `id` ASC.
+- Re-fires the response into the staged-detail GET so the page re-renders
+  the new row state. The unresolved-categories banner shrinks if rules
+  now cover any previously-unresolved rows.
+- Confirmation modal is the safety net for "this may overwrite manual
+  edits"; we do NOT track which fields the user touched (roadmap item).
+
+### Tier-preservation example
+
+Mixed-tier batches (some rows at `service`, others at `user`) are common
+during the login-time upgrade window. The helper branches per row:
+
+```ts
+const decode = (value: string | null, tier: string): string | null => {
+  if (value == null) return null;
+  return tier === "user" ? tryDecryptField(dek, value) : decryptStaged(value);
+};
+const encode = (plaintext: string | null, tier: string): string | null => {
+  if (plaintext == null) return null;
+  return tier === "user" ? encryptField(dek, plaintext) : encryptStaged(plaintext);
+};
+```
+
+Same pattern as the approve route's tier decode at
+[approve/route.ts:188-191](../src/app/api/import/staged/%5Bid%5D/approve/route.ts) and
+the inline create-rule route's at
+[create-rule/route.ts:281-284](../src/app/api/import/staged/%5Bid%5D/create-rule/route.ts).
+
 ## Component inventory
 
 | Component | Path | Purpose |
@@ -167,8 +271,9 @@ These are the "don't regress on this" cross-cutting invariants. They're also sur
 - **AND-only composition.** `ConditionGroup` is flat `all[]`. No nested OR in v2.
 - **`set_portfolio_holding` is assign-existing-only.** No auto-create branch. Sidesteps the `holding_accounts` dual-write invariant (issue #95 / cohort #205) — auto-creating a holding from a rule action would silently bypass the (holding, account) join pair that every portfolio aggregator depends on.
 - **`link_id` / `trade_link_id` server-generated only.** `create_transfer.linkId` is NOT an action-config field. `createTransferPair` mints it.
-- **`apply_rules_to_uncategorized` refuses side-effect actions.** Both HTTP + stdio. Surfaced in `skipped[]` with `reason: 'requires_staging'`. Silent balance corruption risk if applied to a committed row without staging context.
-- **`import_hash` is NEVER recomputed** by the inline-create-rule batch updates or staged-row edits. The category column is the only mutation.
+- **`apply_rules_to_uncategorized` refuses side-effect actions.** Both HTTP + stdio. Surfaced in `skipped[]` with `reason: 'requires_staging'`. Silent balance corruption risk if applied to a committed row without staging context. (Note: FINLYNQ-88 wired side-effect actions into STAGED-batch paths only — `apply_rules_to_uncategorized` still operates on committed `transactions` rows and still refuses.)
+- **Rule effects on `staged_transactions` are PERSISTED at upload time + via manual Re-apply** (FINLYNQ-88, 2026-05-22). Per-row user edits in the pending editor are NOT overwritten until the user explicitly clicks Re-apply rules (one-shot reset with confirmation modal). See "Rule application on staged batches" section above.
+- **`import_hash` is NEVER recomputed** by the inline-create-rule batch updates, the upload-time rule pre-apply, the manual Re-apply pass, or staged-row edits. The text columns mutate but `import_hash` stays byte-identical to the ingest value.
 - **Cross-tenant FK guards** on every id inside conditions + actions. `verifyOwnership({ categoryIds, accountIds, holdingIds })` before INSERT/UPDATE. Same risk pattern as backup-restore FK remap.
 - **`decryptNameish` BEFORE `fuzzyFind`** at every category-by-name resolution site (MCP HTTP `create_rule`, MCP HTTP `update_rule`). The new v2 path uses typed FK ids (no fuzzyFind) so the invariant trivially holds for new code; the legacy shorthand on `create_rule` / `update_rule` preserves the issue #214 pattern.
 - **Sign-vs-category invariant** (issue #212) checked at the actual write site, NOT inside `computePureActionPatch`. Pure patcher stays pure.
@@ -186,8 +291,8 @@ The plan's E2E suite (`tests/e2e/rules-v2.test.ts` per plan section "E2E verific
 | 3. POST approve → matched row lands with category/tags/audit | manual on dev |
 | 4. MCP HTTP `apply_rules_to_uncategorized` happy path | manual on dev via `mcp.finlynq.com/dev` |
 | 5. Stdio `record_transaction` with amount-only rule → IGNORED | stdio autoCategory restricted to payee-only conditions; payee-fallback unchanged |
-| 6. Staged `create_transfer` action → two-leg transfer minted | **deferred** — staging-approve materialization classifier doesn't yet route `create_transfer` actions from rules; the approve path's existing `peer_staged_id` / `target_account_id` columns handle the user-explicit transfer-pair case. Rule-driven `create_transfer` is a follow-up roadmap item. |
-| 7. HTTP `apply_rules_to_uncategorized` with `create_transfer` rule → `skipped[]` | wired in phase 4 |
+| 6. Staged `create_transfer` action → two-leg transfer minted | **SHIPPED via FINLYNQ-88**: `applyRulesToStagedBatch` flips `tx_type='R'` + `target_account_id` at upload time / manual Re-apply / inline create-rule; existing approve-route Bucket-2 classifier routes through `createTransferPair` (mints `link_id` per the four-check rule). Test-plan tc-1-end-to-end-ui + tc-1-end-to-end-sql on FINLYNQ-88 cover this. |
+| 7. HTTP `apply_rules_to_uncategorized` with `create_transfer` rule → `skipped[]` | wired in phase 4 (still refuses on the committed-rows surface; FINLYNQ-88 only wired the staged-batch path). |
 | 8. `npm run audit:invariants` exits 0 | wired in every phase |
 
 Unit-test coverage in `tests/auto-categorize.test.ts` covers every field/op combo of the matcher + AND-fold + priority-DESC + first-match-wins.
@@ -196,8 +301,8 @@ Unit-test coverage in `tests/auto-categorize.test.ts` covers every field/op comb
 
 Tracked observations for future iterations:
 
-1. **Rule-driven `create_transfer` action wired through staging-approve.** Today the staging-approve route classifies rows into peerPairs / targetTransfers / cashRows based on `peer_staged_id` / `target_account_id` columns set by the user in the staging dialog. Hooking a rule's `create_transfer` action into this classifier means: (a) match the row against rules at approve time, (b) for matches whose action set includes `create_transfer`, treat the row as if `target_account_id = action.destAccountId` was set, (c) refuse if multiple side-effect actions would conflict. ~½ day.
-2. **`set_account` side-effect runner.** Needs an investment-account-aware UPDATE that calls `defaultHoldingForInvestmentAccount` when landing in an investment account (CLAUDE.md "Investment-account constraint" gotcha). The skeleton in `executeSideEffectActions` deliberately throws today; concrete impl is a focused PR.
+1. ~~**Rule-driven `create_transfer` action wired through staging-approve.**~~ **SHIPPED (FINLYNQ-88, 2026-05-22).** The `applyRulesToStagedBatch` helper sets `tx_type='R'` + `target_account_id` on matched rows BEFORE the user clicks Approve; the existing Bucket-2 classifier in the approve route routes through `createTransferPair` from there. See "Rule application on staged batches" section.
+2. ~~**`set_account` side-effect runner.**~~ **SHIPPED via staged-batch path (FINLYNQ-88, 2026-05-22).** `applyRulesToStagedBatch` re-encrypts `account_name_ct` at the row's existing tier and assigns `account_id`. Investment-account guard fires when the destination is `is_investment=true` AND the row's `portfolio_holding_id` is currently null AND no `set_portfolio_holding` action fires on the same rule — assigns Cash sleeve via `defaultHoldingForInvestmentAccount`. The `executeSideEffectActions` stub in `execute.ts` is STILL a stub for future non-staging callers (a `/test-rule-on-this-row` surface, an explicit MCP tool, etc.) — the staging path inlines the logic since every callsite's context (DEK, db handle, ownership map) is already in scope.
 3. **OR-composed condition groups.** Plan deferred OR groups to v3. Real-world surface area would be: nested `ConditionGroup` with `{ any: Condition[] }` alongside the existing `all`. Matcher rewrite to recursively evaluate trees.
 4. **Auto-fork rules from past transactions.** "You categorized 12 rows of 'Whole Foods' as Groceries — create a rule?" surface. Would build on `suggestCategory()` in `auto-categorize.ts`.
 5. **Rule import/export.** JSON dump/load for sharing rule sets between users + backup portability.
@@ -213,3 +318,8 @@ Tracked observations for future iterations:
 | 2026-05-21 | 4 | All 13 MCP rule tools (8 HTTP + 5 stdio) rewired to JSONB. `apply_rules_to_uncategorized` refuses side-effect actions. Stdio `autoCategory` restricted to payee + set_category. `b387dd5`. |
 | 2026-05-21 | 5 | New `/settings/rules` page with multi-condition + multi-action editor + live preview. Legacy rules card + state + handlers deleted from `/settings/categorization`. Settings nav gains Rules entry. `3d6dca3`. |
 | 2026-05-21 | 6 | Side-effect runner skeleton (set_account / create_transfer throw "not wired" today; staging-approve classifier is the canonical path for `create_transfer`). Living doc landed. Workspace CLAUDE.md updated. Closeout commit. |
+| 2026-05-22 | FINLYNQ-88 ph 1 | New `applyRulesToStagedBatch` helper at `src/lib/rules/apply-to-staged-batch.ts`. Covers all 7 v2 action kinds with tier-preserving re-encrypt, cross-tenant FK guards, sign-vs-category skip-just-that-action semantics, and skip-linked/skipped_duplicate filters. Helper-only; no callers wired yet. `97434d8`. |
+| 2026-05-22 | FINLYNQ-88 ph 2 | `POST /api/import/staging/upload` invokes the helper inside the row-INSERT transaction. Response surfaces `counts.ruleApplied` / `ruleApplyWarning`. `9258bab`. |
+| 2026-05-22 | FINLYNQ-88 ph 3 | New `POST /api/import/staged/[id]/apply-rules` endpoint for the manual Re-apply button. Inline `/create-rule` refactor: side-effect refusal removed; walk-and-patch loop replaced with helper call scoped to `onlyRuleId`. `299aa6f`. |
+| 2026-05-22 | FINLYNQ-88 ph 4 | "Re-apply rules" button + confirmation modal on `/import/pending`. `unresolved-categories-banner.tsx` gains the Re-apply hint line. `93e5fbd`. |
+| 2026-05-22 | FINLYNQ-88 ph 5 | Living doc + workspace CLAUDE.md update. New "Rule application on staged batches" section. Closeout commit. |
