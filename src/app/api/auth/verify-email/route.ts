@@ -8,9 +8,14 @@
  * redirect target was built directly from `process.env.APP_URL`. A
  * misconfigured or environment-injected `APP_URL` would turn this into an
  * open redirect by way of an emailed verification link. We now anchor the
- * redirect on `request.nextUrl.origin` (the origin the request actually
- * arrived at) and only honor `APP_URL` when it matches that origin exactly;
- * any mismatch is logged and the request-origin path is taken anyway.
+ * redirect on the request's actual origin and don't trust `APP_URL` at all.
+ *
+ * Behind a reverse proxy (Caddy → systemd-bound 0.0.0.0:3456 on prod), we
+ * must read the public origin from the X-Forwarded-* headers Caddy sets,
+ * NOT from `request.nextUrl.origin` which resolves to the upstream
+ * 0.0.0.0:3456 form and produces a Location header the browser rejects
+ * with ERR_ADDRESS_INVALID. Mirrors the pattern fixed in /try-demo
+ * (commit 0c8f0b4).
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -41,28 +46,17 @@ export async function GET(request: NextRequest) {
     );
   }
 
-  // Anchor on the request's actual origin. If APP_URL is set, validate it
-  // against that origin and warn (without honoring it) on mismatch — this
-  // makes a misconfigured deployment fail safe instead of redirecting users
-  // to an attacker-controlled host.
-  const requestOrigin = request.nextUrl.origin;
-  let redirectBase = requestOrigin;
-  if (process.env.APP_URL) {
-    try {
-      const configured = new URL(process.env.APP_URL).origin;
-      if (configured === requestOrigin) {
-        redirectBase = configured;
-      } else {
-        console.warn(
-          `[verify-email] APP_URL origin (${configured}) does not match request origin (${requestOrigin}); using request origin to defend against open-redirect via misconfiguration.`
-        );
-      }
-    } catch {
-      console.warn(
-        `[verify-email] APP_URL is set to an unparseable value; using request origin (${requestOrigin}) instead.`
-      );
-    }
-  }
-
-  return NextResponse.redirect(`${redirectBase}/dashboard?emailVerified=1`);
+  // Build the absolute redirect URL from the X-Forwarded-* headers Caddy
+  // sets, NOT from request.nextUrl.origin. Behind the reverse proxy the
+  // upstream origin is the systemd-bound 0.0.0.0:3456 form, so using
+  // nextUrl.origin produces a Location header that breaks in the browser
+  // ("ERR_ADDRESS_INVALID"). Forwarded-host headers carry the original
+  // public origin (finlynq.com) and are the standard pattern for routes
+  // behind a reverse proxy.
+  const forwardedHost = request.headers.get("x-forwarded-host");
+  const forwardedProto = request.headers.get("x-forwarded-proto");
+  const host = forwardedHost ?? request.nextUrl.host;
+  const proto =
+    forwardedProto ?? request.nextUrl.protocol.replace(/:$/, "");
+  return NextResponse.redirect(`${proto}://${host}/dashboard?emailVerified=1`);
 }
