@@ -5474,6 +5474,62 @@ export function registerPgTools(
     }
   );
 
+  // ── get_realized_gains ─────────────────────────────────────────────────────
+  // Phase 2 of plan/portfolio-lots-and-performance.md — reads
+  // `holding_lot_closures` populated by Phase 1's lot engine.
+  server.tool(
+    "get_realized_gains",
+    "Lot-level realized gains for the user, sourced from the FIFO lot engine. One row per closure (a sell that consumed a buy lot). Filter by tax year, date range, holding/account, or term (short ≤365d / long >365d / all). Each row carries pre-computed `realizedGain` in the holding's own currency (post issue #96 paired-cash-leg substitution). Pre-Phase-1 history requires running the lot-backfill admin script.",
+    {
+      from: z.string().optional().describe("Inclusive close_date lower bound, YYYY-MM-DD"),
+      to: z.string().optional().describe("Inclusive close_date upper bound, YYYY-MM-DD"),
+      taxYear: z.number().int().optional().describe("Convenience: sets from=YYYY-01-01, to=YYYY-12-31"),
+      holdingId: z.number().int().optional().describe("Scope to one portfolio_holdings.id"),
+      accountId: z.number().int().optional().describe("Scope to one accounts.id"),
+      term: z.enum(["short", "long", "all"]).optional().describe("Holding-period term (US tax convention; days_held threshold = 365)"),
+    },
+    async ({ from, to, taxYear, holdingId, accountId, term }) => {
+      const { listRealizedGainClosures } = await import("../src/lib/portfolio/realized-gains");
+      const result = await listRealizedGainClosures(userId, dek, {
+        from,
+        to,
+        taxYear,
+        holdingId,
+        accountId,
+        term: term ?? "all",
+      });
+      return text({ success: true, data: result });
+    },
+  );
+
+  // ── get_dividend_income ────────────────────────────────────────────────────
+  // Phase 2 of plan/portfolio-lots-and-performance.md — reads transactions
+  // by category_id (Dividends), respecting the issue #84 category-id rule.
+  server.tool(
+    "get_dividend_income",
+    "Dividend income from the transactions table, classified by the user's Dividends category (issue #84). Includes cash dividends (qty=0), reinvested dividends (qty>0), and withholding-tax entries (amount<0, surfaced as separate `withholdingCount` per group, not netted). Group by year / quarter / holding, or omit `groupBy` to return raw rows.",
+    {
+      from: z.string().optional().describe("Inclusive lower bound on transactions.date, YYYY-MM-DD"),
+      to: z.string().optional().describe("Inclusive upper bound on transactions.date, YYYY-MM-DD"),
+      taxYear: z.number().int().optional().describe("Convenience: sets from=YYYY-01-01, to=YYYY-12-31"),
+      holdingId: z.number().int().optional().describe("Scope to one portfolio_holdings.id"),
+      accountId: z.number().int().optional().describe("Scope to one accounts.id"),
+      groupBy: z.enum(["quarter", "year", "holding"]).optional().describe("Aggregation mode; omit for raw rows"),
+    },
+    async ({ from, to, taxYear, holdingId, accountId, groupBy }) => {
+      const { listDividendIncome } = await import("../src/lib/portfolio/dividends");
+      const result = await listDividendIncome(userId, dek, {
+        from,
+        to,
+        taxYear,
+        holdingId,
+        accountId,
+        groupBy,
+      });
+      return text({ success: true, data: result });
+    },
+  );
+
   // ── get_portfolio_analysis ─────────────────────────────────────────────────
   server.tool(
     "get_portfolio_analysis",

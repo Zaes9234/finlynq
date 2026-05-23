@@ -571,9 +571,24 @@ export default function PortfolioPage() {
             in create mode. The same form lives at /settings/investments;
             both are driven by src/components/holdings/holding-edit-form.tsx
             so the field set never drifts between surfaces (issue #100). */}
-        <Button onClick={() => setCreatingHolding({})} size="sm">
-          <Plus className="h-4 w-4 mr-1.5" /> Add holding
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Phase 2 nav — realized gains + dividends dashboards. Each
+              dashboard reads its own data; they're not modal extensions
+              of this page, just deeper drills into the same portfolio. */}
+          <Button asChild size="sm" variant="outline">
+            <Link href="/portfolio/realized-gains">Realized gains</Link>
+          </Button>
+          <Button asChild size="sm" variant="outline">
+            <Link href="/portfolio/dividends">Dividends</Link>
+          </Button>
+          {/* Add holding entry point — opens the shared <HoldingEditForm>
+              in create mode. The same form lives at /settings/investments;
+              both are driven by src/components/holdings/holding-edit-form.tsx
+              so the field set never drifts between surfaces (issue #100). */}
+          <Button onClick={() => setCreatingHolding({})} size="sm">
+            <Plus className="h-4 w-4 mr-1.5" /> Add holding
+          </Button>
+        </div>
       </div>
 
       {/* Re-login prompt — surfaces when the server couldn't decrypt
