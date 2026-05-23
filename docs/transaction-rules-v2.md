@@ -323,3 +323,113 @@ Tracked observations for future iterations:
 | 2026-05-22 | FINLYNQ-88 ph 3 | New `POST /api/import/staged/[id]/apply-rules` endpoint for the manual Re-apply button. Inline `/create-rule` refactor: side-effect refusal removed; walk-and-patch loop replaced with helper call scoped to `onlyRuleId`. `299aa6f`. |
 | 2026-05-22 | FINLYNQ-88 ph 4 | "Re-apply rules" button + confirmation modal on `/import/pending`. `unresolved-categories-banner.tsx` gains the Re-apply hint line. `93e5fbd`. |
 | 2026-05-22 | FINLYNQ-88 ph 5 | Living doc + workspace CLAUDE.md update. New "Rule application on staged batches" section. Closeout commit. |
+| 2026-05-23 | FINLYNQ-90 ph 1 | Lifted `RuleEditor` → `RuleEditorDialog` into shared `src/components/rules/rule-editor-dialog.tsx`. URL-agnostic `onSubmit` callback contract. `dd8bb65`. |
+| 2026-05-23 | FINLYNQ-90 ph 2 | `/settings/rules/page.tsx` swapped to the shared component (`<RuleEditorDialog>` + `onSubmit` callback). Page file shrank 765→309 lines. UX identical. `50d4f7b`. |
+| 2026-05-23 | FINLYNQ-90 ph 3 | `unresolved-categories-banner.tsx` swapped to the shared component with payee/contains seed + name prefill + lazy-fetch of FK option lists. Removed inline 3-field form. `6d6bbff`. |
+
+## Shared rule editor
+
+The rule editor UI is a single shared component, reused by two call-sites.
+Lifted out of `/settings/rules/page.tsx` in FINLYNQ-90 (2026-05-23) so the
+reconciliation banner could stop shipping its pre-FINLYNQ-84 legacy form.
+
+### Component
+
+[pf-app/src/components/rules/rule-editor-dialog.tsx](../src/components/rules/rule-editor-dialog.tsx)
+
+Default export: none. Named exports:
+
+| Export | Purpose |
+|---|---|
+| `RuleEditorDialog` | The dialog component itself. |
+| `Category`, `Account`, `Holding` | FK option-list shapes the caller passes in. |
+| `RuleSeed` | Edit-mode prop shape (with `id`). |
+| `RuleEditorPayload` | What `onSubmit` receives. |
+| `SubmitResult` | `{ ok: true } \| { ok: false; error: string }`. |
+| `RuleEditorDialogProps` | Full props interface. |
+| `blankCondition()` / `blankAction()` | Factory helpers (callers rarely need these — the dialog seeds itself). |
+| `CONDITION_FIELDS`, `ACTION_KINDS` | Display metadata (label, side-effect flag). |
+
+### URL-agnostic `onSubmit` contract
+
+The editor NEVER bakes in a URL. The caller's `onSubmit` callback owns the
+fetch and returns `{ ok, error? }`:
+
+```ts
+onSubmit: (payload: RuleEditorPayload) => Promise<SubmitResult>;
+```
+
+On `{ ok: false }` the editor renders the error inline (existing
+AlertTriangle banner) and stays open. On `{ ok: true }` the editor calls
+`onClose(true)` and the caller is responsible for re-fetching / refreshing
+state.
+
+This is the load-bearing decoupling — without it the two call-sites
+cannot share the form, because they target different endpoints with
+different request bodies (`/api/rules` for full CRUD vs.
+`/api/import/staged/<id>/create-rule` for the staging inline-create flow).
+
+### Inline error rendering
+
+The dialog has a single shared error slot, shown above the body whenever
+`{ ok: false }` returns from `onSubmit` or local validation fails (empty
+name, no conditions, no actions). Errors come through verbatim from the
+server response's `error` field (or the local validation message), so any
+server-side refusal (e.g. invalid Zod payload, future re-introduced
+side-effect refusal) surfaces directly to the user without the caller
+having to wire a custom toast.
+
+### Lazy-fetch (banner call-site)
+
+`/settings/rules` fetches `/api/categories` + `/api/accounts` +
+`/api/portfolio` on mount (alongside `/api/rules`). The banner call-site
+defers those 3 fetches until the user clicks "Create rule" on a row —
+fires once, caches per-banner-instance, reuses on subsequent row clicks.
+Dismissing the banner without clicking any "Create rule" triggers ZERO
+fetches.
+
+The fetches are batched via `Promise.all` so the first dialog open pays
+one round-trip, not three.
+
+### Seed-from-row pattern (banner call-site)
+
+When the banner opens the dialog for a row, it seeds:
+
+```ts
+initialName = `Match "${row.payee.slice(0, 100)}"`;
+initialConditions = [{ field: "payee", op: "contains", value: row.payee.trim() }];
+initialActions = []; // user picks the action(s)
+```
+
+The 100-char cap on the payee slice keeps the rule name comfortably inside
+the `transaction_rules.name` 120-char column limit (8-char surround
+overhead = `Match ""`).
+
+The `initialConditions` / `initialActions` / `initialName` / `initialPriority` /
+`initialIsActive` props are only honored when the `rule` prop is null /
+undefined (i.e. fresh-create mode). In edit mode, the `rule.conditions`
+and `rule.actions` win.
+
+### The two call-sites
+
+| Call-site | URL on submit | Response shape | Why it can't share infrastructure |
+|---|---|---|---|
+| `/settings/rules` | `POST /api/rules` (create), `PUT /api/rules` (update, body includes `id`) | `{success: true, data: {id, ...}}` | Full-CRUD surface; supports update + delete + toggle. |
+| `/import/pending` UnresolvedCategoriesBanner | `POST /api/import/staged/[id]/create-rule` | `{success: true, data: {ruleId, updatedRowIds}}` | Staged-batch path; applies new rule to current batch via `applyRulesToStagedBatch(..., {onlyRuleId})`. Endpoint accepts both legacy and v2 shape; banner emits v2 only. |
+
+### Combobox + dropdown order
+
+The category Combobox sorts via `useDropdownOrder("category")` (lifted
+from FINLYNQ-89 unchanged). Accounts + holdings ship in canonical
+`/api/accounts` / `/api/portfolio` order. Both call-sites pick up the
+same sort behavior since they share the component.
+
+### Don't-touch list
+
+- The shared editor must NOT pre-filter side-effect actions
+  (`set_account` / `create_transfer`). Server is the authority; refusal
+  surfaces via the inline error path.
+- The shared editor must NOT bake in a URL or know which call-site it's
+  in. Anything call-site-specific lives in `onSubmit`.
+- The banner's `onRuleApplied` callback contract is unchanged. Parent
+  (`/import/pending`) re-fetches staged detail on save.
