@@ -9,7 +9,7 @@ import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
 import { InvestmentHoldingRequiredError } from "@/lib/investment-account";
-import { SignCategoryMismatchError } from "@/lib/transactions/sign-category-invariant";
+import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
@@ -473,29 +473,33 @@ export async function POST(request: NextRequest) {
     // Phase 5: never persist the legacy text column. The FK is the source
     // of truth and the column is being dropped in a follow-up release.
     delete data.portfolioHolding;
+    // FINLYNQ-97 — sign-vs-category check is advisory. Compute the message
+    // BEFORE encryption / INSERT so it sees the post-resolve amount; row
+    // lands regardless. A returned non-null error surfaces as `warning`
+    // on the 201 body.
+    const signWarn =
+      data.amount != null
+        ? await validateSignVsCategoryById(
+            auth.userId,
+            auth.dek,
+            data.categoryId,
+            Number(data.amount),
+          )
+        : null;
     const encrypted = encryptTxWrite(auth.dek, data);
     // Issue #28: hard-code the writer surface at the route boundary rather
     // than relying on the schema default. Defensive against a future writer
     // path that forgets to set it — every entry point is grep-discoverable.
     const tx = await createTransaction(auth.userId, { ...encrypted, source: "manual" }, auth.dek);
     invalidateUserTxCache(auth.userId);
-    return NextResponse.json(tx, { status: 201 });
+    return NextResponse.json(
+      signWarn ? { ...tx, warning: signWarn.message } : tx,
+      { status: 201 },
+    );
   } catch (error: unknown) {
     if (error instanceof InvestmentHoldingRequiredError) {
       return NextResponse.json(
         { error: error.message, code: error.code, accountId: error.accountId },
-        { status: 400 },
-      );
-    }
-    if (error instanceof SignCategoryMismatchError) {
-      return NextResponse.json(
-        {
-          error: error.message,
-          code: error.code,
-          amount: error.amount,
-          categoryName: error.categoryName,
-          categoryType: error.categoryType,
-        },
         { status: 400 },
       );
     }
@@ -558,26 +562,51 @@ export async function PUT(request: NextRequest) {
     }
     // Phase 5: never persist the legacy text column.
     delete data.portfolioHolding;
+    // FINLYNQ-97 — sign-vs-category check is advisory on PUT too. Compute
+    // the post-merge amount + category by falling back to the existing
+    // row's values when the patch doesn't touch them, then validate.
+    // The row is updated either way; a non-null result is attached as
+    // `warning` on the 200 body.
+    let signWarn: { message: string } | null = null;
+    if (data.amount !== undefined || data.categoryId !== undefined) {
+      const current = await db
+        .select({
+          amount: schema.transactions.amount,
+          categoryId: schema.transactions.categoryId,
+        })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.id, id),
+            eq(schema.transactions.userId, auth.userId),
+          ),
+        )
+        .get();
+      if (current) {
+        const postAmount =
+          data.amount !== undefined ? data.amount : current.amount;
+        const postCategoryId =
+          data.categoryId !== undefined ? data.categoryId : current.categoryId;
+        if (postAmount != null) {
+          signWarn = await validateSignVsCategoryById(
+            auth.userId,
+            auth.dek,
+            postCategoryId,
+            Number(postAmount),
+          );
+        }
+      }
+    }
     const encrypted = encryptTxWrite(auth.dek, data);
     const tx = await updateTransaction(id, auth.userId, encrypted, auth.dek);
     invalidateUserTxCache(auth.userId);
-    return NextResponse.json(tx);
+    return NextResponse.json(
+      signWarn ? { ...tx, warning: signWarn.message } : tx,
+    );
   } catch (error: unknown) {
     if (error instanceof InvestmentHoldingRequiredError) {
       return NextResponse.json(
         { error: error.message, code: error.code, accountId: error.accountId },
-        { status: 400 },
-      );
-    }
-    if (error instanceof SignCategoryMismatchError) {
-      return NextResponse.json(
-        {
-          error: error.message,
-          code: error.code,
-          amount: error.amount,
-          categoryName: error.categoryName,
-          categoryType: error.categoryType,
-        },
         { status: 400 },
       );
     }

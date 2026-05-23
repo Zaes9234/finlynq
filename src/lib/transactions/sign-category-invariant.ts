@@ -1,19 +1,33 @@
 /**
- * Sign-vs-category invariant — issue #212.
+ * Sign-vs-category advisory — issue #212 + FINLYNQ-97.
  *
  * For every transaction whose category is resolved to one of:
- *   - 'E' (expense)  → `amount` MUST be ≤ 0 on asset/liability accounts
- *   - 'I' (income)   → `amount` MUST be ≥ 0
+ *   - 'E' (expense)  → typical `amount` is ≤ 0 on asset/liability accounts
+ *   - 'I' (income)   → typical `amount` is ≥ 0
  *   - 'R' (transfer) → exempt (sign convention varies per leg)
  *   - 'T' (legacy transfer alias minted by a separate broken `create_category`
  *          path — treated as transfer-exempt defensively until issue #12 lands
  *          and any 'T' rows are normalized to 'R'.)
  *
- * Liability accounts follow the same rule — an `E` charge on a credit card
- * still goes in as `amount < 0` from the cardholder's perspective; the live
- * aggregator math (CLAUDE.md "Account balance for accounts with holdings")
- * handles the sign flip on display. The single rule covers both account
- * types; no `accounts.type` branching is needed.
+ * **FINLYNQ-97 (2026-05-23): this helper is now advisory, not a gate.** It
+ * still returns a {@link SignCategoryMismatchError} when the (amount,
+ * categoryType) pair disagrees, but callers DO NOT throw it or refuse the
+ * row. Instead, every write transport surfaces the message through its own
+ * warnings channel:
+ *   - REST `/api/transactions` POST/PUT: top-level `warning` on the 200/201
+ *     body.
+ *   - HTTP MCP `record_transaction` / `update_transaction`: appended to
+ *     `data.warnings[]` on the success envelope.
+ *   - HTTP MCP `bulk_record_transactions`: appended to the per-row
+ *     `results[i].warnings[]` (the row is `success: true`).
+ *   - Stdio MCP `record_transaction` / `update_transaction`: appended to
+ *     `data.warnings[]` (no DEK, message degrades to `category #<id>`).
+ *   - Import pipeline: pushed into `importErrors[]` with a `"Warning: …"`
+ *     prefix; the row materializes.
+ *
+ * Legitimate cases include refunds booked against the original expense
+ * category (e.g. a $50 grocery refund as `+50` against Groceries) or
+ * clawbacks on an income line.
  *
  * Uncategorized rows (`categoryId == null`, `categoryType == null`) are
  * exempt — those are typically receipt-OCR previews or "I'll fix this later"
@@ -24,8 +38,9 @@
  *
  * Stream D Phase 4: `categories.type` is plaintext and does NOT require a
  * DEK, so the helper works on every transport (HTTP MCP, stdio MCP, REST,
- * import). When a DEK is available the error message includes the decrypted
- * category name; without a DEK (stdio) it falls back to `category #<id>`.
+ * import). When a DEK is available the warning message includes the
+ * decrypted category name; without a DEK (stdio) it falls back to
+ * `category #<id>`.
  */
 
 import { db, schema } from "@/db";
@@ -53,16 +68,20 @@ export class SignCategoryMismatchError extends Error {
 }
 
 /**
- * Pure, synchronous validator. Returns a {@link SignCategoryMismatchError}
- * when the (amount, categoryType) pair violates the invariant, or `null`
- * when the row is OK / exempt.
+ * Pure, synchronous advisory check. Returns a {@link SignCategoryMismatchError}
+ * when the (amount, categoryType) pair disagrees, or `null` when the row
+ * is OK / exempt.
+ *
+ * FINLYNQ-97: the error shape is preserved so callers can read `.message`,
+ * but no caller throws it anymore. Each transport surfaces the message
+ * through its own warnings channel — see the file header for the full
+ * surface map.
  *
  * Caller responsibility:
  *   - resolve the category id → type (via `categories.type`)
  *   - resolve the category id → display name (decrypt `name_ct` when DEK
  *     is available; pass `"category #<id>"` when not)
- *   - throw the returned error (REST routes) or surface it as a structured
- *     per-row failure (bulk MCP).
+ *   - append the returned `.message` to the response's warnings channel.
  */
 export function validateSignVsCategory(args: {
   amount: number;

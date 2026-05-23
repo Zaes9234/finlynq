@@ -821,6 +821,9 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
+      // FINLYNQ-97 — collect advisory warnings (currently only the
+      // sign-vs-category check) for the success envelope.
+      const warnings: string[] = [];
 
       // Stream D Phase 4: SELECT only ciphertext-free columns (id/currency/is_investment).
       const acct = await sqlite.prepare(
@@ -869,16 +872,17 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       });
       if (!resolved.ok) return sqliteErr(resolved.message);
 
-      // Issue #212 — sign-vs-category invariant. Hard reject before any INSERT.
-      // Stdio has no DEK so the error message uses `category #<id>` as the
-      // category name; the rule itself fires identically across transports.
+      // FINLYNQ-97 — sign-vs-category check is advisory. Stdio has no DEK
+      // so the message uses `category #<id>` as the category name; the
+      // rule itself fires identically across transports. A non-null
+      // result lands in `warnings` and surfaces on the success envelope.
       if (catId != null) {
         const sErr = validateSignVsCategory({
           amount: resolved.amount,
           categoryType: catType,
           categoryName: `category #${catId}`,
         });
-        if (sErr) return sqliteErr(sErr.message);
+        if (sErr) warnings.push(sErr.message);
       }
 
       const resolvedAccountInfo = { id: Number(acct.id) };
@@ -899,6 +903,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             enteredFxRate: resolved.enteredFxRate,
             date: txDate,
             message: `Dry run OK — would record: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → account #${Number(acct.id)}${catId != null ? ` (category #${catId})` : ""}`,
+            warnings,
           },
         });
       }
@@ -919,6 +924,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           resolvedAccount: resolvedAccountInfo,
           resolvedCategory,
           message: `Recorded: ${resolved.amount > 0 ? "+" : ""}${resolved.amount} ${resolved.currency} on ${txDate} — "${payee}" → account #${Number(acct.id)}${catId != null ? ` (category #${catId})` : ""}`,
+          warnings,
         },
       });
     }
@@ -1049,10 +1055,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       }
       if (!updates.length) return sqliteErr("No fields to update");
 
-      // Issue #212 — sign-vs-category invariant on the post-merge state.
-      // Reuses the existing row's category_id when the patch doesn't touch
-      // it, and the existing amount when the patch doesn't touch amount.
-      // Stdio path: error message degrades to `category #<id>` (no DEK).
+      // FINLYNQ-97 — sign-vs-category check on the post-merge state is
+      // advisory. Reuses the existing row's category_id when the patch
+      // doesn't touch it, and the existing amount when the patch doesn't
+      // touch amount. Stdio degrades the message to `category #<id>`
+      // (no DEK). Non-null result lands in `warnings` on the response;
+      // the UPDATE still applies.
+      const warnings: string[] = [];
       if (postMergeAmountStdio != null) {
         const postMergeCatId = catId !== undefined ? catId : existingCategoryIdStdio;
         let postMergeCatType = catTypeStdio;
@@ -1069,7 +1078,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             categoryType: postMergeCatType,
             categoryName: `category #${postMergeCatId}`,
           });
-          if (sErr) return sqliteErr(sErr.message);
+          if (sErr) warnings.push(sErr.message);
         }
       }
 
@@ -1090,6 +1099,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           fieldsUpdated,
           ...(resolvedCategory ? { resolvedCategory } : {}),
           updatedAt: after?.updated_at,
+          warnings,
         },
       });
     }

@@ -111,6 +111,14 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // helper.
   "src/lib/external-import/reconciliation.ts:sign-vs-category":
     "predates issue #212; followup to wire validateSignVsCategoryById into the reconciliation helper",
+  // FINLYNQ-97 — sign-vs-category check is advisory and lives at the route
+  // boundary (`/api/transactions` POST/PUT) instead of the inner helper.
+  // The validator still runs for every REST write, but the result becomes
+  // a `warning` on the success body rather than a thrown error in the
+  // helper. Calling the validator inside `createTransaction` would be a
+  // redundant DB round-trip with no behavioral effect.
+  "src/lib/queries.ts:sign-vs-category":
+    "FINLYNQ-97 — validator moved to /api/transactions route boundary; advisory warning on success body",
 };
 
 interface InvariantConfig {

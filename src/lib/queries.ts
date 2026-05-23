@@ -2,7 +2,6 @@ import { db, schema, getDialect } from "@/db";
 import { eq, and, gte, lte, desc, sql, asc, inArray } from "drizzle-orm";
 import type { SQL, AnyColumn } from "drizzle-orm";
 import { requireHoldingForInvestmentAccount } from "@/lib/investment-account";
-import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
 import type { TransactionSource } from "@/lib/tx-source";
 import type { SortableColumnId } from "@/lib/transactions/columns";
 
@@ -358,15 +357,12 @@ export async function createTransaction(userId: string, data: {
   // InvestmentHoldingRequiredError when the FK is missing — the route
   // handler maps it to a 400.
   await requireHoldingForInvestmentAccount(userId, data.accountId, data.portfolioHoldingId);
-  // Issue #212 — sign-vs-category invariant. Throws SignCategoryMismatchError
-  // when the category type 'E'/'I' disagrees with the amount sign. The route
-  // handler maps it to a 400 (mirroring the InvestmentHoldingRequiredError
-  // mapping). `dek` is optional so the error message can name the category
-  // when available; without it the message falls back to `category #<id>`.
-  if (data.amount != null) {
-    const sErr = await validateSignVsCategoryById(userId, dek, data.categoryId, data.amount);
-    if (sErr) throw sErr;
-  }
+  // Issue #212 / FINLYNQ-97 — sign-vs-category invariant is now advisory.
+  // The validator still runs at the route boundary (see
+  // `/api/transactions` POST/PUT) and surfaces a `warning` on the response
+  // body; this helper no longer rejects the row, so the `dek` parameter is
+  // kept only for the legacy two-arg call shape and is unused here.
+  void dek;
   return db.insert(transactions).values({ ...data, userId }).returning().get();
 }
 
@@ -394,21 +390,19 @@ export async function updateTransaction(id: number, userId: string, data: Partia
   // `data.portfolioHoldingId === undefined` means the caller didn't include
   // the field; an explicit `null` is treated as a clear intent to unlink
   // (and rejected when the resulting account is investment).
-  // Issue #212 — sign-vs-category invariant on the post-merge state. Same
-  // pattern: only fetch the existing row when the caller is touching either
-  // amount or categoryId; otherwise the invariant can't change.
+  // Issue #212 / FINLYNQ-97 — sign-vs-category check is now advisory and
+  // lives at the route boundary. This helper only does the investment-
+  // account FK pre-read; the validator is called from the POST/PUT route
+  // and surfaces a `warning` on the response body.
+  void dek;
   const needsCurrent =
     data.accountId !== undefined ||
-    Object.prototype.hasOwnProperty.call(data, "portfolioHoldingId") ||
-    data.amount !== undefined ||
-    data.categoryId !== undefined;
+    Object.prototype.hasOwnProperty.call(data, "portfolioHoldingId");
   if (needsCurrent) {
     const current = await db
       .select({
         accountId: transactions.accountId,
         portfolioHoldingId: transactions.portfolioHoldingId,
-        amount: transactions.amount,
-        categoryId: transactions.categoryId,
       })
       .from(transactions)
       .where(and(eq(transactions.id, id), eq(transactions.userId, userId)))
@@ -419,19 +413,6 @@ export async function updateTransaction(id: number, userId: string, data: Partia
         ? (data.portfolioHoldingId ?? null)
         : current.portfolioHoldingId;
       await requireHoldingForInvestmentAccount(userId, resultingAccountId, resultingHoldingId);
-      if (data.amount !== undefined || data.categoryId !== undefined) {
-        const resultingAmount = data.amount ?? current.amount;
-        const resultingCategoryId = data.categoryId ?? current.categoryId;
-        if (resultingAmount != null) {
-          const sErr = await validateSignVsCategoryById(
-            userId,
-            dek,
-            resultingCategoryId,
-            Number(resultingAmount),
-          );
-          if (sErr) throw sErr;
-        }
-      }
     }
   }
   // Audit-trio (issue #28): every UPDATE bumps updated_at = NOW(). `source`

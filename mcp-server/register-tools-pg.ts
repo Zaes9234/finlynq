@@ -95,11 +95,7 @@ import { calculateFinancialHealth } from "../src/lib/financial-health";
 import { getHoldingsValueByAccount } from "../src/lib/holdings-value";
 import { computeGoalProgress } from "../src/lib/goals-progress";
 import { sourceTagFor, isFormatTag, type FormatTag } from "../src/lib/tx-source";
-import {
-  validateSignVsCategory,
-  getCategoryTypeMap,
-  SignCategoryMismatchError,
-} from "../src/lib/transactions/sign-category-invariant";
+import { validateSignVsCategory } from "../src/lib/transactions/sign-category-invariant";
 import { ymdDate, ymPeriod, parseYmdSafe } from "./lib/date-validators";
 import {
   analyzeRecurringGroup,
@@ -2832,18 +2828,15 @@ export function registerPgTools(
         catName = (ct && dek ? decryptField(dek, String(ct)) : ct ?? "") || "uncategorized";
         catType = row?.type != null ? String(row.type) : null;
       }
-      // Issue #212 — sign-vs-category invariant (HARD REJECT). 'E' must be
+      // FINLYNQ-97 — sign-vs-category check is advisory. 'E' must be
       // ≤ 0; 'I' must be ≥ 0; 'R'/'T' exempt. Runs on resolved.amount AFTER
-      // FX so the rule is evaluated on the value that lands in the DB. dryRun
-      // returns a structured 400-equivalent envelope; non-dryRun never inserts.
+      // FX so the rule is evaluated on the value that lands in the DB.
+      // Non-null result lands in the `warnings` array below; row inserts.
       const sErr = validateSignVsCategory({
         amount: resolved.amount,
         categoryType: catType,
         categoryName: catName,
       });
-      if (sErr) {
-        return err(sErr.message);
-      }
       // Issue #211 Bug h: when both `amount` and `enteredAmount` are
       // passed, surface a structured warning so the caller knows the
       // resolved value diverged from their literal `amount` arg.
@@ -2856,6 +2849,8 @@ export function registerPgTools(
         resolvedAmount: enteredAmount != null && amount != null ? resolved.amount : null,
         enteredCurrency: enteredCurrency ?? null,
       });
+      // FINLYNQ-97 — append the sign-vs-category advisory message (if any).
+      if (sErr) warnings.push(sErr.message);
       const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
       const resolvedCategory = catId ? { id: catId, name: String(catName ?? "") } : null;
       const resolvedHolding = resolvedHoldingId != null ? { id: resolvedHoldingId } : null;
@@ -3282,29 +3277,19 @@ export function registerPgTools(
             continue;
           }
 
-          // Issue #212 — sign-vs-category invariant per row. Fail this row
-          // only (matches the #203 unknown-category envelope: results[i]
-          // gets `success: false` + `code: 'sign_category_mismatch'`); the
-          // batch keeps going. The check runs on `resolved.amount` (after
-          // FX) so the rule is evaluated against the value the DB will see.
-          if (catId != null) {
-            const sErr = validateSignVsCategory({
-              amount: resolved.amount,
-              categoryType: catTypeById.get(catId) ?? null,
-              categoryName: catNameById.get(catId) ?? `category #${catId}`,
-            });
-            if (sErr) {
-              results.push({
-                index: i,
-                success: false,
-                message: sErr.message,
-                code: sErr.code,
-                resolvedAccount: resolvedAccountInfo,
-                resolvedCategory: { id: catId, name: catNameById.get(catId) ?? "" },
-              });
-              continue;
-            }
-          }
+          // FINLYNQ-97 — sign-vs-category check is advisory. The check
+          // runs on `resolved.amount` (after FX) so the rule is evaluated
+          // against the value the DB will see; a non-null result is
+          // appended to the per-row `warnings[]` below and the row still
+          // inserts.
+          const signWarn =
+            catId != null
+              ? validateSignVsCategory({
+                  amount: resolved.amount,
+                  categoryType: catTypeById.get(catId) ?? null,
+                  categoryName: catNameById.get(catId) ?? `category #${catId}`,
+                })
+              : null;
 
           // Issue #211 Bug h: amount-vs-enteredAmount override warning.
           const rowWarnings = deriveTxWriteWarnings({
@@ -3316,6 +3301,8 @@ export function registerPgTools(
             resolvedAmount: t.enteredAmount != null && t.amount != null ? resolved.amount : null,
             enteredCurrency: t.enteredCurrency ?? null,
           });
+          // FINLYNQ-97 — append the sign-vs-category advisory (if any).
+          if (signWarn) rowWarnings.push(signWarn.message);
           const rowCategory = catId != null ? { id: catId, name: catNameById.get(catId) ?? "" } : null;
           const rowHolding = rowHoldingId != null ? { id: rowHoldingId } : null;
 
@@ -3655,11 +3642,12 @@ export function registerPgTools(
       } else if (amount !== undefined) {
         postMergeAmount = amount;
       }
-      // Issue #212 — sign-vs-category invariant on the post-merge state.
-      // Resolve type + name from the post-merge category. When the patch
-      // doesn't touch category, fall back to the existing row's category.
-      // Runs BEFORE every UPDATE so a violation aborts the whole patch
-      // cleanly — no partial application.
+      // FINLYNQ-97 — sign-vs-category check on the post-merge state is
+      // advisory. Resolve type + name from the post-merge category; when
+      // the patch doesn't touch category, fall back to the existing row's
+      // category. A non-null result lands in the `warnings[]` array on
+      // the success response below; the UPDATE still applies.
+      let signWarnUpdate: string | null = null;
       if (postMergeAmount != null) {
         const postMergeCategoryId = catId !== undefined ? catId : existingCategoryId;
         if (postMergeCategoryId != null) {
@@ -3674,7 +3662,7 @@ export function registerPgTools(
               categoryType: cat.type as string | null | undefined,
               categoryName: catName,
             });
-            if (sErr) return err(sErr.message);
+            if (sErr) signWarnUpdate = sErr.message;
           }
         }
       }
@@ -3746,6 +3734,8 @@ export function registerPgTools(
             quantity: null,
           })
         : [];
+      // FINLYNQ-97 — surface the post-merge sign-vs-category advisory.
+      if (signWarnUpdate) warnings.push(signWarnUpdate);
       // Issue #60: response shape — explicit `fieldsUpdated[]` replaces the
       // ambiguous "(N field(s))" count, and `resolvedCategory` mirrors the
       // per-row shape `bulk_record_transactions` already returns.

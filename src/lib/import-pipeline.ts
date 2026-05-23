@@ -708,13 +708,12 @@ export async function executeImport(
     }
   }
 
-  // Issue #212 — sign-vs-category invariant pass. Pre-fetch the (id → type)
-  // map once per batch (one SELECT for every distinct categoryId in the
-  // pending rows), then per-row reject violations into importErrors[]. The
-  // legacy investment-account-rejection block above is the canonical
-  // pattern for "fail this row, keep the batch going" and we mirror its
-  // shape exactly.
-  let signRejected: number[] = [];
+  // FINLYNQ-97 — sign-vs-category check is now advisory. Pre-fetch the
+  // (id → type) map once per batch (one SELECT for every distinct
+  // categoryId in the pending rows), then per-row push a warning into
+  // importErrors[] when the sign disagrees with the resolved category's
+  // type. The row STILL lands in the DB — the upload-result UI surfaces
+  // `importErrors[]` as both hard and soft messages.
   try {
     const distinctCatIds = new Set<number>();
     for (const row of toInsert) {
@@ -722,37 +721,26 @@ export async function executeImport(
     }
     if (distinctCatIds.size > 0) {
       const catTypeMap = await getCategoryTypeMap(userId, userDek ?? null, distinctCatIds);
-      signRejected = toInsert
-        .map((row, i) => {
-          if (row.categoryId == null) return -1;
-          const cat = catTypeMap.get(row.categoryId);
-          if (!cat) return -1;
-          const sErr = validateSignVsCategory({
-            amount: row.amount,
-            categoryType: cat.type,
-            categoryName: cat.name,
-          });
-          return sErr ? i : -1;
-        })
-        .filter((i) => i >= 0);
-      for (const idx of signRejected) {
-        const row = toInsert[idx];
-        const cat = catTypeMap.get(row.categoryId!);
-        importErrors.push(
-          `Row ${row.rowIndex + 1}: category "${cat?.name ?? "?"}" (type ${cat?.type ?? "?"}) disagrees with amount sign (${row.amount}). Flip the sign or pick a different category.`,
-        );
+      for (const row of toInsert) {
+        if (row.categoryId == null) continue;
+        const cat = catTypeMap.get(row.categoryId);
+        if (!cat) continue;
+        const sErr = validateSignVsCategory({
+          amount: row.amount,
+          categoryType: cat.type,
+          categoryName: cat.name,
+        });
+        if (sErr) {
+          importErrors.push(
+            `Warning: Row ${row.rowIndex + 1} — category "${cat.name}" (type ${cat.type}) and amount sign (${row.amount}) disagree; imported anyway. Flip the sign in the editor if this was an error.`,
+          );
+        }
       }
     }
   } catch (err) {
     importErrors.push(
       `Sign-vs-category check failed: ${err instanceof Error ? err.message : "Unknown error"}`,
     );
-  }
-  if (signRejected.length > 0) {
-    const rejectedSet = new Set(signRejected);
-    for (let i = toInsert.length - 1; i >= 0; i--) {
-      if (rejectedSet.has(i)) toInsert.splice(i, 1);
-    }
   }
 
   // ─── Bank-ledger upsert pass (2026-05-22 two-ledger refactor) ────────
