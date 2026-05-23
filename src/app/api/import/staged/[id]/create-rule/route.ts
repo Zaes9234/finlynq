@@ -21,40 +21,43 @@
  *   1. Validate body — accept either shape.
  *   2. Synthesize ConditionGroup + Action[] (legacy) or pass through (v2).
  *   3. Insert into `transaction_rules` (new JSONB columns).
- *   4. Walk staged_transactions in THIS batch, decoded per-tier, applying
- *      `computePureActionPatch` to matched rows.
+ *   4. Apply the just-created rule to matching rows in this batch via
+ *      `applyRulesToStagedBatch(...,{ onlyRuleId })` — tier-preserving,
+ *      import_hash-stable, side-effect-aware. `onlyRuleId` scopes the
+ *      apply pass to the new rule so re-running this endpoint doesn't
+ *      blow away other rules' effects on user-edited rows.
  *   5. Return `{ success: true, data: { ruleId, updatedRowIds: [...] } }`.
  *
- * Load-bearing (CLAUDE.md):
- *   - `import_hash` is NEVER recomputed when assigning a category. We
- *     only mutate the staged row's `category` column.
- *   - Per-row encryption tier: rows at `encryption_tier='service'`
- *     re-encrypt under PF_STAGING_KEY (sv1:); rows at 'user' re-encrypt
- *     under the user DEK (v1:). We NEVER flip a row's tier.
+ * Load-bearing (CLAUDE.md + helper file header):
+ *   - `import_hash` is NEVER recomputed (helper enforces).
+ *   - Per-row encryption tier preserved — `service` rows re-encrypt under
+ *     PF_STAGING_KEY (sv1:); `user` rows re-encrypt under the user DEK (v1:);
+ *     never flipped (helper enforces).
  *   - HTTP only — stdio MCP has no DEK on the staging tier; out of scope.
- *   - Side-effect actions (`set_account` / `create_transfer`) on the v2
- *     payload are REFUSED here. They need approve-time context, not the
- *     inline-create surface. Use the full /api/rules endpoint to create
- *     such rules + let them fire at approve time.
+ *   - FINLYNQ-88 (2026-05-22): side-effect actions (`set_account` /
+ *     `create_transfer`) on the v2 payload are now ACCEPTED. The helper
+ *     folds them into staged-row UPDATEs so matched rows flip `tx_type='R'`
+ *     + `target_account_id` (create_transfer) or `account_id` +
+ *     `account_name_ct` (set_account) before approve. `link_id` minting
+ *     still happens server-side at approve time via `createTransferPair`
+ *     per the four-check rule. The pre-FINLYNQ-88 `side_effect_action_
+ *     disallowed` refusal is GONE.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { requireEncryption } from "@/lib/auth/require-encryption";
-import { decryptStaged, encryptStaged } from "@/lib/crypto/staging-envelope";
-import { tryDecryptField, encryptField, decryptField } from "@/lib/crypto/envelope";
-import { matchesRule, type TransactionRule } from "@/lib/auto-categorize";
-import { computePureActionPatch } from "@/lib/rules/execute";
+import { decryptField } from "@/lib/crypto/envelope";
 import {
   ConditionGroup,
   Action,
   collectActionFKs,
-  ruleHasSideEffects,
   type ConditionGroup as ConditionGroupType,
   type Action as ActionType,
 } from "@/lib/rules/schema";
+import { applyRulesToStagedBatch } from "@/lib/rules/apply-to-staged-batch";
 
 export const dynamic = "force-dynamic";
 
@@ -101,18 +104,13 @@ export async function POST(
     conditions = advancedParse.data.conditions;
     actions = advancedParse.data.actions;
     displayName = advancedParse.data.name;
-    // Reject side-effect actions here — inline-create from staging review is
-    // a "fix this category and the batch" surface; full rule lifecycle is on
-    // /api/rules where approve-time wiring is in scope.
-    if (ruleHasSideEffects(actions)) {
-      return NextResponse.json(
-        {
-          error: "Side-effect actions (set_account, create_transfer) are not allowed on inline-create. Create the rule via /api/rules and re-trigger approve.",
-          code: "side_effect_action_disallowed",
-        },
-        { status: 400 },
-      );
-    }
+    // FINLYNQ-88 (2026-05-22) — side-effect actions (`set_account`,
+    // `create_transfer`) are now ACCEPTED here. The rule application
+    // helper (`applyRulesToStagedBatch`) folds them into staged-row UPDATEs
+    // so the matched rows flip `tx_type='R'` + `target_account_id`
+    // (create_transfer) or get reassigned (set_account) before the user
+    // clicks Approve. `link_id` minting still happens server-side at
+    // approve time via `createTransferPair` per the four-check rule.
   } else {
     const legacyParse = LegacyBodySchema.safeParse(raw);
     if (!legacyParse.success) {
@@ -260,68 +258,39 @@ export async function POST(
     .returning({ id: schema.transactionRules.id });
   const ruleId = inserted[0]?.id;
 
-  // Walk current batch + apply patch to matching rows.
-  const stagedRows = await db
-    .select({
-      id: schema.stagedTransactions.id,
-      payee: schema.stagedTransactions.payee,
-      category: schema.stagedTransactions.category,
-      tags: schema.stagedTransactions.tags,
-      amount: schema.stagedTransactions.amount,
-      encryptionTier: schema.stagedTransactions.encryptionTier,
-      txType: schema.stagedTransactions.txType,
-    })
-    .from(schema.stagedTransactions)
-    .where(and(
-      eq(schema.stagedTransactions.stagedImportId, id),
-      eq(schema.stagedTransactions.userId, userId),
-    ))
-    .all();
-
-  const decode = (v: string | null, tier: string): string | null => {
-    if (v == null) return null;
-    return tier === "user" ? tryDecryptField(dek, v) : decryptStaged(v);
-  };
-
-  const probeRule: TransactionRule = {
-    id: ruleId ?? 0,
-    name: synthName,
-    conditions,
-    actions,
-    isActive: true,
-    priority: 0,
-  };
-
-  const updatedRowIds: string[] = [];
-  for (const r of stagedRows) {
-    const existing = decode(r.category, r.encryptionTier);
-    if (existing && existing.trim() !== "") continue;
-    if (r.txType === "R") continue;
-    if ((r.txType as string) === "T") continue;
-    const decodedPayee = decode(r.payee, r.encryptionTier) ?? "";
-    const probe = { payee: decodedPayee, amount: r.amount, tags: r.tags ?? "" };
-    if (!matchesRule(probe, probeRule)) continue;
-    // Apply pure patch — staged-row inline-create only supports set_category
-    // for now (we already refused side-effect actions above). The patch tells
-    // us which category id to encrypt onto the row.
-    const patch = computePureActionPatch(actions);
-    if (patch.categoryId == null) continue;
-    const newCategoryCt = r.encryptionTier === "user"
-      ? encryptField(dek, categoryNamePlain)
-      : encryptStaged(categoryNamePlain);
-    // Load-bearing: import_hash NEVER recomputed on edit.
-    await db
-      .update(schema.stagedTransactions)
-      .set({ category: newCategoryCt })
-      .where(and(
-        eq(schema.stagedTransactions.id, r.id),
-        eq(schema.stagedTransactions.userId, userId),
-      ));
-    updatedRowIds.push(r.id);
+  // FINLYNQ-88 — apply the just-created rule to matching rows in this batch.
+  // `onlyRuleId` scopes the helper to the new rule so re-running this
+  // endpoint doesn't blow away other rules' effects on user-edited rows.
+  // Tier-preserving re-encrypt + `import_hash`-stable + `encryption_tier`-
+  // stable + side-effect-aware (set_account / create_transfer fold into the
+  // same UPDATE) is the helper's responsibility — see
+  // src/lib/rules/apply-to-staged-batch.ts.
+  let updatedRowIds: string[] = [];
+  if (ruleId != null) {
+    try {
+      const applyResult = await applyRulesToStagedBatch(
+        db,
+        userId,
+        dek,
+        id,
+        { onlyRuleId: ruleId },
+      );
+      updatedRowIds = applyResult.matches.map((m) => m.rowId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[create-rule] applyRulesToStagedBatch threw", {
+        userId,
+        stagedImportId: id,
+        ruleId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      // Surface as a soft warning — the rule WAS inserted, so the response
+      // shape stays valid; the UI re-fetches and sees the rule on the next
+      // load even if the per-batch apply pass didn't fire.
+    }
   }
 
   // No invalidateUserTxCache — we didn't write to `transactions`.
-  void sql;
 
   return NextResponse.json({
     success: true,
