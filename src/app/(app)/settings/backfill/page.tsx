@@ -45,7 +45,9 @@ export default function BackfillWizardPage() {
       .then((data: unknown) => {
         const arr = Array.isArray(data) ? data : [];
         const list = arr
-          .filter((a: { isInvestment?: boolean }) => a.isInvestment === true)
+          .filter((a: { isInvestment?: boolean; accountId?: unknown }) =>
+            a.isInvestment === true && typeof a.accountId === "number" && Number.isFinite(a.accountId),
+          )
           .map((a: { accountId: number; name?: string }) => ({
             accountId: a.accountId,
             name: a.name ?? `account #${a.accountId}`,
@@ -61,10 +63,26 @@ export default function BackfillWizardPage() {
       setError("Pick a mode first.");
       return;
     }
+    if (scopeChoice === "accounts") {
+      if (accountIds.length === 0) {
+        setError("Select at least one account, or switch to 'All accounts'.");
+        return;
+      }
+    }
     setSubmitting(true);
     setError("");
     const scope: { accountIds?: number[]; dateFrom?: string; dateTo?: string } = {};
-    if (scopeChoice === "accounts" && accountIds.length > 0) scope.accountIds = accountIds;
+    if (scopeChoice === "accounts") {
+      // Defensive: filter out any null/undefined ids that might have crept in
+      // from a malformed account list (the API guards against this but the
+      // UI shouldn't trust it blindly).
+      const cleanIds = accountIds.filter((id): id is number => typeof id === "number" && Number.isFinite(id));
+      if (cleanIds.length === 0) {
+        setError("Selected account ids are invalid — refresh and try again.");
+        return;
+      }
+      scope.accountIds = cleanIds;
+    }
     if (scopeChoice === "date_range") {
       if (dateFrom) scope.dateFrom = dateFrom;
       if (dateTo) scope.dateTo = dateTo;

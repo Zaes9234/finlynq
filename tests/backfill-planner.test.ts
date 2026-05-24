@@ -325,6 +325,30 @@ describe("S5 — Idempotency", () => {
   });
 });
 
+// ─── Regression: opening_balance must not re-propose after apply ──────
+
+describe("Regression — opening_balance is idempotent after apply", () => {
+  it("a kind='buy' row with no trade_link_id (post-apply opening balance) is treated as canonical", () => {
+    const ACCT = acct(42);
+    const AAPL = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [AAPL, USD_CASH],
+      txs: [
+        // Post-apply state: kind set to 'buy' by the opening_balance apply path,
+        // no trade_link_id (opening balance has no cash leg). Pre-fix this
+        // would re-propose because isAlreadyCanonical required kind+pairing.
+        tx({ id: 9001, date: "2023-06-01", accountId: 42, portfolioHoldingId: 100, quantity: 50, amount: -10000, kind: "buy" }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+    expect(proposals).toHaveLength(0);
+  });
+});
+
 // ─── S6 — Undo blocking is enforced at apply time, not in planner ─────
 // (Covered by an integration test once apply.ts ships; the planner just
 //  emits the dependency graph that the undo route uses for the check.)

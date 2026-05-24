@@ -142,6 +142,28 @@ export async function applyProposal(
   const updatedTxIds: number[] = [];
   const insertedTxIds: number[] = [];
 
+  // Stale-proposal guard (load-bearing — surfaced as a duplicate-lot bug
+  // 2026-06-02). If any displaced row already has `kind` set, the proposal
+  // is stale: a prior backfill run already canonicalized this row, or the
+  // user edited it manually. Re-applying would mint a second lot. Refuse.
+  const staleCheck = await db
+    .select({ id: schema.transactions.id, kind: schema.transactions.kind })
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        inArray(schema.transactions.id, proposal.existingRowIds),
+      ),
+    );
+  const alreadyTagged = staleCheck.filter((r) => r.kind != null && r.kind !== "");
+  if (alreadyTagged.length > 0) {
+    return {
+      ok: false,
+      code: "rows_already_canonical",
+      message: `Cannot apply — ${alreadyTagged.length} of the displaced rows already have kind set (probably canonicalized by a prior run). Refresh the page to re-plan.`,
+    };
+  }
+
   await db.transaction(async (tx) => {
     // 1. Snapshot displaced rows
     const before = await tx

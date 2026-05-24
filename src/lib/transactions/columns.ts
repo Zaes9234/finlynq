@@ -33,6 +33,12 @@ export const COLUMN_IDS = [
   "createdAt",
   "updatedAt",
   "source",
+  // 2026-06-02: portfolio-op kind discriminator (Phase 2). Off by default;
+  // turn on to see canonicalization state at a glance — empty cell = no
+  // kind set yet (legacy / pre-Phase-2 / pre-backfill row); 'buy', 'sell',
+  // 'dividend', '*_cash_leg', etc. = canonicalized. Mirrors what the
+  // /settings/backfill coverage dashboard reads from.
+  "kind",
   "actions",
 ] as const;
 
@@ -58,6 +64,7 @@ export const DEFAULT_COLUMNS: Array<{ id: ColumnId; visible: boolean }> = [
   { id: "createdAt", visible: false },
   { id: "updatedAt", visible: false },
   { id: "source", visible: false },
+  { id: "kind", visible: false },
   { id: "actions", visible: true },
 ];
 
@@ -79,6 +86,7 @@ export const COLUMN_LABELS: Record<ColumnId, string> = {
   createdAt: "Created",
   updatedAt: "Updated",
   source: "Source",
+  kind: "Kind",
   actions: "Actions",
 };
 
@@ -144,6 +152,7 @@ export const FILTER_COLUMN_TYPES: Partial<Record<ColumnId, FilterType>> = {
   quantity: "numeric",
   amount: "numeric",
   source: "enum",
+  kind: "text",
 };
 
 export const FILTERABLE_COLUMN_IDS = Object.keys(

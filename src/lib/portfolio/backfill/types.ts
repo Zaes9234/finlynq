@@ -192,17 +192,19 @@ export const PORTFOLIO_OP_KINDS = new Set([
 ]);
 
 /**
- * A row is "already canonical" if its `kind` is set AND
- * (it doesn't expect pairing OR it has a trade_link_id).
- * Pair-less canonical shapes: dividend, interest, portfolio_income,
- * portfolio_expense, classify_only outputs.
+ * A row is "already canonical" if its `kind` is set. The backfill planner
+ * only canonicalizes rows that arrived NULL-kind from a legacy import or a
+ * pre-Phase-2 source — once any kind is stamped on a row (including by a
+ * prior backfill run), it is considered canonical and must NOT be
+ * re-proposed.
+ *
+ * Why so loose: opening_balance proposals legitimately stamp `kind='buy'`
+ * with NO trade_link_id (the row is a carried-in standalone position with
+ * no cash leg by design). A tighter rule that required `tradeLinkId` for
+ * stock-leg kinds would re-propose those rows on every subsequent run and
+ * duplicate the lot when re-applied. → bug surfaced 2026-06-02, see commit
+ * for the regression test in tests/backfill-planner.test.ts.
  */
-const PAIRLESS_CANONICAL_KINDS = new Set([
-  "dividend", "interest", "portfolio_income", "portfolio_expense",
-]);
-
 export function isAlreadyCanonical(tx: SnapshotTx): boolean {
-  if (!tx.kind) return false;
-  if (PAIRLESS_CANONICAL_KINDS.has(tx.kind)) return true;
-  return tx.tradeLinkId !== null || tx.linkId !== null;
+  return tx.kind != null && tx.kind !== "";
 }

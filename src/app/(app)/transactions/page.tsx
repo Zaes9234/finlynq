@@ -3506,6 +3506,33 @@ function TransactionsPageInner() {
                               )}
                             </TableCell>
                           );
+                        case "kind":
+                          // Phase 2 canonicalization tag — surfaces what the
+                          // /settings/backfill coverage dashboard reads from.
+                          // Empty = not yet canonicalized (legacy/pre-Phase-2
+                          // or pre-backfill). A coloured pill means the row
+                          // has a portfolio-op shape the lot engine recognizes.
+                          return (
+                            <TableCell key={c.id} className="text-sm">
+                              {t.kind ? (
+                                <Badge
+                                  variant="outline"
+                                  className={`text-[10px] ${
+                                    /_cash_leg$/.test(t.kind)
+                                      ? "border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300"
+                                      : t.kind === "dividend" || t.kind === "interest"
+                                        ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+                                        : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                                  }`}
+                                  title={t.kind}
+                                >
+                                  {t.kind}
+                                </Badge>
+                              ) : (
+                                <span className="text-muted-foreground/50">—</span>
+                              )}
+                            </TableCell>
+                          );
                         case "actions":
                           return (
                             <TableCell key={c.id}>
