@@ -3512,6 +3512,9 @@ function TransactionsPageInner() {
                           // Empty = not yet canonicalized (legacy/pre-Phase-2
                           // or pre-backfill). A coloured pill means the row
                           // has a portfolio-op shape the lot engine recognizes.
+                          // `opening_balance` (violet) is distinct from `buy`
+                          // (amber) so users can tell carried-in positions
+                          // from regular buys at a glance.
                           return (
                             <TableCell key={c.id} className="text-sm">
                               {t.kind ? (
@@ -3522,7 +3525,9 @@ function TransactionsPageInner() {
                                       ? "border-sky-500/40 bg-sky-500/10 text-sky-700 dark:text-sky-300"
                                       : t.kind === "dividend" || t.kind === "interest"
                                         ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                                        : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+                                        : t.kind === "opening_balance"
+                                          ? "border-violet-500/40 bg-violet-500/10 text-violet-700 dark:text-violet-300"
+                                          : "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300"
                                   }`}
                                   title={t.kind}
                                 >

@@ -328,7 +328,7 @@ describe("S5 — Idempotency", () => {
 // ─── Regression: opening_balance must not re-propose after apply ──────
 
 describe("Regression — opening_balance is idempotent after apply", () => {
-  it("a kind='buy' row with no trade_link_id (post-apply opening balance) is treated as canonical", () => {
+  it("a kind='opening_balance' row with no trade_link_id (post-apply) is treated as canonical", () => {
     const ACCT = acct(42);
     const AAPL = holding(100, 42, { currency: "USD" });
     const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
@@ -337,15 +337,43 @@ describe("Regression — opening_balance is idempotent after apply", () => {
       accounts: [ACCT],
       holdings: [AAPL, USD_CASH],
       txs: [
-        // Post-apply state: kind set to 'buy' by the opening_balance apply path,
-        // no trade_link_id (opening balance has no cash leg). Pre-fix this
-        // would re-propose because isAlreadyCanonical required kind+pairing.
-        tx({ id: 9001, date: "2023-06-01", accountId: 42, portfolioHoldingId: 100, quantity: 50, amount: -10000, kind: "buy" }),
+        // Post-apply state: kind set to 'opening_balance' by the apply path,
+        // no trade_link_id (carried-in position has no cash leg). The strict
+        // isAlreadyCanonical predicate recognizes 'opening_balance' as a
+        // pair-less canonical kind and skips re-proposing.
+        tx({ id: 9001, date: "2023-06-01", accountId: 42, portfolioHoldingId: 100, quantity: 50, amount: -10000, kind: "opening_balance" }),
       ],
     });
 
     const proposals = planBackfill(snap, CONFIG_REFUSE);
     expect(proposals).toHaveLength(0);
+  });
+
+  it("a kind='buy' row with no trade_link_id is NOT canonical — broken pair to re-propose", () => {
+    // Companion case: now that opening_balance is distinct, a row with
+    // kind='buy' and no trade_link_id is unambiguously a broken pair. The
+    // planner should surface it (orphan_stock_leg in refuse_orphans mode
+    // when it isn't the first tx for the holding).
+    const ACCT = acct(42);
+    const AAPL = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [AAPL, USD_CASH],
+      txs: [
+        // Prior canonical buy/cash pair so the orphan isn't the first tx.
+        tx({ id: 7000, date: "2022-01-01", accountId: 42, portfolioHoldingId: 100, quantity: 10, amount: -2000, kind: "buy", tradeLinkId: "old" }),
+        tx({ id: 7001, date: "2022-01-01", accountId: 42, portfolioHoldingId: 99, quantity: -2000, amount: -2000, kind: "buy_cash_leg", tradeLinkId: "old" }),
+        // Broken pair — kind='buy' but no trade_link_id and no cash leg.
+        tx({ id: 9001, date: "2023-06-01", accountId: 42, portfolioHoldingId: 100, quantity: 50, amount: -10000, kind: "buy" }),
+      ],
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+    expect(proposals.length).toBeGreaterThan(0);
+    // The broken-pair row should NOT be skipped as canonical.
+    expect(proposals.some((p) => p.existingRowIds.includes(9001))).toBe(true);
   });
 });
 
@@ -405,7 +433,7 @@ describe("Opening balance — first transaction for a holding", () => {
     expect(proposals).toHaveLength(1);
     expect(proposals[0].kind).toBe("opening_balance");
     expect(proposals[0].confidence).toBe("medium");
-    expect(proposals[0].replacement).toEqual([{ txId: 9001, kind: "buy" }]);
+    expect(proposals[0].replacement).toEqual([{ txId: 9001, kind: "opening_balance" }]);
     expect(proposals[0].synthesized).toHaveLength(0);
   });
 
@@ -462,9 +490,11 @@ describe("S8 — Migration from competitor (no cash data, synthesize mode)", () 
     const div = proposals.find((p) => p.kind === "dividend");
     const sell = proposals.find((p) => p.kind === "sell_pair");
 
-    // Opening balance: just classify as 'buy', no synth, no cash impact.
+    // Opening balance: stamp the distinct 'opening_balance' literal, no
+    // synth, no cash impact. (The kind keeps planner + coverage in sync —
+    // see PAIRLESS_CANONICAL_KINDS in src/lib/portfolio/backfill/types.ts.)
     expect(openingBalance).toBeDefined();
-    expect(openingBalance?.replacement[0]?.kind).toBe("buy");
+    expect(openingBalance?.replacement[0]?.kind).toBe("opening_balance");
     expect(openingBalance?.synthesized).toHaveLength(0);
     expect(openingBalance?.deltas.balance).toBe(0);
 

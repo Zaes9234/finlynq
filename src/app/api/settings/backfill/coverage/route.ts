@@ -9,10 +9,16 @@
  *
  * "Canonical" mirrors the planner's `isAlreadyCanonical` predicate:
  *   kind IS NOT NULL AND (
- *     kind IN ('dividend','interest','portfolio_income','portfolio_expense')
+ *     kind IN PAIRLESS_CANONICAL_KINDS
  *     OR trade_link_id IS NOT NULL
  *     OR link_id IS NOT NULL
  *   )
+ *
+ * The PAIRLESS_CANONICAL_KINDS set is imported from
+ * @/lib/portfolio/backfill/types so the SQL predicate here cannot drift
+ * from the planner's TS predicate. See
+ * HANDOVER_2026-06-02_BACKFILL_REVIEW_BUGS.md for the 2026-06-02 incident
+ * where divergence between the two surfaced as "312 pending, 0 proposals".
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -21,8 +27,9 @@ import { db, schema } from "@/db";
 import { requireEncryption } from "@/lib/auth/require-encryption";
 import { safeErrorMessage, logApiError } from "@/lib/validate";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
+import { PAIRLESS_CANONICAL_KINDS } from "@/lib/portfolio/backfill/types";
 
-const PAIRLESS_CANONICAL_KINDS = ["dividend", "interest", "portfolio_income", "portfolio_expense"];
+const PAIRLESS_CANONICAL_KINDS_ARR = Array.from(PAIRLESS_CANONICAL_KINDS);
 
 export async function GET(request: NextRequest) {
   const auth = await requireEncryption(request);
@@ -72,7 +79,7 @@ export async function GET(request: NextRequest) {
           COUNT(*)::int AS total_txs,
           SUM(
             CASE WHEN ${schema.transactions.kind} IS NOT NULL AND (
-              ${schema.transactions.kind} IN (${sql.join(PAIRLESS_CANONICAL_KINDS.map((k) => sql`${k}`), sql`, `)})
+              ${schema.transactions.kind} IN (${sql.join(PAIRLESS_CANONICAL_KINDS_ARR.map((k) => sql`${k}`), sql`, `)})
               OR ${schema.transactions.tradeLinkId} IS NOT NULL
               OR ${schema.transactions.linkId} IS NOT NULL
             ) THEN 1 ELSE 0 END

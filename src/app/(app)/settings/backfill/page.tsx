@@ -38,19 +38,21 @@ export default function BackfillWizardPage() {
   const [error, setError] = useState<string>("");
 
   useEffect(() => {
-    // /api/accounts returns an array directly (not wrapped). Each row carries
-    // `accountId` (not `id`) and `isInvestment` (camel) per src/lib/queries.ts:701.
+    // /api/accounts returns raw Drizzle rows passed through decryptNamedRows
+    // — the PK field is `id`, not `accountId`. The wizard normalizes to
+    // `accountId` locally because the planner POST body expects
+    // `scope.accountIds[]`.
     fetch("/api/accounts")
       .then((r) => r.json())
       .then((data: unknown) => {
         const arr = Array.isArray(data) ? data : [];
         const list = arr
-          .filter((a: { isInvestment?: boolean; accountId?: unknown }) =>
-            a.isInvestment === true && typeof a.accountId === "number" && Number.isFinite(a.accountId),
+          .filter((a: { isInvestment?: boolean; id?: unknown }) =>
+            a.isInvestment === true && typeof a.id === "number" && Number.isFinite(a.id),
           )
-          .map((a: { accountId: number; name?: string }) => ({
-            accountId: a.accountId,
-            name: a.name ?? `account #${a.accountId}`,
+          .map((a: { id: number; name?: string }) => ({
+            accountId: a.id,
+            name: a.name ?? `account #${a.id}`,
             isInvestment: true,
           }));
         setAccounts(list);

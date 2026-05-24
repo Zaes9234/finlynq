@@ -341,7 +341,14 @@ export function planBackfill(
           confidence: "medium",
           summary: `${describeTx("Opening balance", t, idx)} — record as a lot with no cash impact`,
           existingRowIds: [t.id],
-          replacement: [{ txId: t.id, kind: "buy" }],
+          // Stamp the distinct `opening_balance` kind so the canonical-shape
+          // check converges between planner and coverage. A row with
+          // kind='buy' and no trade_link_id is now unambiguously a broken
+          // pair, not a carried-in position. The lot engine doesn't branch
+          // on this kind — qty>0 still routes through openLotForBuyHook in
+          // applyLotEffectsForTx; the literal is purely canonicalization
+          // metadata.
+          replacement: [{ txId: t.id, kind: "opening_balance" }],
           synthesized: [],
           deltas: { balance: 0, lots: [{ holdingId: t.portfolioHoldingId!, qtyDelta: t.quantity }], realizedGainBase: null },
           dependsOn: [],

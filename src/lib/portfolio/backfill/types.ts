@@ -192,19 +192,39 @@ export const PORTFOLIO_OP_KINDS = new Set([
 ]);
 
 /**
- * A row is "already canonical" if its `kind` is set. The backfill planner
- * only canonicalizes rows that arrived NULL-kind from a legacy import or a
- * pre-Phase-2 source — once any kind is stamped on a row (including by a
- * prior backfill run), it is considered canonical and must NOT be
- * re-proposed.
+ * Pair-less canonical kinds: rows that are in their final Phase-2 shape
+ * even though they have NO `trade_link_id` (and NO `link_id`). Shared with
+ * the coverage endpoint at /api/settings/backfill/coverage so the planner
+ * and the coverage dashboard agree on which rows are canonical.
  *
- * Why so loose: opening_balance proposals legitimately stamp `kind='buy'`
- * with NO trade_link_id (the row is a carried-in standalone position with
- * no cash leg by design). A tighter rule that required `tradeLinkId` for
- * stock-leg kinds would re-propose those rows on every subsequent run and
- * duplicate the lot when re-applied. → bug surfaced 2026-06-02, see commit
- * for the regression test in tests/backfill-planner.test.ts.
+ * `opening_balance` is in this set: carried-in standalone positions have
+ * no cash leg by design (the user transferred the position from another
+ * platform; no money moved in Finlynq).
+ */
+export const PAIRLESS_CANONICAL_KINDS = new Set([
+  "dividend",
+  "interest",
+  "portfolio_income",
+  "portfolio_expense",
+  "opening_balance",
+]);
+
+/**
+ * A row is "already canonical" if its `kind` is set AND the row is in
+ * its final Phase-2 shape — either a pair-less kind (no `trade_link_id`
+ * needed) or a kind that pairs through `trade_link_id` / `link_id`.
+ *
+ * Symmetry with /api/settings/backfill/coverage's SQL predicate is
+ * load-bearing: divergence between the two surfaces leads to the
+ * "coverage says N pending, planner returns 0 proposals" bug surfaced
+ * 2026-06-02 (HANDOVER_2026-06-02_BACKFILL_REVIEW_BUGS.md). The strict
+ * predicate is safe because opening_balance proposals now stamp the
+ * distinct `kind='opening_balance'` literal — a row with `kind='buy'`
+ * and no trade_link_id is unambiguously a broken pair to be re-proposed,
+ * not a carried-in position to be left alone.
  */
 export function isAlreadyCanonical(tx: SnapshotTx): boolean {
-  return tx.kind != null && tx.kind !== "";
+  if (tx.kind == null || tx.kind === "") return false;
+  if (PAIRLESS_CANONICAL_KINDS.has(tx.kind)) return true;
+  return tx.tradeLinkId != null || tx.linkId != null;
 }
