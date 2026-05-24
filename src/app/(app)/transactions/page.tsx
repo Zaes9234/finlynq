@@ -1938,53 +1938,57 @@ function TransactionsPageInner() {
               }
             />
             <DropdownMenuContent align="end" className="min-w-56">
-              <DropdownMenuLabel>Quick add</DropdownMenuLabel>
-              <DropdownMenuItem
-                onClick={() => {
-                  setDialogMode("transaction");
-                  setEditId(null);
-                  setSubmitError(null);
-                  setDialogOpen(true);
-                }}
-              >
-                <Receipt className="h-4 w-4 mr-2" /> Transaction
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onClick={() => {
-                  setDialogMode("transfer");
-                  setEditId(null);
-                  setSubmitError(null);
-                  setDialogOpen(true);
-                }}
-              >
-                <ArrowRightLeft className="h-4 w-4 mr-2" /> Transfer
-              </DropdownMenuItem>
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Quick add</DropdownMenuLabel>
+                <DropdownMenuItem
+                  onClick={() => {
+                    setDialogMode("transaction");
+                    setEditId(null);
+                    setSubmitError(null);
+                    setDialogOpen(true);
+                  }}
+                >
+                  <Receipt className="h-4 w-4 mr-2" /> Transaction
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={() => {
+                    setDialogMode("transfer");
+                    setEditId(null);
+                    setSubmitError(null);
+                    setDialogOpen(true);
+                  }}
+                >
+                  <ArrowRightLeft className="h-4 w-4 mr-2" /> Transfer
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
               <DropdownMenuSeparator />
-              <DropdownMenuLabel>Portfolio operations</DropdownMenuLabel>
-              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=buy")}>
-                Buy
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=sell")}>
-                Sell
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=swap")}>
-                Swap
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=transfer")}>
-                In-kind transfer
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=income-expense")}>
-                Income / expense
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=fx-conversion")}>
-                FX conversion
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=deposit")}>
-                Brokerage deposit
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=withdrawal")}>
-                Brokerage withdrawal
-              </DropdownMenuItem>
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Portfolio operations</DropdownMenuLabel>
+                <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=buy")}>
+                  Buy
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=sell")}>
+                  Sell
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=swap")}>
+                  Swap
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=transfer")}>
+                  In-kind transfer
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=income-expense")}>
+                  Income / expense
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=fx-conversion")}>
+                  FX conversion
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=deposit")}>
+                  Brokerage deposit
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=withdrawal")}>
+                  Brokerage withdrawal
+                </DropdownMenuItem>
+              </DropdownMenuGroup>
             </DropdownMenuContent>
           </DropdownMenu>
           <Button
