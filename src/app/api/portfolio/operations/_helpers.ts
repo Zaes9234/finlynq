@@ -83,6 +83,7 @@ export async function cascadeDeleteForReplace(
       id: schema.transactions.id,
       tradeLinkId: schema.transactions.tradeLinkId,
       linkId: schema.transactions.linkId,
+      swapLinkId: schema.transactions.swapLinkId,
     })
     .from(schema.transactions)
     .where(
@@ -122,6 +123,38 @@ export async function cascadeDeleteForReplace(
         ),
       );
     for (const r of siblings) idSet.add(r.id);
+  }
+  // Phase 4 — swap_link_id ties the 4 rows of a swap; cascade across
+  // their inner tradeLinkIds too so all stock+cash legs land in the set.
+  if (target.swapLinkId) {
+    const siblings = await db
+      .select({
+        id: schema.transactions.id,
+        tradeLinkId: schema.transactions.tradeLinkId,
+      })
+      .from(schema.transactions)
+      .where(
+        and(
+          eq(schema.transactions.userId, userId),
+          eq(schema.transactions.swapLinkId, target.swapLinkId),
+        ),
+      );
+    for (const r of siblings) idSet.add(r.id);
+    const tradeLinks = new Set(
+      siblings.map((r) => r.tradeLinkId).filter((v): v is string => !!v),
+    );
+    for (const tl of tradeLinks) {
+      const more = await db
+        .select({ id: schema.transactions.id })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.userId, userId),
+            eq(schema.transactions.tradeLinkId, tl),
+          ),
+        );
+      for (const r of more) idSet.add(r.id);
+    }
   }
   const allIds = Array.from(idSet);
 

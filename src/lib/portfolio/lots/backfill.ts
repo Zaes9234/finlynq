@@ -293,7 +293,7 @@ export async function buildLotsForUser(
         originOverride: "backfill",
       });
       const tmpId = nextTmpId++;
-      const lot: InMemLot = { ...plan.lot, tmpId, status: "open" };
+      const lot: InMemLot = { ...plan.lot, tmpId, status: "open", side: "long" };
       pendingLots.push(lot);
       const arr = lotsByKey.get(key) ?? [];
       arr.push(lot);

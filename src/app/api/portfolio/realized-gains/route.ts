@@ -13,10 +13,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import {
+  augmentWithBaseCurrency,
   listRealizedGainClosures,
   realizedGainsToCsv,
   type RealizedGainsFilter,
 } from "@/lib/portfolio/realized-gains";
+import { getBaseCurrency } from "@/lib/fx-service";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -42,6 +44,19 @@ export async function GET(request: NextRequest) {
 
   const result = await listRealizedGainClosures(userId, dek, filter);
 
+  // Phase 5 — base-currency augmentation when ?currency=base is set.
+  const useBase = params.get("currency") === "base";
+  let augmented:
+    | (typeof result & { totalRealizedGainInBase: number })
+    | null = null;
+  if (useBase) {
+    const baseCurrency = await getBaseCurrency(
+      userId,
+      params.get("baseCurrency"),
+    );
+    augmented = await augmentWithBaseCurrency(result, userId, baseCurrency);
+  }
+
   if (params.get("format") === "csv") {
     const csv = realizedGainsToCsv(result);
     const filenameParts: string[] = ["realized-gains"];
@@ -55,5 +70,8 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  return NextResponse.json({ success: true, data: result });
+  return NextResponse.json({
+    success: true,
+    data: augmented ?? result,
+  });
 }

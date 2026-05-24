@@ -36,6 +36,11 @@ export type LotOrigin =
  */
 export type LotStatus = "open" | "closed" | "transferred_out";
 
+/** 'long' (default) or 'short'. Short lots are opened when a Sell
+ *  exceeds available long inventory; subsequent Buys close shorts
+ *  before opening fresh long lots. */
+export type LotSide = "long" | "short";
+
 /**
  * Open lot — `qty_remaining > 0` if status='open'.
  *
@@ -59,6 +64,7 @@ export interface HoldingLot {
   origin: LotOrigin;
   parentLotId: number | null;
   status: LotStatus;
+  side: LotSide;
   source: TransactionSource;
 }
 
@@ -81,7 +87,15 @@ export interface HoldingLotClosure {
   realizedGain: number;
   currency: string;
   daysHeld: number;
-  closeKind: "sell" | "transfer_out";
+  closeKind:
+    | "sell"
+    | "transfer_out"
+    | "swap_out"
+    | "fx_conversion"
+    | "income_expense"
+    | "buy_sell"
+    | "short_open"
+    | "short_close";
   source: TransactionSource;
 }
 

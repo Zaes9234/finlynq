@@ -77,8 +77,10 @@ export class InvalidLinkPairError extends Error {
 // ─── openLotForBuy ────────────────────────────────────────────────────────
 
 export interface OpenLotPlan {
-  /** Insert-shape: id=0 placeholder, fxToUsdAtOpen optional. */
-  lot: Omit<HoldingLot, "id" | "status" | "qtyRemaining"> & {
+  /** Insert-shape: id=0 placeholder, fxToUsdAtOpen optional.
+   *  `side` is omitted — long is the default at the DB level; the
+   *  write-hook layer sets `side='short'` explicitly for overflow shorts. */
+  lot: Omit<HoldingLot, "id" | "status" | "qtyRemaining" | "side"> & {
     qtyRemaining: number;
   };
 }
@@ -405,6 +407,7 @@ export function transferLot(input: TransferLotInput): TransferLotResult {
       costPerShare: src.costPerShare, // inherit
       currency: src.currency, // inherit; metrics layer FXes to holdingCurrency at read time
       fxToUsdAtOpen: src.fxToUsdAtOpen,
+      side: src.side, // inherit long/short side
       origin: "transfer_in",
       parentLotId: src.id,
       source: destTx.source,

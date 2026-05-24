@@ -36,6 +36,7 @@ interface TxRow {
   kind: string | null;
   tradeLinkId: string | null;
   linkId: string | null;
+  swapLinkId: string | null;
   categoryId: number | null;
   relatedHoldingId: number | null;
 }
@@ -72,6 +73,7 @@ export async function GET(request: NextRequest) {
         kind: schema.transactions.kind,
         tradeLinkId: schema.transactions.tradeLinkId,
         linkId: schema.transactions.linkId,
+        swapLinkId: schema.transactions.swapLinkId,
         categoryId: schema.transactions.categoryId,
         relatedHoldingId: schema.transactions.relatedHoldingId,
       })
@@ -138,6 +140,60 @@ export async function GET(request: NextRequest) {
           ),
         );
       return rows as TxRow[];
+    }
+
+    // Phase 4 — swap_link_id ties all 4 rows of a swap. When present, the
+    // load endpoint returns the full swap state regardless of which leg the
+    // user clicked. The SwapForm picks this up and enters edit mode.
+    if (t.swapLinkId) {
+      const all = await db
+        .select({
+          id: schema.transactions.id,
+          date: schema.transactions.date,
+          accountId: schema.transactions.accountId,
+          portfolioHoldingId: schema.transactions.portfolioHoldingId,
+          quantity: schema.transactions.quantity,
+          amount: schema.transactions.amount,
+          currency: schema.transactions.currency,
+          payee: schema.transactions.payee,
+          note: schema.transactions.note,
+          tags: schema.transactions.tags,
+          kind: schema.transactions.kind,
+          tradeLinkId: schema.transactions.tradeLinkId,
+          linkId: schema.transactions.linkId,
+          swapLinkId: schema.transactions.swapLinkId,
+          categoryId: schema.transactions.categoryId,
+          relatedHoldingId: schema.transactions.relatedHoldingId,
+        })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.userId, userId),
+            eq(schema.transactions.swapLinkId, t.swapLinkId),
+          ),
+        );
+      const rows = all as TxRow[];
+      const sell = rows.find((r) => r.kind === "sell");
+      const buy = rows.find((r) => r.kind === "buy");
+      if (sell && buy) {
+        return NextResponse.json({
+          success: true,
+          data: {
+            op: "swap",
+            primaryTxId: sell.id,
+            accountId: sell.accountId,
+            sourceHoldingId: sell.portfolioHoldingId,
+            sourceQty: Math.abs(Number(sell.quantity ?? 0)),
+            sourceProceeds: Math.abs(Number(sell.amount)),
+            destHoldingId: buy.portfolioHoldingId,
+            destQty: Number(buy.quantity ?? 0),
+            destCost: Math.abs(Number(buy.amount)),
+            date: sell.date,
+            payee: decryptStr(sell.payee),
+            note: decryptStr(sell.note),
+          },
+        });
+      }
     }
 
     // Dispatch by kind. Cash-leg / FX-leg rows resolve to their primary leg
@@ -227,6 +283,48 @@ export async function GET(request: NextRequest) {
             date: source.date,
             payee: decryptStr(source.payee),
             note: decryptStr(source.note),
+          },
+        });
+      }
+      case "brokerage_deposit_in":
+      case "brokerage_deposit_out": {
+        const siblings = t.linkId ? await loadSiblings("linkId", t.linkId) : [t];
+        const source = siblings.find((s) => s.kind === "brokerage_deposit_out") ?? t;
+        const dest = siblings.find((s) => s.kind === "brokerage_deposit_in") ?? t;
+        return NextResponse.json({
+          success: true,
+          data: {
+            op: "deposit",
+            primaryTxId: dest.id,
+            sourceAccountId: source.accountId,
+            destAccountId: dest.accountId,
+            destCashSleeveHoldingId: dest.portfolioHoldingId,
+            amount: Math.abs(Number(dest.amount)),
+            date: dest.date,
+            payee: decryptStr(dest.payee),
+            note: decryptStr(dest.note),
+            tags: decryptStr(dest.tags),
+          },
+        });
+      }
+      case "brokerage_withdrawal_in":
+      case "brokerage_withdrawal_out": {
+        const siblings = t.linkId ? await loadSiblings("linkId", t.linkId) : [t];
+        const source = siblings.find((s) => s.kind === "brokerage_withdrawal_out") ?? t;
+        const dest = siblings.find((s) => s.kind === "brokerage_withdrawal_in") ?? t;
+        return NextResponse.json({
+          success: true,
+          data: {
+            op: "withdrawal",
+            primaryTxId: source.id,
+            sourceAccountId: source.accountId,
+            sourceCashSleeveHoldingId: source.portfolioHoldingId,
+            destAccountId: dest.accountId,
+            amount: Math.abs(Number(source.amount)),
+            date: source.date,
+            payee: decryptStr(source.payee),
+            note: decryptStr(source.note),
+            tags: decryptStr(source.tags),
           },
         });
       }

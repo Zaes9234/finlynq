@@ -17,7 +17,7 @@ import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
-import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle, Link2, ArrowRightLeft, Columns3, ArrowUp, ArrowDown, Filter } from "lucide-react";
+import { Plus, ChevronLeft, ChevronRight, Trash2, Pencil, SlidersHorizontal, ChevronDown, Receipt, Search, X, Scissors, AlertTriangle, Link2, ArrowRightLeft, Columns3, ArrowUp, ArrowDown, Filter, TrendingUp } from "lucide-react";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuCheckboxItem, DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { SplitDialog } from "./_components/split-dialog";
 import { formatAccountLabel } from "@/lib/account-label";
@@ -1547,6 +1547,10 @@ function TransactionsPageInner() {
         "fx_fee",
         "portfolio_income",
         "portfolio_expense",
+        "brokerage_deposit_in",
+        "brokerage_deposit_out",
+        "brokerage_withdrawal_in",
+        "brokerage_withdrawal_out",
       ]);
       if (portfolioKinds.has(t.kind)) {
         const opForKind: Record<string, string> = {
@@ -1561,6 +1565,10 @@ function TransactionsPageInner() {
           fx_fee: "fx-conversion",
           portfolio_income: "income-expense",
           portfolio_expense: "income-expense",
+          brokerage_deposit_in: "deposit",
+          brokerage_deposit_out: "deposit",
+          brokerage_withdrawal_in: "withdrawal",
+          brokerage_withdrawal_out: "withdrawal",
         };
         const op = opForKind[t.kind] ?? "buy";
         // Use the stock-leg / primary-leg id for editing — for cash legs
@@ -1924,11 +1932,11 @@ function TransactionsPageInner() {
                   variant="outline"
                   size="icon"
                   aria-label="More transaction types"
-                />
+                >
+                  <ChevronDown className="h-4 w-4" />
+                </Button>
               }
-            >
-              <ChevronDown className="h-4 w-4" />
-            </DropdownMenuTrigger>
+            />
             <DropdownMenuContent align="end" className="min-w-56">
               <DropdownMenuLabel>Quick add</DropdownMenuLabel>
               <DropdownMenuItem
@@ -1971,8 +1979,20 @@ function TransactionsPageInner() {
               <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=fx-conversion")}>
                 FX conversion
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=deposit")}>
+                Brokerage deposit
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => router.push("/portfolio/new?op=withdrawal")}>
+                Brokerage withdrawal
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
+          <Button
+            variant="outline"
+            onClick={() => router.push("/portfolio/new")}
+          >
+            <TrendingUp className="h-4 w-4 mr-2" /> Investment Transactions
+          </Button>
         </div>
         <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) { setEditId(null); setDialogMode("transaction"); resetForm(); setSubmitError(null); } }}>
           <DialogContent className="max-w-lg">
@@ -2008,30 +2028,6 @@ function TransactionsPageInner() {
 
             {dialogMode === "transaction" && (
             <form onSubmit={handleSubmit} className="space-y-4">
-              {/* Phase 2 portfolio-ops refactor: when the picked account is an
-                  investment account, recommend the dedicated /portfolio/new
-                  flow so trades land as the two-row buy/sell representation
-                  with explicit cash-sleeve effects + lot tracking. The generic
-                  form still works for back-compat (it auto-routes to the Cash
-                  sleeve), but new investment activity should prefer the
-                  dedicated form. Edits stay here for now. */}
-              {!editId && (() => {
-                const sel = accounts.find((a) => String(a.id) === form.accountId);
-                if (!sel?.isInvestment) return null;
-                return (
-                  <div className="rounded-md border border-amber-300/60 bg-amber-50 dark:bg-amber-950/40 dark:border-amber-800/60 p-3 text-xs flex items-start gap-2">
-                    <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
-                    <div className="space-y-1">
-                      <p className="font-medium text-amber-900 dark:text-amber-200">
-                        This is an investment account
-                      </p>
-                      <p className="text-amber-800/80 dark:text-amber-300/80">
-                        Use the dedicated <Link href="/portfolio/new" className="underline font-medium hover:no-underline">Portfolio actions</Link> page for Buys, Sells, Swaps, Income, and FX — they record cash-sleeve effects + lot tracking automatically.
-                      </p>
-                    </div>
-                  </div>
-                );
-              })()}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>Date</Label>
@@ -2090,7 +2086,13 @@ function TransactionsPageInner() {
                       });
                     }}
                     items={sortAccount(
-                      accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
+                      accounts
+                        // Investment accounts can only be touched via the
+                        // Portfolio Operations surface in new-entry mode.
+                        // Edit mode keeps the picker open for legacy rows
+                        // so they remain editable. See Phase 1 plan.
+                        .filter((a) => !!editId || a.isInvestment !== true)
+                        .map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name })),
                       (a) => Number(a.value),
                       (a, z) => a.label.localeCompare(z.label),
                     )}
@@ -2454,29 +2456,6 @@ function TransactionsPageInner() {
                 old linked-siblings panel renders for navigation. */}
             {dialogMode === "transfer" && (
             <form onSubmit={handleTransferSubmit} className="space-y-4">
-              {/* Phase 2 portfolio-ops refactor: in-kind transfers (both legs
-                  investment, same holding) should go through /portfolio/new
-                  where the new helper enforces the same-holding rule and
-                  cascades cost basis correctly. This dialog still supports
-                  in-kind for edits + back-compat. */}
-              {!editId && (() => {
-                const fromAcct = accounts.find((a) => String(a.id) === transferForm.fromAccountId);
-                const toAcct = accounts.find((a) => String(a.id) === transferForm.toAccountId);
-                if (!fromAcct?.isInvestment || !toAcct?.isInvestment) return null;
-                return (
-                  <div className="rounded-md border border-amber-300/60 bg-amber-50 dark:bg-amber-950/40 dark:border-amber-800/60 p-3 text-xs flex items-start gap-2">
-                    <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
-                    <div className="space-y-1">
-                      <p className="font-medium text-amber-900 dark:text-amber-200">
-                        Investment-to-investment transfer
-                      </p>
-                      <p className="text-amber-800/80 dark:text-amber-300/80">
-                        For in-kind share moves between two brokerages, use the dedicated <Link href="/portfolio/new?op=transfer" className="underline font-medium hover:no-underline">In-kind transfer</Link> form — it enforces the same-holding rule and cascades cost basis to the destination lot.
-                      </p>
-                    </div>
-                  </div>
-                );
-              })()}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>Date</Label>
@@ -2537,6 +2516,7 @@ function TransactionsPageInner() {
                         onValueChange={(v) => setTransferForm({ ...transferForm, fromAccountId: v })}
                         items={sortAccount(
                           accounts
+                            .filter((a) => !!editId || a.isInvestment !== true)
                             .filter((a) => allowSameAccount || String(a.id) !== transferForm.toAccountId)
                             .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
                           (a) => Number(a.value),
@@ -2555,6 +2535,7 @@ function TransactionsPageInner() {
                         onValueChange={(v) => setTransferForm({ ...transferForm, toAccountId: v })}
                         items={sortAccount(
                           accounts
+                            .filter((a) => !!editId || a.isInvestment !== true)
                             .filter((a) => allowSameAccount || String(a.id) !== transferForm.fromAccountId)
                             .map((a): ComboboxItemShape => ({ value: String(a.id), label: `${a.name} · ${a.currency}` })),
                           (a) => Number(a.value),

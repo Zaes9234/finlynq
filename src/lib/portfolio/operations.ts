@@ -309,8 +309,14 @@ export interface RecordSellInput {
   tags?: string;
   source?: TransactionSource;
   cashSleeveHoldingId?: number;
-  /** Lot selection — defaults to FIFO. */
-  lotSelection?: { method: LotSelectionStrategy; lotIds?: number[] };
+  /** Lot selection — defaults to FIFO. Phase 3: `lots` carries per-lot
+   *  qty when the LotPicker is in per-lot mode; `lotIds` is the legacy
+   *  shape (closes the full remaining qty of each named lot). */
+  lotSelection?: {
+    method: LotSelectionStrategy;
+    lotIds?: number[];
+    lots?: Array<{ lotId: number; qty: number }>;
+  };
 }
 
 export interface RecordSellResult {
@@ -417,6 +423,7 @@ export async function recordSell(input: RecordSellInput): Promise<RecordSellResu
       holdingCurrency: holding.currency,
       strategy: input.lotSelection?.method ?? "FIFO",
       lotIds: input.lotSelection?.lotIds,
+      perLotQty: input.lotSelection?.lots,
     },
   );
 
@@ -449,6 +456,7 @@ export interface RecordSwapInput {
 export interface RecordSwapResult {
   sell: RecordSellResult;
   buy: RecordBuyResult;
+  swapLinkId: string;
 }
 
 export async function recordSwap(input: RecordSwapInput): Promise<RecordSwapResult> {
@@ -482,7 +490,24 @@ export async function recordSwap(input: RecordSwapInput): Promise<RecordSwapResu
     note: input.note,
     source: input.source,
   });
-  return { sell, buy };
+  // Phase 4 — stamp a swap_link_id on all 4 rows so the load endpoint
+  // can return the full swap state for edit.
+  const swapLinkId = randomUUID();
+  await db
+    .update(schema.transactions)
+    .set({ swapLinkId, updatedAt: sql`NOW()` })
+    .where(
+      and(
+        eq(schema.transactions.userId, input.userId),
+        sql`${schema.transactions.id} IN (${sql.join(
+          [sell.stockLegTxId, sell.cashLegTxId, buy.stockLegTxId, buy.cashLegTxId].map(
+            (i) => sql`${i}`,
+          ),
+          sql`, `,
+        )})`,
+      ),
+    );
+  return { sell, buy, swapLinkId };
 }
 
 // ─── recordInKindTransfer ────────────────────────────────────────────────
@@ -821,6 +846,292 @@ export async function recordFxConversion(
   }
 
   return { fromTxId, toTxId, feeTxId, linkId };
+}
+
+// ─── recordBrokerageDeposit / recordBrokerageWithdrawal ──────────────────
+//
+// Cash moves between a non-investment account and a brokerage's cash
+// sleeve. Phase 2 follow-up (2026-05-26):
+//
+//   - Deposit:    non-investment account → brokerage cash sleeve
+//                 (e.g. CAD chequing → USD brokerage USD-cash sleeve)
+//   - Withdrawal: brokerage cash sleeve → non-investment account
+//
+// Cross-currency is refused application-layer — the brokerage cash
+// sleeve currency MUST match the non-investment account currency. Users
+// FX-convert first via a separate FX Conversion op if needed.
+//
+// Two transaction rows sharing a `link_id` (NOT `trade_link_id`):
+//   Deposit:   source leg on non-investment acct (qty=0, amount<0)
+//              dest leg on cash sleeve holding   (qty>0, amount>0)
+//   Withdrawal: source leg on cash sleeve holding (qty<0, amount<0)
+//               dest leg on non-investment acct  (qty=0, amount>0)
+//
+// No lot side effects — cash sleeves are not yet lot-tracked (Phase 5
+// will introduce that for FX gain accounting; until then deposits +
+// withdrawals are pure ledger moves).
+
+interface AccountRow {
+  id: number;
+  currency: string;
+  isInvestment: boolean;
+}
+
+async function fetchAccount(userId: string, accountId: number): Promise<AccountRow> {
+  const row = await db
+    .select({
+      id: schema.accounts.id,
+      currency: schema.accounts.currency,
+      isInvestment: schema.accounts.isInvestment,
+    })
+    .from(schema.accounts)
+    .where(
+      and(
+        eq(schema.accounts.id, accountId),
+        eq(schema.accounts.userId, userId),
+      ),
+    )
+    .limit(1);
+  const r = row[0];
+  if (!r) throw new Error(`Account #${accountId} not found.`);
+  return { id: r.id, currency: r.currency, isInvestment: Boolean(r.isInvestment) };
+}
+
+export interface RecordBrokerageDepositInput {
+  userId: string;
+  dek: Buffer | null;
+  /** Non-investment account that funds the deposit (source). */
+  sourceAccountId: number;
+  /** Investment account whose cash sleeve receives the deposit. */
+  destAccountId: number;
+  /** Cash sleeve `portfolio_holdings.id` on the dest account; resolved
+   *  from destAccountId + dest sleeve currency when omitted. */
+  destCashSleeveHoldingId?: number;
+  /** Positive amount in the (shared) currency. */
+  amount: number;
+  date: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
+  source?: TransactionSource;
+}
+
+export interface RecordBrokerageDepositResult {
+  sourceTxId: number;
+  destTxId: number;
+  linkId: string;
+}
+
+export async function recordBrokerageDeposit(
+  input: RecordBrokerageDepositInput,
+): Promise<RecordBrokerageDepositResult> {
+  if (input.amount <= 0) throw new Error(`recordBrokerageDeposit: amount must be > 0`);
+  if (input.sourceAccountId === input.destAccountId) {
+    throw new Error(`recordBrokerageDeposit: source and dest accounts must differ`);
+  }
+  const sourceAcct = await fetchAccount(input.userId, input.sourceAccountId);
+  if (sourceAcct.isInvestment) {
+    throw new Error(
+      `recordBrokerageDeposit: source account #${input.sourceAccountId} is an investment account. ` +
+        `Use In-kind Transfer or FX Conversion for movements within / between brokerages.`,
+    );
+  }
+  const destAcct = await fetchAccount(input.userId, input.destAccountId);
+  if (!destAcct.isInvestment) {
+    throw new Error(
+      `recordBrokerageDeposit: destination account #${input.destAccountId} is not an investment account.`,
+    );
+  }
+
+  // Resolve cash sleeve — explicit holding id or auto-by-currency.
+  let cashSleeve: HoldingRow;
+  if (input.destCashSleeveHoldingId != null) {
+    cashSleeve = await fetchHolding(input.userId, input.destCashSleeveHoldingId);
+    if (!cashSleeve.isCash) {
+      throw new Error(
+        `recordBrokerageDeposit: holding #${input.destCashSleeveHoldingId} is not a cash sleeve.`,
+      );
+    }
+  } else {
+    cashSleeve = await requireCashSleeve(input.userId, input.destAccountId, sourceAcct.currency);
+  }
+
+  if (cashSleeve.currency !== sourceAcct.currency) {
+    throw new CurrencyMismatchError(
+      sourceAcct.currency,
+      cashSleeve.currency,
+      `Source account is ${sourceAcct.currency} but the brokerage cash sleeve is ${cashSleeve.currency}. ` +
+        `FX-convert via a separate FX Conversion first, then deposit into the matching sleeve.`,
+    );
+  }
+
+  const linkId = randomUUID();
+  const txSource: TransactionSource = input.source ?? "manual";
+  const payee = enc(input.dek, input.payee ?? "");
+  const note = enc(input.dek, input.note ?? "");
+  const tags = enc(input.dek, input.tags ?? "");
+
+  // Source leg — non-investment account, qty=0, amount=-N. No portfolio
+  // holding (this is a plain cash row in chequing/savings/etc).
+  const sourceInsert = await db
+    .insert(schema.transactions)
+    .values({
+      userId: input.userId,
+      date: input.date,
+      accountId: input.sourceAccountId,
+      portfolioHoldingId: null,
+      quantity: 0,
+      amount: -input.amount,
+      currency: sourceAcct.currency,
+      payee,
+      note,
+      tags,
+      kind: "brokerage_deposit_out",
+      linkId,
+      source: txSource,
+    })
+    .returning({ id: schema.transactions.id });
+  const sourceTxId = sourceInsert[0]!.id;
+
+  // Dest leg — brokerage cash sleeve. qty>0 + amount>0.
+  const destInsert = await db
+    .insert(schema.transactions)
+    .values({
+      userId: input.userId,
+      date: input.date,
+      accountId: input.destAccountId,
+      portfolioHoldingId: cashSleeve.id,
+      quantity: input.amount,
+      amount: input.amount,
+      currency: cashSleeve.currency,
+      payee,
+      note,
+      tags,
+      kind: "brokerage_deposit_in",
+      linkId,
+      source: txSource,
+    })
+    .returning({ id: schema.transactions.id });
+  const destTxId = destInsert[0]!.id;
+
+  return { sourceTxId, destTxId, linkId };
+}
+
+export interface RecordBrokerageWithdrawalInput {
+  userId: string;
+  dek: Buffer | null;
+  /** Investment account whose cash sleeve funds the withdrawal. */
+  sourceAccountId: number;
+  /** Cash sleeve `portfolio_holdings.id` on the source account; resolved
+   *  from sourceAccountId + dest currency when omitted. */
+  sourceCashSleeveHoldingId?: number;
+  /** Non-investment account that receives the withdrawal. */
+  destAccountId: number;
+  amount: number;
+  date: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
+  source?: TransactionSource;
+}
+
+export interface RecordBrokerageWithdrawalResult {
+  sourceTxId: number;
+  destTxId: number;
+  linkId: string;
+}
+
+export async function recordBrokerageWithdrawal(
+  input: RecordBrokerageWithdrawalInput,
+): Promise<RecordBrokerageWithdrawalResult> {
+  if (input.amount <= 0) throw new Error(`recordBrokerageWithdrawal: amount must be > 0`);
+  if (input.sourceAccountId === input.destAccountId) {
+    throw new Error(`recordBrokerageWithdrawal: source and dest accounts must differ`);
+  }
+  const sourceAcct = await fetchAccount(input.userId, input.sourceAccountId);
+  if (!sourceAcct.isInvestment) {
+    throw new Error(
+      `recordBrokerageWithdrawal: source account #${input.sourceAccountId} is not an investment account.`,
+    );
+  }
+  const destAcct = await fetchAccount(input.userId, input.destAccountId);
+  if (destAcct.isInvestment) {
+    throw new Error(
+      `recordBrokerageWithdrawal: destination account #${input.destAccountId} is an investment account. ` +
+        `Use In-kind Transfer or FX Conversion for movements within / between brokerages.`,
+    );
+  }
+
+  let cashSleeve: HoldingRow;
+  if (input.sourceCashSleeveHoldingId != null) {
+    cashSleeve = await fetchHolding(input.userId, input.sourceCashSleeveHoldingId);
+    if (!cashSleeve.isCash) {
+      throw new Error(
+        `recordBrokerageWithdrawal: holding #${input.sourceCashSleeveHoldingId} is not a cash sleeve.`,
+      );
+    }
+  } else {
+    cashSleeve = await requireCashSleeve(input.userId, input.sourceAccountId, destAcct.currency);
+  }
+
+  if (cashSleeve.currency !== destAcct.currency) {
+    throw new CurrencyMismatchError(
+      destAcct.currency,
+      cashSleeve.currency,
+      `Brokerage cash sleeve is ${cashSleeve.currency} but the destination account is ${destAcct.currency}. ` +
+        `FX-convert via a separate FX Conversion first, then withdraw from the matching sleeve.`,
+    );
+  }
+
+  const linkId = randomUUID();
+  const txSource: TransactionSource = input.source ?? "manual";
+  const payee = enc(input.dek, input.payee ?? "");
+  const note = enc(input.dek, input.note ?? "");
+  const tags = enc(input.dek, input.tags ?? "");
+
+  // Source leg — brokerage cash sleeve. qty<0 + amount<0.
+  const sourceInsert = await db
+    .insert(schema.transactions)
+    .values({
+      userId: input.userId,
+      date: input.date,
+      accountId: input.sourceAccountId,
+      portfolioHoldingId: cashSleeve.id,
+      quantity: -input.amount,
+      amount: -input.amount,
+      currency: cashSleeve.currency,
+      payee,
+      note,
+      tags,
+      kind: "brokerage_withdrawal_out",
+      linkId,
+      source: txSource,
+    })
+    .returning({ id: schema.transactions.id });
+  const sourceTxId = sourceInsert[0]!.id;
+
+  // Dest leg — non-investment account. qty=0 + amount>0.
+  const destInsert = await db
+    .insert(schema.transactions)
+    .values({
+      userId: input.userId,
+      date: input.date,
+      accountId: input.destAccountId,
+      portfolioHoldingId: null,
+      quantity: 0,
+      amount: input.amount,
+      currency: destAcct.currency,
+      payee,
+      note,
+      tags,
+      kind: "brokerage_withdrawal_in",
+      linkId,
+      source: txSource,
+    })
+    .returning({ id: schema.transactions.id });
+  const destTxId = destInsert[0]!.id;
+
+  return { sourceTxId, destTxId, linkId };
 }
 
 // ─── canEditPortfolioRow — edit/delete guard ─────────────────────────────

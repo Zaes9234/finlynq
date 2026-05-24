@@ -28,6 +28,8 @@ import {
   Receipt,
   Globe2,
   ArrowLeft,
+  ArrowDownToLine,
+  ArrowUpFromLine,
   type LucideIcon,
 } from "lucide-react";
 import BuyForm from "@/components/portfolio/forms/BuyForm";
@@ -36,6 +38,8 @@ import SwapForm from "@/components/portfolio/forms/SwapForm";
 import TransferForm from "@/components/portfolio/forms/TransferForm";
 import IncomeExpenseForm from "@/components/portfolio/forms/IncomeExpenseForm";
 import FxConversionForm from "@/components/portfolio/forms/FxConversionForm";
+import DepositForm from "@/components/portfolio/forms/DepositForm";
+import WithdrawalForm from "@/components/portfolio/forms/WithdrawalForm";
 
 type OpKey =
   | "buy"
@@ -43,7 +47,9 @@ type OpKey =
   | "swap"
   | "transfer"
   | "income-expense"
-  | "fx-conversion";
+  | "fx-conversion"
+  | "deposit"
+  | "withdrawal";
 
 interface OpTile {
   key: OpKey;
@@ -89,6 +95,18 @@ const OPS: OpTile[] = [
     description: "Convert one currency sleeve to another in the same account.",
     icon: Globe2,
   },
+  {
+    key: "deposit",
+    title: "Deposit",
+    description: "Fund a brokerage cash sleeve from a non-investment account.",
+    icon: ArrowDownToLine,
+  },
+  {
+    key: "withdrawal",
+    title: "Withdrawal",
+    description: "Move cash out of a brokerage sleeve to a non-investment account.",
+    icon: ArrowUpFromLine,
+  },
 ];
 
 function isOpKey(v: string | null): v is OpKey {
@@ -128,6 +146,8 @@ function PortfolioNewInner() {
         {op === "transfer" && <TransferForm />}
         {op === "income-expense" && <IncomeExpenseForm />}
         {op === "fx-conversion" && <FxConversionForm />}
+        {op === "deposit" && <DepositForm />}
+        {op === "withdrawal" && <WithdrawalForm />}
       </div>
     );
   }

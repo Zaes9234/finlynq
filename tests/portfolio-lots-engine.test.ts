@@ -64,6 +64,7 @@ const lot = (overrides: Partial<HoldingLot> = {}): HoldingLot => ({
   origin: "buy",
   parentLotId: null,
   status: "open",
+  side: "long",
   source: "manual",
   ...overrides,
 });

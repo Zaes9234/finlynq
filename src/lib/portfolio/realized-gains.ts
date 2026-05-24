@@ -28,6 +28,7 @@
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
+import { getRateToUsd } from "@/lib/fx-service";
 
 export interface RealizedGainsFilter {
   from?: string;       // YYYY-MM-DD
@@ -55,8 +56,26 @@ export interface RealizedGainRow {
   openDate: string;
   daysHeld: number;
   term: "short" | "long";
-  closeKind: "sell" | "transfer_out";
+  closeKind:
+    | "sell"
+    | "transfer_out"
+    | "swap_out"
+    | "fx_conversion"
+    | "income_expense"
+    | "buy_sell"
+    | "short_open"
+    | "short_close";
   source: string;
+  /** Phase 5 (2026-05-28) — base-currency view of the realized gain.
+   *  Present only when the caller passed `withBaseCurrency` to the
+   *  aggregator. Computed via historical FX snapshots — see
+   *  computeBaseCurrencyForRow for the math. */
+  realizedGainInBase?: number;
+  baseCurrency?: string;
+  /** True when the row's open or close FX snapshot was missing and the
+   *  aggregator had to fall back to a current-rate lookup. UI surfaces
+   *  this so the user knows the number is approximate for legacy lots. */
+  fxSnapshotMissing?: boolean;
 }
 
 export interface RealizedGainsResult {
@@ -160,7 +179,7 @@ export async function listRealizedGainClosures(
       openDate: r.openDate,
       daysHeld: days,
       term: days <= TERM_BOUNDARY_DAYS ? "short" : "long",
-      closeKind: r.closeKind as "sell" | "transfer_out",
+      closeKind: r.closeKind as RealizedGainRow["closeKind"],
       source: r.source,
     };
   });
@@ -191,6 +210,55 @@ export async function listRealizedGainClosures(
       accountId: filter.accountId ?? 0,
       term,
     },
+  };
+}
+
+/**
+ * Phase 5 (2026-05-28) — augment realized-gain rows with base-currency
+ * gains using historical FX rates.
+ *
+ * For each row:
+ *   - cost_in_base = costPerShare × fxToUsd(rowCcy, openDate) / fxToUsd(base, openDate)
+ *   - proceeds_in_base = proceedsPerShare × fxToUsd(rowCcy, closeDate) / fxToUsd(base, closeDate)
+ *   - realizedGainInBase = (proceeds_in_base - cost_in_base) × qtyClosed
+ *
+ * Returns the same shape as listRealizedGainClosures but with each row
+ * decorated + an added `totals.realizedGainInBase` aggregate field.
+ *
+ * Uses on-demand getRateToUsd calls — the FX cache absorbs repeats. For
+ * legacy closures where the snapshot is missing, falls back to
+ * fetching the historical rate by date (same outcome, just no preload
+ * optimization yet).
+ */
+export async function augmentWithBaseCurrency(
+  result: RealizedGainsResult,
+  userId: string,
+  baseCurrency: string,
+): Promise<RealizedGainsResult & { totalRealizedGainInBase: number }> {
+  let totalInBase = 0;
+  for (const row of result.rows) {
+    const fxRowOpen = await getRateToUsd(row.currency, row.openDate, userId);
+    const fxRowClose = await getRateToUsd(row.currency, row.closeDate, userId);
+    const fxBaseOpen =
+      baseCurrency === "USD"
+        ? 1
+        : await getRateToUsd(baseCurrency, row.openDate, userId);
+    const fxBaseClose =
+      baseCurrency === "USD"
+        ? 1
+        : await getRateToUsd(baseCurrency, row.closeDate, userId);
+    const costInBase =
+      fxBaseOpen > 0 ? (row.costPerShare * fxRowOpen) / fxBaseOpen : 0;
+    const proceedsInBase =
+      fxBaseClose > 0 ? (row.proceedsPerShare * fxRowClose) / fxBaseClose : 0;
+    const gainInBase = (proceedsInBase - costInBase) * row.qtyClosed;
+    row.realizedGainInBase = gainInBase;
+    row.baseCurrency = baseCurrency;
+    totalInBase += gainInBase;
+  }
+  return {
+    ...result,
+    totalRealizedGainInBase: totalInBase,
   };
 }
 

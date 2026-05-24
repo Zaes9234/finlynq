@@ -1,15 +1,15 @@
 "use client";
 
 /**
- * LotPicker — best-effort helper for SellForm.
+ * LotPicker — per-lot quantity selector for SellForm (Phase 3, 2026-05-26).
  *
- * Tries to fetch open lots for the chosen holding so the user can pick
- * specific lots. If the endpoint doesn't exist (404 / 405), renders a
- * "coming soon" notice so the parent form can still submit (server
- * defaults to FIFO when no lotSelection is sent).
+ * Each open lot gets a numeric input for "shares from this lot". The total
+ * sell quantity becomes the sum of these inputs. If the user enters more
+ * shares for a lot than that lot has open (or types a total exceeding the
+ * holding's open inventory), the form surfaces a warning that the excess
+ * will open a short position on the holding.
  *
- * The component is fully controlled — the parent owns the selectedLotIds
- * state and receives changes via onChange.
+ * Fully controlled — parent owns the `selection` map (lotId → qty).
  */
 
 import { useEffect, useState } from "react";
@@ -28,23 +28,24 @@ interface LotPickerApiResponse {
   data?: { lots?: OpenLot[] };
 }
 
+export interface LotPickerSelection {
+  lotId: number;
+  qty: number;
+}
+
 interface LotPickerProps {
   holdingId: number;
   currency: string;
-  selectedLotIds: number[];
-  onChange: (ids: number[]) => void;
+  selection: LotPickerSelection[];
+  onChange: (selection: LotPickerSelection[]) => void;
 }
 
 export default function LotPicker({
   holdingId,
   currency,
-  selectedLotIds,
+  selection,
   onChange,
 }: LotPickerProps) {
-  // State keyed off holdingId so a holding-switch resets loading/lots in one
-  // pass without calling setState synchronously inside the effect (which
-  // the react-hooks/set-state-in-effect lint rule flags). The effect only
-  // calls setState from async fetch callbacks — never in the effect body.
   const [state, setState] = useState<{
     forHoldingId: number;
     lots: OpenLot[] | null;
@@ -57,8 +58,6 @@ export default function LotPicker({
     unavailable: false,
   }));
   if (state.forHoldingId !== holdingId) {
-    // Render-time reset on prop change — React pattern documented at
-    // https://react.dev/reference/react/useState#storing-information-from-previous-renders
     setState({
       forHoldingId: holdingId,
       lots: null,
@@ -70,9 +69,6 @@ export default function LotPicker({
 
   useEffect(() => {
     let cancelled = false;
-    // Defensive fetch — endpoint may not exist yet. 404 → fall back to
-    // "coming soon" notice; any parsed payload that lacks a lots array
-    // gets the same treatment.
     fetch(`/api/portfolio/lots?holdingId=${holdingId}&openOnly=1`)
       .then(async (r) => {
         if (cancelled) return;
@@ -113,12 +109,14 @@ export default function LotPicker({
     };
   }, [holdingId]);
 
-  function toggle(lotId: number) {
-    if (selectedLotIds.includes(lotId)) {
-      onChange(selectedLotIds.filter((id) => id !== lotId));
-    } else {
-      onChange([...selectedLotIds, lotId]);
-    }
+  function updateQty(lotId: number, qty: number) {
+    const next = selection.filter((s) => s.lotId !== lotId);
+    if (qty > 0) next.push({ lotId, qty });
+    onChange(next);
+  }
+
+  function getQty(lotId: number): number {
+    return selection.find((s) => s.lotId === lotId)?.qty ?? 0;
   }
 
   if (loading) {
@@ -141,43 +139,60 @@ export default function LotPicker({
     );
   }
 
+  const totalAvailable = lots.reduce((s, l) => s + l.qty, 0);
+  const totalSelected = selection.reduce((s, sel) => s + sel.qty, 0);
+
   return (
     <div className="space-y-1.5">
-      <div className="max-h-48 overflow-y-auto rounded-md border border-border/60 bg-muted/30 p-2">
-        <ul className="space-y-1">
+      <div className="max-h-56 overflow-y-auto rounded-md border border-border/60 bg-muted/30 p-2">
+        <ul className="space-y-1.5">
           {lots.map((lot) => {
-            const selected = selectedLotIds.includes(lot.lotId);
+            const qty = getQty(lot.lotId);
+            const overflow = qty > lot.qty;
             return (
               <li
                 key={lot.lotId}
                 className="flex items-center gap-2 rounded px-1 py-1 text-xs hover:bg-muted/50"
               >
-                <input
-                  type="checkbox"
-                  checked={selected}
-                  onChange={() => toggle(lot.lotId)}
-                  className="h-3.5 w-3.5"
-                  id={`lot-${lot.lotId}`}
-                />
-                <label
-                  htmlFor={`lot-${lot.lotId}`}
-                  className="flex flex-1 cursor-pointer items-center justify-between gap-2"
-                >
+                <div className="flex-1 flex items-center justify-between gap-2">
                   <span className="font-mono">{lot.openDate}</span>
-                  <span>
-                    {lot.qty} × {formatCurrency(lot.costPerShare, currency)} ={" "}
-                    {formatCurrency(lot.costBasis, currency)}
+                  <span className="text-muted-foreground">
+                    {lot.qty} open · {formatCurrency(lot.costPerShare, currency)}/sh
                   </span>
-                </label>
+                </div>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={qty || ""}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    updateQty(lot.lotId, Number.isFinite(v) && v > 0 ? v : 0);
+                  }}
+                  placeholder="0"
+                  className={`h-7 w-20 rounded border bg-background px-2 text-right text-xs ${
+                    overflow
+                      ? "border-amber-500/60 text-amber-600 dark:text-amber-400"
+                      : "border-border/60"
+                  }`}
+                />
               </li>
             );
           })}
         </ul>
       </div>
       <p className="text-xs text-muted-foreground">
-        {selectedLotIds.length === 0
-          ? "No lots selected — leaving picker empty will use FIFO."
-          : `${selectedLotIds.length} lot${selectedLotIds.length === 1 ? "" : "s"} selected.`}
+        Total to sell:{" "}
+        <span className="font-mono font-medium text-foreground">
+          {totalSelected}
+        </span>
+        {" / "}
+        <span className="font-mono">{totalAvailable}</span> open.
+        {totalSelected > totalAvailable && (
+          <span className="ml-2 text-amber-600 dark:text-amber-400">
+            Excess {totalSelected - totalAvailable} will open a short position.
+          </span>
+        )}
       </p>
     </div>
   );

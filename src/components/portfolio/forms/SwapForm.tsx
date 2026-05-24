@@ -58,39 +58,16 @@ function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-function SwapEditNotice() {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Edit Swap</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        <p className="text-sm text-muted-foreground">
-          Swaps are two independent operations (a sell + a buy) under the hood,
-          so they can&apos;t be edited as one unit. Delete the original sell and
-          buy from the transactions list, then create a fresh swap here.
-        </p>
-        <Link href="/transactions" className="text-sm text-primary underline">
-          ← Back to transactions
-        </Link>
-      </CardContent>
-    </Card>
-  );
-}
-
 export default function SwapForm() {
-  const searchParams = useSearchParams();
-  const editIdParam = searchParams.get("editId");
-  const isEdit = editIdParam != null && /^\d+$/.test(editIdParam);
-  // Swaps are recorded as two unlinked op pairs (a sell + a buy), so the load
-  // endpoint can't reconstruct a single swap. Render a notice early — note
-  // that all hooks below live in SwapCreateForm to keep hook order stable.
-  if (isEdit) return <SwapEditNotice />;
   return <SwapCreateForm />;
 }
 
 function SwapCreateForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const editIdParam = searchParams.get("editId");
+  const editId = editIdParam ? Number(editIdParam) : null;
+  const isEdit = editId != null && Number.isFinite(editId) && editId > 0;
 
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [holdings, setHoldings] = useState<HoldingRow[]>([]);
@@ -134,6 +111,68 @@ function SwapCreateForm() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!isEdit) return;
+    let cancelled = false;
+    fetch(`/api/portfolio/operations/load?id=${editId}`)
+      .then(async (r) => {
+        if (cancelled) return;
+        const json: {
+          error?: string;
+          data?: {
+            op?: string;
+            accountId?: number;
+            sourceHoldingId?: number;
+            sourceQty?: number;
+            sourceProceeds?: number;
+            destHoldingId?: number;
+            destQty?: number;
+            destCost?: number;
+            date?: string;
+            payee?: string | null;
+            note?: string | null;
+          };
+        } = await r.json().catch(() => ({}));
+        if (cancelled) return;
+        if (!r.ok) {
+          setLoadError(json.error ?? `Failed to load edit data (${r.status})`);
+          return;
+        }
+        const d = json.data;
+        if (!d) {
+          setLoadError("Failed to load edit data (empty response)");
+          return;
+        }
+        if (d.op !== "swap") {
+          // Likely a pre-migration swap (no swap_link_id) — load returns
+          // the underlying buy/sell instead. Surface a clear notice.
+          setLoadError(
+            "This swap was created before the swap-edit migration and can't be loaded as a unit. " +
+              "Delete the sell + buy legs separately from the transactions list, then re-record the swap.",
+          );
+          return;
+        }
+        if (d.accountId != null) setAccountId(String(d.accountId));
+        if (d.sourceHoldingId != null) setSourceHoldingId(String(d.sourceHoldingId));
+        if (d.destHoldingId != null) setDestHoldingId(String(d.destHoldingId));
+        if (typeof d.sourceQty === "number") setSourceQty(String(d.sourceQty));
+        if (typeof d.sourceProceeds === "number")
+          setSourceProceeds(String(d.sourceProceeds));
+        if (typeof d.destQty === "number") setDestQty(String(d.destQty));
+        if (typeof d.destCost === "number") setDestCost(String(d.destCost));
+        if (d.date) setDate(d.date);
+        setPayee(d.payee ?? "");
+        setNote(d.note ?? "");
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setLoadError(e instanceof Error ? e.message : "Failed to load edit data");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editId, isEdit]);
 
   const investmentAccounts = useMemo(
     () => accounts.filter((a) => a.isInvestment === true),
@@ -222,6 +261,7 @@ function SwapCreateForm() {
       };
       if (payee.trim()) body.payee = payee.trim();
       if (note.trim()) body.note = note.trim();
+      if (isEdit) body.editId = editId;
       const res = await fetch("/api/portfolio/operations/swap", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -292,7 +332,7 @@ function SwapCreateForm() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Swap</CardTitle>
+        <CardTitle>{isEdit ? "Edit Swap" : "Swap"}</CardTitle>
         <CardDescription>
           Sell one holding and buy another in the same account on the same date.
           Both legs use the same cash sleeve.
@@ -533,7 +573,7 @@ function SwapCreateForm() {
               Cancel
             </Button>
             <Button type="submit" className="flex-1" disabled={submitting}>
-              {submitting ? "Recording…" : "Record swap"}
+              {submitting ? "Saving…" : isEdit ? "Save edit" : "Record swap"}
             </Button>
           </div>
         </form>

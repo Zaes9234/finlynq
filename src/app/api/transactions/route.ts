@@ -685,6 +685,7 @@ export async function DELETE(request: NextRequest) {
       id: schema.transactions.id,
       tradeLinkId: schema.transactions.tradeLinkId,
       linkId: schema.transactions.linkId,
+      swapLinkId: schema.transactions.swapLinkId,
     })
     .from(schema.transactions)
     .where(
@@ -721,6 +722,41 @@ export async function DELETE(request: NextRequest) {
         ),
       );
     for (const r of siblings) idSet.add(r.id);
+  }
+  // Phase 4 — swaps share a swap_link_id across all 4 rows (sell pair +
+  // buy pair). Deleting one row cascades to the full bundle.
+  if (target.swapLinkId) {
+    const siblings = await db
+      .select({
+        id: schema.transactions.id,
+        tradeLinkId: schema.transactions.tradeLinkId,
+      })
+      .from(schema.transactions)
+      .where(
+        and(
+          eq(schema.transactions.userId, userId),
+          eq(schema.transactions.swapLinkId, target.swapLinkId),
+        ),
+      );
+    for (const r of siblings) idSet.add(r.id);
+    // Each swap row carries its own tradeLinkId (the inner sell+buy pair
+    // links). Pull those siblings too so all 4 stock+cash rows land in
+    // the delete set.
+    const tradeLinks = new Set(
+      siblings.map((r) => r.tradeLinkId).filter((v): v is string => !!v),
+    );
+    for (const tl of tradeLinks) {
+      const more = await db
+        .select({ id: schema.transactions.id })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.userId, userId),
+            eq(schema.transactions.tradeLinkId, tl),
+          ),
+        );
+      for (const r of more) idSet.add(r.id);
+    }
   }
   const allIds = Array.from(idSet);
 

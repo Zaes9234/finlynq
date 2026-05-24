@@ -44,7 +44,9 @@ interface ApiRow {
   currency: string;
   daysHeld: number;
   term: "short" | "long";
-  closeKind: "sell" | "transfer_out";
+  closeKind: string;
+  realizedGainInBase?: number;
+  baseCurrency?: string;
 }
 
 interface ApiResponse {
@@ -57,6 +59,7 @@ interface ApiResponse {
       rowCount: number;
       byCurrency: Record<string, { realizedGain: number; qtyClosed: number }>;
     };
+    totalRealizedGainInBase?: number;
   };
 }
 
@@ -65,6 +68,7 @@ const CURRENT_YEAR = new Date().getFullYear();
 export default function RealizedGainsPage() {
   const [taxYear, setTaxYear] = useState<number | null>(CURRENT_YEAR);
   const [term, setTerm] = useState<"all" | "short" | "long">("all");
+  const [showInBase, setShowInBase] = useState(false);
   const [data, setData] = useState<ApiResponse["data"] | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -72,6 +76,7 @@ export default function RealizedGainsPage() {
     const params = new URLSearchParams();
     if (taxYear) params.set("taxYear", String(taxYear));
     params.set("term", term);
+    if (showInBase) params.set("currency", "base");
     setLoading(true);
     fetch(`/api/portfolio/realized-gains?${params.toString()}`)
       .then((r) => r.json())
@@ -81,15 +86,18 @@ export default function RealizedGainsPage() {
       })
       .catch(() => setData(null))
       .finally(() => setLoading(false));
-  }, [taxYear, term]);
+  }, [taxYear, term, showInBase]);
 
   const csvHref = useMemo(() => {
     const params = new URLSearchParams();
     if (taxYear) params.set("taxYear", String(taxYear));
     params.set("term", term);
     params.set("format", "csv");
+    if (showInBase) params.set("currency", "base");
     return `/api/portfolio/realized-gains?${params.toString()}`;
-  }, [taxYear, term]);
+  }, [taxYear, term, showInBase]);
+
+  const baseCurrencyLabel = data?.rows[0]?.baseCurrency ?? null;
 
   const yearChoices = [
     CURRENT_YEAR,
@@ -150,6 +158,18 @@ export default function RealizedGainsPage() {
             {t === "short" ? "Short (≤365d)" : t === "long" ? "Long (>365d)" : "All"}
           </Button>
         ))}
+        <label className="ml-4 flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="checkbox"
+            checked={showInBase}
+            onChange={(e) => setShowInBase(e.target.checked)}
+            className="h-3.5 w-3.5"
+          />
+          <span>
+            Show in base currency
+            {baseCurrencyLabel && showInBase ? ` (${baseCurrencyLabel})` : ""}
+          </span>
+        </label>
       </div>
 
       <Card>
@@ -165,15 +185,27 @@ export default function RealizedGainsPage() {
         <CardContent>
           {!loading && data && Object.entries(data.totals.byCurrency).length > 0 && (
             <div className="mb-4 flex flex-wrap gap-3 text-sm">
-              {Object.entries(data.totals.byCurrency).map(([ccy, t]) => (
+              {showInBase && data.totalRealizedGainInBase != null && baseCurrencyLabel ? (
                 <Badge
-                  key={ccy}
-                  variant={t.realizedGain >= 0 ? "default" : "destructive"}
+                  variant={
+                    data.totalRealizedGainInBase >= 0 ? "default" : "destructive"
+                  }
                   className="px-3 py-1"
                 >
-                  {formatCurrency(t.realizedGain, ccy)} {ccy}
+                  {formatCurrency(data.totalRealizedGainInBase, baseCurrencyLabel)}{" "}
+                  {baseCurrencyLabel} (base)
                 </Badge>
-              ))}
+              ) : (
+                Object.entries(data.totals.byCurrency).map(([ccy, t]) => (
+                  <Badge
+                    key={ccy}
+                    variant={t.realizedGain >= 0 ? "default" : "destructive"}
+                    className="px-3 py-1"
+                  >
+                    {formatCurrency(t.realizedGain, ccy)} {ccy}
+                  </Badge>
+                ))
+              )}
             </div>
           )}
           {loading ? (
@@ -221,10 +253,16 @@ export default function RealizedGainsPage() {
                     </TableCell>
                     <TableCell
                       className={`text-right font-mono ${
-                        r.realizedGain >= 0 ? "text-green-600" : "text-red-600"
+                        (showInBase && r.realizedGainInBase != null
+                          ? r.realizedGainInBase
+                          : r.realizedGain) >= 0
+                          ? "text-green-600"
+                          : "text-red-600"
                       }`}
                     >
-                      {formatCurrency(r.realizedGain, r.currency)}
+                      {showInBase && r.realizedGainInBase != null && r.baseCurrency
+                        ? formatCurrency(r.realizedGainInBase, r.baseCurrency)
+                        : formatCurrency(r.realizedGain, r.currency)}
                     </TableCell>
                   </TableRow>
                 ))}

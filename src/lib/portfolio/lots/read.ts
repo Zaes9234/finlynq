@@ -107,6 +107,7 @@ export async function loadMetricsForUser(
     qtyOriginal: Number(r.qtyOriginal),
     qtyRemaining: Number(r.qtyRemaining),
     costPerShare: Number(r.costPerShare),
+    side: (((r as unknown as { side?: string | null }).side ?? "long") as HoldingLot["side"]),
     currency: r.currency,
     fxToUsdAtOpen: r.fxToUsdAtOpen,
     origin: r.origin as HoldingLot["origin"],

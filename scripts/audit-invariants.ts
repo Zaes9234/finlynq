@@ -325,7 +325,7 @@ const INVARIANTS: InvariantConfig[] = [
     // portfolio_expense are intentionally NOT in this list — they're
     // single-row writes and can be written directly without the helper.
     writeSite:
-      /kind\s*:\s*['"](?:buy|sell|buy_cash_leg|sell_cash_leg|fx_from|fx_to|fx_fee|in_kind_transfer_in|in_kind_transfer_out)['"]/,
+      /kind\s*:\s*['"](?:buy|sell|buy_cash_leg|sell_cash_leg|fx_from|fx_to|fx_fee|in_kind_transfer_in|in_kind_transfer_out|brokerage_deposit_in|brokerage_deposit_out|brokerage_withdrawal_in|brokerage_withdrawal_out)['"]/,
     // Any import from the operations module satisfies the invariant.
     // operations.ts itself is the canonical writer; its own writes don't
     // need to import it (and won't match this import regex), so we add a

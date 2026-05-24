@@ -82,7 +82,15 @@ export default function SellForm() {
   const [tags, setTags] = useState<string>("");
 
   const [useLotPicker, setUseLotPicker] = useState(false);
-  const [selectedLotIds, setSelectedLotIds] = useState<number[]>([]);
+  const [lotSelection, setLotSelection] = useState<
+    { lotId: number; qty: number }[]
+  >([]);
+  // When the lot picker is active, the qty field is auto-computed from the
+  // sum of per-lot inputs (read-only display).
+  const lotSelectionTotal = lotSelection.reduce((s, l) => s + l.qty, 0);
+  const effectiveSellQty = useLotPicker
+    ? lotSelectionTotal
+    : parseFloat(qty);
 
   const [submitting, setSubmitting] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -223,9 +231,13 @@ export default function SellForm() {
     const e: Record<string, string> = {};
     if (!accountId) e.accountId = "Pick an account";
     if (!holdingId) e.holdingId = "Pick a holding";
-    const qtyNum = parseFloat(qty);
-    if (!qty || Number.isNaN(qtyNum) || qtyNum <= 0)
-      e.qty = "Quantity must be > 0";
+    const qtyNum = useLotPicker ? lotSelectionTotal : parseFloat(qty);
+    if (useLotPicker) {
+      if (!(qtyNum > 0)) e.qty = "Pick at least one lot with qty > 0";
+    } else {
+      if (!qty || Number.isNaN(qtyNum) || qtyNum <= 0)
+        e.qty = "Quantity must be > 0";
+    }
     const proceedsNum = parseFloat(totalProceeds);
     if (!totalProceeds || Number.isNaN(proceedsNum) || proceedsNum <= 0)
       e.totalProceeds = "Total proceeds must be > 0";
@@ -247,22 +259,27 @@ export default function SellForm() {
     }
     setSubmitting(true);
     try {
+      // Phase 3 — when the lot picker is active the qty is the sum of per-lot
+      // inputs. Otherwise the user types qty manually (FIFO closes).
+      const submitQty = useLotPicker ? lotSelectionTotal : parseFloat(qty);
       const body: Record<string, unknown> = {
         accountId: Number(accountId),
         holdingId: Number(holdingId),
-        qty: parseFloat(qty),
+        qty: submitQty,
         totalProceeds: parseFloat(totalProceeds),
         date,
       };
       if (payee.trim()) body.payee = payee.trim();
       if (note.trim()) body.note = note.trim();
       if (tags.trim()) body.tags = tags.trim();
-      // Send specific-lot selection only when the user opted in AND picked >0.
+      // Phase 3 lotSelection shape — array of {lotId, qty} per the picker.
       // Empty selection with picker on = same as FIFO (server default), so skip.
-      if (useLotPicker && selectedLotIds.length > 0) {
+      if (useLotPicker && lotSelection.length > 0) {
         body.lotSelection = {
           method: "SPECIFIC",
-          lotIds: selectedLotIds,
+          lots: lotSelection,
+          // Legacy fallback for any reader that still expects lotIds.
+          lotIds: lotSelection.map((l) => l.lotId),
         };
       }
       if (isEdit) body.editId = editId;
@@ -370,7 +387,7 @@ export default function SellForm() {
                 setAccountId(v ?? "");
                 setHoldingId("");
                 setUseLotPicker(false);
-                setSelectedLotIds([]);
+                setLotSelection([]);
               }}
             >
               <SelectTrigger className="w-full">
@@ -395,7 +412,7 @@ export default function SellForm() {
               value={holdingId}
               onValueChange={(v) => {
                 setHoldingId(v ?? "");
-                setSelectedLotIds([]);
+                setLotSelection([]);
               }}
               disabled={!selectedAccount}
             >
@@ -445,14 +462,23 @@ export default function SellForm() {
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label>Quantity to sell</Label>
+              <Label>
+                Quantity to sell
+                {useLotPicker && (
+                  <span className="text-muted-foreground text-xs ml-1.5">
+                    (sum of selected lots)
+                  </span>
+                )}
+              </Label>
               <Input
                 type="number"
                 step="any"
                 inputMode="decimal"
-                value={qty}
+                value={useLotPicker ? String(lotSelectionTotal || "") : qty}
                 onChange={(e) => setQty(e.target.value)}
                 placeholder="100"
+                readOnly={useLotPicker}
+                className={useLotPicker ? "bg-muted/40" : undefined}
               />
               {errors.qty && (
                 <p className="text-xs text-destructive">{errors.qty}</p>
@@ -511,7 +537,7 @@ export default function SellForm() {
                   checked={useLotPicker}
                   onChange={(e) => {
                     setUseLotPicker(e.target.checked);
-                    if (!e.target.checked) setSelectedLotIds([]);
+                    if (!e.target.checked) setLotSelection([]);
                   }}
                   className="h-3.5 w-3.5"
                 />
@@ -521,8 +547,8 @@ export default function SellForm() {
                 <LotPicker
                   holdingId={selectedHolding.id}
                   currency={selectedHolding.currency}
-                  selectedLotIds={selectedLotIds}
-                  onChange={setSelectedLotIds}
+                  selection={lotSelection}
+                  onChange={setLotSelection}
                 />
               )}
             </div>

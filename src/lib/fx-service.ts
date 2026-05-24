@@ -151,6 +151,31 @@ export async function getDisplayCurrency(
   return row[0]?.value ?? "CAD";
 }
 
+/**
+ * Resolve the base currency for lot-level realized-gain accounting.
+ *
+ * Distinct from `getDisplayCurrency`: base currency is the accounting
+ * basis (snapshotted FX, used to compute realized_gain_in_base) and
+ * shouldn't be flipped mid-year. Display currency is a UI preference.
+ *
+ * Priority: explicit `?baseCurrency=` query param → user.base_currency → "USD".
+ */
+export async function getBaseCurrency(
+  userId: string,
+  queryParam?: string | null
+): Promise<string> {
+  if (queryParam) {
+    const trimmed = queryParam.trim().toUpperCase();
+    if (/^[A-Z]{3}$/.test(trimmed)) return trimmed;
+  }
+  const row = await db
+    .select({ value: schema.users.baseCurrency })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+  return row[0]?.value ?? "USD";
+}
+
 // ─── Yahoo Finance fetch ────────────────────────────────────────────────
 
 async function fetchYahooRateToUsd(currency: string, date: string): Promise<number | null> {

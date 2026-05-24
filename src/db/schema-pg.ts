@@ -119,6 +119,11 @@ export const transactions = pgTable("transactions", {
   // from `link_id`, which the four-check transfer-pair rule reserves for
   // `record_transfer` siblings.
   tradeLinkId: text("trade_link_id"),
+  // 2026-05-27 — portfolio ops Phase 4. Swaps are internally two unlinked
+  // (sell, buy) pairs; this column ties all 4 rows of a swap together so
+  // the load endpoint can return the full swap state for edit. NULL on
+  // pre-migration swaps (which fall back to delete-and-recreate UX).
+  swapLinkId: text("swap_link_id"),
   // 2026-05-25 — portfolio ops Phase 1. Explicit type discriminator for
   // portfolio-related rows (NULL on non-portfolio rows). Valid values
   // listed in the CHECK constraint on the column (see
@@ -490,6 +495,10 @@ export const users = pgTable(
     // bumps this column. The login flow reads it and passes through to
     // deriveKEK so unrotated rows still unwrap with the old pepper.
     pepperVersion: integer("pepper_version").notNull().default(1),
+    // 2026-05-28 Phase 5 — base currency for realized-gain accounting.
+    // Distinct from `settings.display_currency` (UI presentation) — base
+    // currency drives the lot-level realized-gain math in base.
+    baseCurrency: text("base_currency").notNull().default("USD"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
@@ -1251,6 +1260,10 @@ export const holdingLots = pgTable(
     ),
     // 'open' | 'closed' | 'transferred_out' — CHECK enforced in SQL.
     status: text("status").notNull().default("open"),
+    // 2026-05-26 Phase 3: 'long' (default) | 'short'. A short lot is
+    // opened when a Sell exceeds available long inventory; later Buys
+    // close shorts before opening fresh long lots.
+    side: text("side").notNull().default("long"),
     // Mirrors transactions.source (tx-source.ts SOURCES tuple).
     source: text("source").notNull().default("manual"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1301,6 +1314,11 @@ export const holdingLotClosures = pgTable(
     daysHeld: integer("days_held").notNull(),
     // 'sell' | 'transfer_out' — CHECK enforced in SQL.
     closeKind: text("close_kind").notNull(),
+    // 2026-05-28 Phase 5 — historical FX snapshot at close time for the
+    // realized-gain-in-base-currency aggregator. Nullable; legacy
+    // closures fall back to "current rate" with a warning surfaced by
+    // the aggregator response.
+    fxToUsdAtClose: doublePrecision("fx_to_usd_at_close"),
     source: text("source").notNull().default("manual"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

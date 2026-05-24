@@ -40,6 +40,7 @@ import { db, schema } from "@/db";
 import {
   InvalidLinkPairError,
   closeLotsForSell,
+  daysBetween,
   openLotForBuy,
   transferLot,
 } from "./engine";
@@ -158,9 +159,88 @@ export async function openLotForBuyHook(
       cashLeg = await resolveCashLegForTx(tx);
     }
 
+    // Phase 3: short-close-first. If there are open short lots on the
+    // same (holding, account), FIFO-close them against this buy before
+    // opening a new long lot. Returns the remaining buy qty (may be 0
+    // if the buy fully covers existing shorts).
+    const buyQty = tx.quantity;
+    const cashAmount = cashLeg
+      ? Math.abs(cashLeg.enteredAmount)
+      : Math.abs(tx.enteredAmount ?? tx.amount);
+    const buyPricePerShare = buyQty > 0 ? cashAmount / buyQty : 0;
+    const proceedsCurrency =
+      cashLeg?.enteredCurrency ??
+      cashLeg?.currency ??
+      tx.enteredCurrency ??
+      tx.currency ??
+      opts.holdingCurrency;
+
+    const shortLotRows = await db
+      .select()
+      .from(schema.holdingLots)
+      .where(
+        and(
+          eq(schema.holdingLots.userId, tx.userId),
+          eq(schema.holdingLots.holdingId, tx.portfolioHoldingId),
+          eq(schema.holdingLots.accountId, tx.accountId),
+          eq(schema.holdingLots.status, "open"),
+          eq(schema.holdingLots.side, "short"),
+        ),
+      );
+    const shortLots = shortLotRows.map(rowToLot);
+    // FIFO order
+    shortLots.sort((a, b) => a.openDate.localeCompare(b.openDate) || a.id - b.id);
+
+    let remaining = buyQty;
+    if (shortLots.length > 0) {
+      for (const lot of shortLots) {
+        if (remaining <= 1e-9) break;
+        const qtyToClose = Math.min(lot.qtyRemaining, remaining);
+        // Inverse formula: gain when buy_price < short_open cost.
+        const realizedGain = (lot.costPerShare - buyPricePerShare) * qtyToClose;
+        const daysHeld = daysBetween(lot.openDate, tx.date);
+        await db.insert(schema.holdingLotClosures).values({
+          userId: tx.userId,
+          lotId: lot.id,
+          closeTxId: tx.id,
+          closeDate: tx.date,
+          qtyClosed: qtyToClose,
+          proceedsPerShare: buyPricePerShare,
+          costPerShare: lot.costPerShare,
+          realizedGain,
+          currency: proceedsCurrency,
+          daysHeld,
+          closeKind: "short_close",
+          source: tx.source,
+        });
+        const newRemaining = lot.qtyRemaining - qtyToClose;
+        const closed = newRemaining <= 1e-9;
+        await db
+          .update(schema.holdingLots)
+          .set({
+            qtyRemaining: newRemaining,
+            status: closed ? "closed" : "open",
+            updatedAt: sql`NOW()`,
+          })
+          .where(eq(schema.holdingLots.id, lot.id));
+        remaining -= qtyToClose;
+      }
+    }
+
+    // If the buy fully closed shorts and has nothing left, don't open a long.
+    if (remaining <= 1e-9) return null;
+
+    // Open a long lot for the remainder, with cost basis sized to the
+    // remaining portion of the cash leg.
+    const proratedCashAmount = (cashAmount * remaining) / buyQty;
+    const partialTx: TxRowForLots = { ...tx, quantity: remaining };
+    const partialCashLeg: CashLegHint | undefined = cashLeg
+      ? { ...cashLeg, enteredAmount: proratedCashAmount, amount: proratedCashAmount }
+      : undefined;
+
     const plan = openLotForBuy({
-      tx,
-      cashLeg: cashLeg ?? undefined,
+      tx: partialTx,
+      cashLeg: partialCashLeg,
       categoryIsDividend: opts.categoryIsDividend,
       holdingCurrency: opts.holdingCurrency,
       originOverride: opts.origin,
@@ -184,6 +264,10 @@ export interface CloseLotsForSellHookOpts {
   strategy?: LotSelectionStrategy; // default FIFO
   /** Specific lot ids when strategy='SPECIFIC'. */
   lotIds?: number[];
+  /** Phase 3: per-lot qty overrides. When present, the hook closes
+   *  EXACTLY this qty from each named lot (capping at the lot's open
+   *  qty + accruing the rest into the overflow → short open). */
+  perLotQty?: Array<{ lotId: number; qty: number }>;
   cashLeg?: CashLegHint | null;
   holdingCurrency: string;
 }
@@ -226,57 +310,181 @@ export async function closeLotsForSellHook(
         ),
       );
 
-    const lots: HoldingLot[] = lotRows.map(rowToLot);
-    const plan = selectLotsToClose({
-      strategy: opts.strategy ?? "FIFO",
-      lots,
-      targetQty: sellQty,
-      lotIds: opts.lotIds,
-    });
-
-    if (!plan.success) {
-      // Backfill is partial or out of sync — log + skip. The legacy
-      // avg-cost path still handles this user's reads while the flag
-      // is OFF; we don't want to error the underlying sell INSERT.
-      // eslint-disable-next-line no-console
-      console.warn(
-        `${HOOK_LABEL} closeLotsForSellHook tx=${tx.id} shortfall=${plan.shortfall}; skipping closure write`,
-      );
-      return 0;
-    }
+    // Phase 3: only LONG lots are closable by a Sell — shorts are closed
+    // by Buys via the close-shorts-first path in openLotForBuyHook.
+    const allLots: HoldingLot[] = lotRows.map(rowToLot);
+    const lots: HoldingLot[] = allLots.filter((l) => l.side === "long");
 
     let cashLeg: CashLegHint | null = opts.cashLeg ?? null;
     if (cashLeg === null && tx.tradeLinkId) {
       cashLeg = await resolveCashLegForTx(tx);
     }
 
-    const lotsById = new Map(lots.map((l) => [l.id, l]));
-    const result = closeLotsForSell({
-      tx,
-      plan,
-      cashLeg: cashLeg ?? undefined,
-      holdingCurrency: opts.holdingCurrency,
-      lotsById,
-    });
+    const proceedsAmount = cashLeg
+      ? Math.abs(cashLeg.enteredAmount)
+      : Math.abs(tx.enteredAmount ?? tx.amount);
+    const proceedsCurrency =
+      cashLeg?.enteredCurrency ??
+      cashLeg?.currency ??
+      tx.enteredCurrency ??
+      tx.currency ??
+      opts.holdingCurrency;
+    const proceedsPerShare = sellQty > 0 ? proceedsAmount / sellQty : 0;
 
-    if (result.closures.length === 0) return 0;
-
-    await db.insert(schema.holdingLotClosures).values(result.closures);
-    for (const [lotId, delta] of result.qtyDeltas) {
-      const lot = lotsById.get(lotId);
-      if (!lot) continue;
-      const newRemaining = lot.qtyRemaining - delta;
-      const closed = newRemaining <= 1e-9;
-      await db
-        .update(schema.holdingLots)
-        .set({
-          qtyRemaining: newRemaining,
-          status: closed ? "closed" : "open",
-          updatedAt: sql`NOW()`,
-        })
-        .where(eq(schema.holdingLots.id, lotId));
+    // Phase 3 per-lot qty path: when the form sends a {lotId, qty} list,
+    // close EXACTLY that qty from each named lot (clamping at the lot's
+    // open qty + routing overflow into a single short open).
+    if (opts.perLotQty && opts.perLotQty.length > 0) {
+      let closuresWritten = 0;
+      const lotsById = new Map(allLots.map((l) => [l.id, l]));
+      let totalShortOverflow = 0;
+      for (const sel of opts.perLotQty) {
+        const lot = lotsById.get(sel.lotId);
+        if (!lot || lot.side !== "long") {
+          totalShortOverflow += sel.qty;
+          continue;
+        }
+        const closeQty = Math.min(lot.qtyRemaining, sel.qty);
+        const lotOverflow = Math.max(0, sel.qty - lot.qtyRemaining);
+        if (closeQty > 0) {
+          const realizedGain = (proceedsPerShare - lot.costPerShare) * closeQty;
+          const daysHeld = daysBetween(lot.openDate, tx.date);
+          await db.insert(schema.holdingLotClosures).values({
+            userId: tx.userId,
+            lotId: lot.id,
+            closeTxId: tx.id,
+            closeDate: tx.date,
+            qtyClosed: closeQty,
+            proceedsPerShare,
+            costPerShare: lot.costPerShare,
+            realizedGain,
+            currency: proceedsCurrency,
+            daysHeld,
+            closeKind: "sell",
+            source: tx.source,
+          });
+          const newRemaining = lot.qtyRemaining - closeQty;
+          const closed = newRemaining <= 1e-9;
+          await db
+            .update(schema.holdingLots)
+            .set({
+              qtyRemaining: newRemaining,
+              status: closed ? "closed" : "open",
+              updatedAt: sql`NOW()`,
+            })
+            .where(eq(schema.holdingLots.id, lot.id));
+          closuresWritten += 1;
+        }
+        totalShortOverflow += lotOverflow;
+      }
+      if (totalShortOverflow > 0) {
+        await db.insert(schema.holdingLots).values({
+          userId: tx.userId,
+          holdingId: tx.portfolioHoldingId,
+          accountId: tx.accountId,
+          openTxId: tx.id,
+          openDate: tx.date,
+          qtyOriginal: totalShortOverflow,
+          qtyRemaining: totalShortOverflow,
+          costPerShare: proceedsPerShare,
+          currency: proceedsCurrency,
+          fxToUsdAtOpen: null,
+          origin: "buy",
+          parentLotId: null,
+          status: "open",
+          side: "short",
+          source: tx.source,
+        });
+      }
+      return closuresWritten;
     }
-    return result.closures.length;
+
+    // Fallback: legacy FIFO / SPECIFIC-by-id path.
+    const availableLong = lots.reduce((s, l) => s + l.qtyRemaining, 0);
+    const closableQty = Math.min(sellQty, availableLong);
+    const overflowQty = Math.max(0, sellQty - availableLong);
+
+    let closuresWritten = 0;
+
+    if (closableQty > 0 && lots.length > 0) {
+      const plan = selectLotsToClose({
+        strategy: opts.strategy ?? "FIFO",
+        lots,
+        targetQty: closableQty,
+        lotIds: opts.lotIds,
+      });
+      if (plan.success) {
+        const lotsById = new Map(lots.map((l) => [l.id, l]));
+        // Override tx.quantity to the closable subset so the engine sizes
+        // proceeds against the same shares it's closing. Cost basis math
+        // uses Math.abs() so the sign convention is preserved.
+        const partialProceeds = (proceedsAmount * closableQty) / sellQty;
+        const partialTx: TxRowForLots = {
+          ...tx,
+          quantity: -closableQty,
+          enteredAmount: tx.enteredAmount != null ? -partialProceeds : null,
+          amount: -partialProceeds,
+        };
+        const partialCashLeg: CashLegHint | undefined = cashLeg
+          ? { ...cashLeg, enteredAmount: partialProceeds, amount: partialProceeds }
+          : undefined;
+        const result = closeLotsForSell({
+          tx: partialTx,
+          plan,
+          cashLeg: partialCashLeg,
+          holdingCurrency: opts.holdingCurrency,
+          lotsById,
+        });
+        if (result.closures.length > 0) {
+          await db.insert(schema.holdingLotClosures).values(result.closures);
+          for (const [lotId, delta] of result.qtyDeltas) {
+            const lot = lotsById.get(lotId);
+            if (!lot) continue;
+            const newRemaining = lot.qtyRemaining - delta;
+            const closed = newRemaining <= 1e-9;
+            await db
+              .update(schema.holdingLots)
+              .set({
+                qtyRemaining: newRemaining,
+                status: closed ? "closed" : "open",
+                updatedAt: sql`NOW()`,
+              })
+              .where(eq(schema.holdingLots.id, lotId));
+          }
+          closuresWritten += result.closures.length;
+        }
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `${HOOK_LABEL} closeLotsForSellHook tx=${tx.id} SPECIFIC plan failed (shortfall=${plan.shortfall}); skipping long closure write`,
+        );
+      }
+    }
+
+    if (overflowQty > 0) {
+      // Open a short lot for the excess at the sell price. cost_per_share
+      // = proceedsPerShare so when a future buy at price P closes this
+      // short, realized_gain = (proceeds - P) × qty.
+      await db.insert(schema.holdingLots).values({
+        userId: tx.userId,
+        holdingId: tx.portfolioHoldingId,
+        accountId: tx.accountId,
+        openTxId: tx.id,
+        openDate: tx.date,
+        qtyOriginal: overflowQty,
+        qtyRemaining: overflowQty,
+        costPerShare: proceedsPerShare,
+        currency: proceedsCurrency,
+        fxToUsdAtOpen: null,
+        origin: "buy",
+        parentLotId: null,
+        status: "open",
+        side: "short",
+        source: tx.source,
+      });
+    }
+
+    return closuresWritten;
   } catch (err) {
     softFail(err, `closeLotsForSellHook tx=${tx.id}`);
     return null;
@@ -729,6 +937,7 @@ function rowToLot(row: typeof schema.holdingLots.$inferSelect): HoldingLot {
     origin: row.origin as HoldingLot["origin"],
     parentLotId: row.parentLotId,
     status: row.status as HoldingLot["status"],
+    side: ((row as { side?: string | null }).side ?? "long") as HoldingLot["side"],
     source: row.source as TransactionSource,
   };
 }
