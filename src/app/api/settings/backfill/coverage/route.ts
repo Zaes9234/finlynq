@@ -96,9 +96,60 @@ export async function GET(request: NextRequest) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const raw: Array<{ account_id: number; total_txs: number; canonical_txs: number }> = Array.isArray(rows) ? rows : ((rows as any).rows ?? []);
 
+    // Phase 3 — count canonical rows whose lot rows are missing. Mirrors
+    // the planner's Pass 0 predicate: stock-holding canonical buy/sell
+    // with no matching `holding_lots.open_tx_id` (for qty>0) or
+    // `holding_lot_closures.close_tx_id` (for qty<0). Cash-leg kinds
+    // (`*_cash_leg`) excluded — they don't touch the stock lot table.
+    const missingLotsRows = await db.execute<{
+      account_id: number;
+      missing_lots: number;
+    }>(
+      sql`
+        SELECT
+          t.account_id AS account_id,
+          COUNT(*)::int AS missing_lots
+        FROM ${schema.transactions} t
+        JOIN ${schema.portfolioHoldings} h ON h.id = t.portfolio_holding_id
+        WHERE t.user_id = ${auth.userId}
+          AND t.account_id IN (${sql.join(accountIds.map((id) => sql`${id}`), sql`, `)})
+          AND t.portfolio_holding_id IS NOT NULL
+          AND t.quantity IS NOT NULL
+          AND t.quantity <> 0
+          AND h.is_cash = false
+          AND t.kind IS NOT NULL
+          AND (
+            t.kind IN (${sql.join(PAIRLESS_CANONICAL_KINDS_ARR.map((k) => sql`${k}`), sql`, `)})
+            OR t.trade_link_id IS NOT NULL
+            OR t.link_id IS NOT NULL
+          )
+          AND t.kind NOT LIKE '%_cash_leg'
+          AND (
+            (t.quantity > 0 AND NOT EXISTS (
+              SELECT 1 FROM ${schema.holdingLots} l
+              WHERE l.user_id = t.user_id AND l.open_tx_id = t.id
+            ))
+            OR (t.quantity < 0 AND NOT EXISTS (
+              SELECT 1 FROM ${schema.holdingLotClosures} c
+              WHERE c.user_id = t.user_id AND c.close_tx_id = t.id
+            ))
+          )
+        GROUP BY t.account_id
+      `,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const missingRaw: Array<{ account_id: number; missing_lots: number }> = Array.isArray(missingLotsRows) ? missingLotsRows : ((missingLotsRows as any).rows ?? []);
+    const missingLotsByAccount: Record<number, number> = {};
+    let totalMissingLots = 0;
+    for (const r of missingRaw) {
+      const n = Number(r.missing_lots) || 0;
+      missingLotsByAccount[r.account_id] = n;
+      totalMissingLots += n;
+    }
+
     let totalTxs = 0;
     let canonicalTxs = 0;
-    const perAccount: Array<{ accountId: number; name: string; total: number; canonical: number; pending: number; pendingPct: number }> = [];
+    const perAccount: Array<{ accountId: number; name: string; total: number; canonical: number; pending: number; pendingPct: number; missingLots: number }> = [];
     for (const r of raw) {
       const tot = Number(r.total_txs) || 0;
       const can = Number(r.canonical_txs) || 0;
@@ -112,6 +163,7 @@ export async function GET(request: NextRequest) {
         canonical: can,
         pending,
         pendingPct: tot === 0 ? 0 : Math.round((pending / tot) * 100),
+        missingLots: missingLotsByAccount[r.account_id] ?? 0,
       });
     }
     // Investment accounts with zero transactions: pad with empty entries.
@@ -124,6 +176,7 @@ export async function GET(request: NextRequest) {
           canonical: 0,
           pending: 0,
           pendingPct: 0,
+          missingLots: 0,
         });
       }
     }
@@ -135,6 +188,7 @@ export async function GET(request: NextRequest) {
       canonicalTxs,
       nonCanonicalTxs: totalTxs - canonicalTxs,
       canonicalPct: totalTxs === 0 ? 0 : Math.round((canonicalTxs / totalTxs) * 100),
+      missingLots: totalMissingLots,
       perAccount,
     });
   } catch (err: unknown) {

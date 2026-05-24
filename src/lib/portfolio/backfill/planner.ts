@@ -204,6 +204,59 @@ export function planBackfill(
   const consumed = new Set<number>(); // tx ids already covered by a proposal
   const proposals: Proposal[] = [];
 
+  // Pass 0: missing-lot detection. Operates on rows that ARE canonical
+  // (kind set + canonical pair shape) but have no corresponding row in
+  // `holding_lots` / `holding_lot_closures`. Typical cause: rows pre-date
+  // the lot system or were written via a path that bypassed
+  // `applyLotEffectsForTx`. The apply path runs the lot hook directly
+  // — no row mutation needed, just retroactive lot creation.
+  //
+  // Scope: stock holdings only. Cash-sleeve lot tracking (Phase 5c) has
+  // its own backfill story; out-of-scope here.
+  for (const t of scopedTxs) {
+    if (!isAlreadyCanonical(t)) continue;
+    if (t.portfolioHoldingId == null) continue;
+    if (t.quantity == null || t.quantity === 0) continue;
+    if (isCashHolding(t, idx)) continue;
+    // Pair-less canonical kinds (opening_balance, dividend, etc.) should
+    // open a lot on apply. Stock-leg kinds with trade_link_id pair into a
+    // buy/sell lot operation. Cash-leg kinds DON'T touch the stock lot
+    // table and never need a lot row by themselves.
+    if (t.kind != null && /_cash_leg$/.test(t.kind)) continue;
+
+    // Buys / opens: qty > 0. Check for open lot.
+    // Sells / closes: qty < 0. Check for closure row.
+    if (t.quantity > 0) {
+      if (snap.lotsByOpenTxId.has(t.id)) continue;
+      proposals.push({
+        kind: "missing_lot",
+        confidence: "high",
+        summary: `${describeTx("Open lot for", t, idx)} — no holding_lots row exists; rebuild on apply`,
+        existingRowIds: [t.id],
+        replacement: [], // no row mutation — the row is correct, just rebuild the lot
+        synthesized: [],
+        lotAction: "open",
+        deltas: { balance: 0, lots: [{ holdingId: t.portfolioHoldingId, qtyDelta: t.quantity }], realizedGainBase: null },
+        dependsOn: [],
+      });
+      consumed.add(t.id);
+    } else {
+      if (snap.closuresByCloseTxId.has(t.id)) continue;
+      proposals.push({
+        kind: "missing_lot",
+        confidence: "high",
+        summary: `${describeTx("Close lot for", t, idx)} — no holding_lot_closures row exists; rebuild on apply`,
+        existingRowIds: [t.id],
+        replacement: [],
+        synthesized: [],
+        lotAction: "close",
+        deltas: { balance: 0, lots: [{ holdingId: t.portfolioHoldingId, qtyDelta: t.quantity }], realizedGainBase: null },
+        dependsOn: [],
+      });
+      consumed.add(t.id);
+    }
+  }
+
   // Pass 1: dividends (single-row, pair-less)
   for (const t of candidates) {
     if (consumed.has(t.id)) continue;

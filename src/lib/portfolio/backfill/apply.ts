@@ -166,39 +166,75 @@ export async function applyProposal(
   // A row with kind='buy' and no trade_link_id is NOT canonical and CAN
   // be displaced (e.g., by a dividend_reinvestment proposal that
   // re-tags it kind='dividend' on a user-picked stock holding).
-  const PAIRLESS_KINDS = new Set([
-    "dividend",
-    "interest",
-    "portfolio_income",
-    "portfolio_expense",
-    "opening_balance",
-  ]);
-  const staleCheck = await db
-    .select({
-      id: schema.transactions.id,
-      kind: schema.transactions.kind,
-      tradeLinkId: schema.transactions.tradeLinkId,
-      linkId: schema.transactions.linkId,
-    })
-    .from(schema.transactions)
-    .where(
-      and(
-        eq(schema.transactions.userId, userId),
-        inArray(schema.transactions.id, proposal.existingRowIds),
-      ),
+  //
+  // Exception: missing_lot proposals operate on rows that ARE canonical
+  // (that's the precondition the planner checked). The stale guard for
+  // missing_lot is "lot has been created since planning" — handled
+  // separately below.
+  if (proposal.proposalKind !== "missing_lot") {
+    const PAIRLESS_KINDS = new Set([
+      "dividend",
+      "interest",
+      "portfolio_income",
+      "portfolio_expense",
+      "opening_balance",
+    ]);
+    const staleCheck = await db
+      .select({
+        id: schema.transactions.id,
+        kind: schema.transactions.kind,
+        tradeLinkId: schema.transactions.tradeLinkId,
+        linkId: schema.transactions.linkId,
+      })
+      .from(schema.transactions)
+      .where(
+        and(
+          eq(schema.transactions.userId, userId),
+          inArray(schema.transactions.id, proposal.existingRowIds),
+        ),
+      );
+    const alreadyCanonical = staleCheck.filter(
+      (r) =>
+        r.kind != null &&
+        r.kind !== "" &&
+        (PAIRLESS_KINDS.has(r.kind) || r.tradeLinkId != null || r.linkId != null),
     );
-  const alreadyCanonical = staleCheck.filter(
-    (r) =>
-      r.kind != null &&
-      r.kind !== "" &&
-      (PAIRLESS_KINDS.has(r.kind) || r.tradeLinkId != null || r.linkId != null),
-  );
-  if (alreadyCanonical.length > 0) {
-    return {
-      ok: false,
-      code: "rows_already_canonical",
-      message: `Cannot apply — ${alreadyCanonical.length} of the displaced rows are already in canonical shape (canonicalized by a prior run). Refresh the page to re-plan.`,
-    };
+    if (alreadyCanonical.length > 0) {
+      return {
+        ok: false,
+        code: "rows_already_canonical",
+        message: `Cannot apply — ${alreadyCanonical.length} of the displaced rows are already in canonical shape (canonicalized by a prior run). Refresh the page to re-plan.`,
+      };
+    }
+  } else {
+    // missing_lot stale guard: refuse if a lot OR closure already exists
+    // for this tx id (probably created since planning by an unrelated
+    // path — manual /portfolio/new flow, a parallel backfill, etc.).
+    const existingLots = await db
+      .select({ id: schema.holdingLots.id })
+      .from(schema.holdingLots)
+      .where(
+        and(
+          eq(schema.holdingLots.userId, userId),
+          inArray(schema.holdingLots.openTxId, proposal.existingRowIds),
+        ),
+      );
+    const existingClosures = await db
+      .select({ id: schema.holdingLotClosures.id })
+      .from(schema.holdingLotClosures)
+      .where(
+        and(
+          eq(schema.holdingLotClosures.userId, userId),
+          inArray(schema.holdingLotClosures.closeTxId, proposal.existingRowIds),
+        ),
+      );
+    if (existingLots.length > 0 || existingClosures.length > 0) {
+      return {
+        ok: false,
+        code: "lot_already_exists",
+        message: `Cannot apply — a lot or closure already exists for this transaction (created since the backfill was planned). Refresh the page to re-plan.`,
+      };
+    }
   }
 
   await db.transaction(async (tx) => {
@@ -285,8 +321,19 @@ export async function applyProposal(
   // 5. Replay applyLotEffectsForTx OUTSIDE the txn — buildLotContext reads via
   //    the default db handle and the live hook is designed for post-INSERT
   //    invocation. The hooks are self-transactional where they need to be.
+  //
+  // missing_lot proposals are special: there is no UPDATE-in-place (the
+  // row is already correct, just the lot is missing). We replay the lot
+  // hook on the existing row ids so the lot/closure gets created
+  // retroactively. The replay below loads the row state fresh from the
+  // DB, so kind / quantity / portfolio_holding_id reflect whatever is
+  // currently stored.
   const ctx: LotContext = await buildLotContext(userId, dek);
-  const allTouchedIds = [...updatedTxIds, ...insertedTxIds];
+  const allTouchedIds = [
+    ...updatedTxIds,
+    ...insertedTxIds,
+    ...(proposal.proposalKind === "missing_lot" ? proposal.existingRowIds : []),
+  ];
   if (allTouchedIds.length > 0) {
     const rows = await db
       .select({
@@ -579,7 +626,15 @@ export async function loadLedgerSnapshot(
     : investmentAccountIds;
 
   if (allowedAccountIds.length === 0) {
-    return { userId, txs: [], holdings, accounts, dividendsCategoryId: null };
+    return {
+      userId,
+      txs: [],
+      holdings,
+      accounts,
+      dividendsCategoryId: null,
+      lotsByOpenTxId: new Set(),
+      closuresByCloseTxId: new Set(),
+    };
   }
 
   const txsRaw = await db
@@ -631,7 +686,42 @@ export async function loadLedgerSnapshot(
     dek,
   );
 
-  return { userId, txs, holdings, accounts, dividendsCategoryId };
+  // Phase 3 (missing-lot detection): load lots + closures keyed by tx id
+  // so Pass 0 can detect canonical rows whose lot operations never ran.
+  // Scoped to the same allowedAccountIds — a lot in a different account
+  // isn't relevant.
+  const lotsRaw = await db
+    .select({ openTxId: schema.holdingLots.openTxId })
+    .from(schema.holdingLots)
+    .where(
+      and(
+        eq(schema.holdingLots.userId, userId),
+        inArray(schema.holdingLots.accountId, allowedAccountIds),
+      ),
+    );
+  const lotsByOpenTxId = new Set<number>();
+  for (const l of lotsRaw) {
+    if (l.openTxId != null) lotsByOpenTxId.add(l.openTxId);
+  }
+
+  const closuresRaw = await db
+    .select({ closeTxId: schema.holdingLotClosures.closeTxId })
+    .from(schema.holdingLotClosures)
+    .where(eq(schema.holdingLotClosures.userId, userId));
+  const closuresByCloseTxId = new Set<number>();
+  for (const c of closuresRaw) {
+    if (c.closeTxId != null) closuresByCloseTxId.add(c.closeTxId);
+  }
+
+  return {
+    userId,
+    txs,
+    holdings,
+    accounts,
+    dividendsCategoryId,
+    lotsByOpenTxId,
+    closuresByCloseTxId,
+  };
 }
 
 async function loadProposal(

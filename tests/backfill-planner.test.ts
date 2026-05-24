@@ -64,6 +64,8 @@ function snapshot(parts: {
   holdings: SnapshotHolding[];
   accounts: SnapshotAccount[];
   dividendsCategoryId?: number | null;
+  lotsByOpenTxId?: Set<number>;
+  closuresByCloseTxId?: Set<number>;
 }): LedgerSnapshot {
   return {
     userId: USER,
@@ -71,6 +73,12 @@ function snapshot(parts: {
     holdings: parts.holdings,
     accounts: parts.accounts,
     dividendsCategoryId: parts.dividendsCategoryId ?? 1,
+    // Default to "every canonical row already has a lot" so Pass 0
+    // (missing-lot detection) doesn't fire spuriously across the rest
+    // of the existing fixtures. Tests targeting Pass 0 explicitly pass
+    // empty sets.
+    lotsByOpenTxId: parts.lotsByOpenTxId ?? new Set(parts.txs.filter((t) => (t.quantity ?? 0) > 0).map((t) => t.id)),
+    closuresByCloseTxId: parts.closuresByCloseTxId ?? new Set(parts.txs.filter((t) => (t.quantity ?? 0) < 0).map((t) => t.id)),
   };
 }
 
@@ -715,5 +723,108 @@ describe("Pass 1.6 — DRIP detection", () => {
     // The qty=10 + amount=$2000 row falls through to Pass 2; with no
     // matching cash leg + not earliest → orphan_stock_leg.
     expect(proposals.some((p) => p.kind === "orphan_stock_leg" && p.existingRowIds.includes(12302))).toBe(true);
+  });
+});
+
+// ─── Pass 0 — missing-lot detection ───────────────────────────────────
+
+describe("Pass 0 — missing lots on canonical rows", () => {
+  it("emits missing_lot for a canonical buy with no holding_lots row", () => {
+    const ACCT = acct(42);
+    const STOCK = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [STOCK, USD_CASH],
+      // Canonical buy: kind set + trade_link_id. NOT in lotsByOpenTxId.
+      txs: [
+        tx({ id: 13001, date: "2024-01-15", accountId: 42, portfolioHoldingId: 100, quantity: 10, amount: 1500, kind: "buy", tradeLinkId: "tlk1" }),
+        tx({ id: 13002, date: "2024-01-15", accountId: 42, portfolioHoldingId: 99, quantity: -1500, amount: -1500, kind: "buy_cash_leg", tradeLinkId: "tlk1" }),
+      ],
+      // Explicit empty sets — no lots exist for these txs.
+      lotsByOpenTxId: new Set(),
+      closuresByCloseTxId: new Set(),
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].kind).toBe("missing_lot");
+    expect(proposals[0].confidence).toBe("high");
+    expect(proposals[0].lotAction).toBe("open");
+    expect(proposals[0].existingRowIds).toEqual([13001]);
+    // Cash-leg row (13002) does NOT get a missing_lot proposal — cash
+    // legs don't touch the stock-side holding_lots table.
+    expect(proposals.some((p) => p.existingRowIds.includes(13002))).toBe(false);
+  });
+
+  it("does NOT emit missing_lot when the lot already exists", () => {
+    const ACCT = acct(42);
+    const STOCK = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [STOCK, USD_CASH],
+      txs: [
+        tx({ id: 13101, date: "2024-01-15", accountId: 42, portfolioHoldingId: 100, quantity: 10, amount: 1500, kind: "buy", tradeLinkId: "tlk1" }),
+        tx({ id: 13102, date: "2024-01-15", accountId: 42, portfolioHoldingId: 99, quantity: -1500, amount: -1500, kind: "buy_cash_leg", tradeLinkId: "tlk1" }),
+      ],
+      // Lot for the buy already exists.
+      lotsByOpenTxId: new Set([13101]),
+      closuresByCloseTxId: new Set(),
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+    expect(proposals).toHaveLength(0);
+  });
+
+  it("emits missing_lot 'close' for a canonical sell with no closure row", () => {
+    const ACCT = acct(42);
+    const STOCK = holding(100, 42, { currency: "USD" });
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [STOCK, USD_CASH],
+      txs: [
+        // Pre-existing buy (with lot) so the sell isn't an orphan
+        tx({ id: 13200, date: "2023-01-15", accountId: 42, portfolioHoldingId: 100, quantity: 10, amount: 1500, kind: "buy", tradeLinkId: "tlk-buy" }),
+        tx({ id: 13201, date: "2023-01-15", accountId: 42, portfolioHoldingId: 99, quantity: -1500, amount: -1500, kind: "buy_cash_leg", tradeLinkId: "tlk-buy" }),
+        // Sell — canonical (kind + trade_link_id) but no closure exists.
+        tx({ id: 13202, date: "2024-06-10", accountId: 42, portfolioHoldingId: 100, quantity: -4, amount: -800, kind: "sell", tradeLinkId: "tlk-sell" }),
+        tx({ id: 13203, date: "2024-06-10", accountId: 42, portfolioHoldingId: 99, quantity: 800, amount: 800, kind: "sell_cash_leg", tradeLinkId: "tlk-sell" }),
+      ],
+      lotsByOpenTxId: new Set([13200]),
+      closuresByCloseTxId: new Set(), // sell has no closure
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0].kind).toBe("missing_lot");
+    expect(proposals[0].lotAction).toBe("close");
+    expect(proposals[0].existingRowIds).toEqual([13202]);
+  });
+
+  it("does NOT emit missing_lot for cash-sleeve rows (Phase 5c scope, out of Pass 0)", () => {
+    const ACCT = acct(42);
+    const USD_CASH = holding(99, 42, { currency: "USD", isCash: true });
+
+    const snap = snapshot({
+      accounts: [ACCT],
+      holdings: [USD_CASH],
+      txs: [
+        // Canonical cash transaction (e.g., a Brokerage Deposit)
+        tx({ id: 13301, date: "2024-01-15", accountId: 42, portfolioHoldingId: 99, quantity: 5000, amount: 5000, kind: "brokerage_deposit_in", linkId: "lk1" }),
+      ],
+      lotsByOpenTxId: new Set(),
+      closuresByCloseTxId: new Set(),
+    });
+
+    const proposals = planBackfill(snap, CONFIG_REFUSE);
+    // No proposals — cash-sleeve lots are out of scope for Pass 0.
+    expect(proposals.some((p) => p.kind === "missing_lot")).toBe(false);
   });
 });

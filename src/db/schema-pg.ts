@@ -1480,6 +1480,9 @@ export const backfillProposals = pgTable("backfill_proposals", {
     .array()
     .notNull()
     .default(sql`ARRAY[]::INTEGER[]`),
+  // Phase 3 — `missing_lot` proposals carry which lot op to run.
+  // CHECK enforced in SQL: NULL OR 'open' | 'close' | 'transfer'.
+  lotAction: text("lot_action"),
   // 'pending' | 'approved' | 'rejected' | 'applied' | 'undone' | 'refused_with_reason'
   status: text("status").notNull().default("pending"),
   appliedAt: timestamp("applied_at", { withTimezone: true }),

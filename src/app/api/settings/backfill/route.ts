@@ -84,6 +84,8 @@ export async function POST(request: NextRequest) {
           // Surface the planner's per-proposal candidate list to the
           // picker UI. Empty for proposals that don't need a holding pick.
           candidateHoldingIds: p.candidateHoldingIds ?? [],
+          // Phase 3 — which lot op to run for missing_lot proposals.
+          lotAction: p.lotAction ?? null,
           status: p.confidence === "refused" ? "refused_with_reason" : "pending",
         })
         .returning({ id: schema.backfillProposals.id });

@@ -56,6 +56,19 @@ export interface LedgerSnapshot {
   holdings: SnapshotHolding[];
   accounts: SnapshotAccount[];
   dividendsCategoryId: number | null;
+  /**
+   * tx ids that already have an open lot row in `holding_lots` (open_tx_id).
+   * Populated by the runtime snapshot loader; pure tests can pass an empty
+   * Set. Used by Pass 0 (missing_lot detection) to find canonical buys
+   * whose lots weren't created.
+   */
+  lotsByOpenTxId: Set<number>;
+  /**
+   * tx ids that already have a closure row in `holding_lot_closures`
+   * (close_tx_id). Used by Pass 0 to find canonical sells whose closures
+   * weren't recorded.
+   */
+  closuresByCloseTxId: Set<number>;
 }
 
 // ─── Run config (preflight choices) ────────────────────────────────────
@@ -107,7 +120,17 @@ export type ProposalKind =
    * standard `applyLotEffectsForTx` replay at
    * `costPerShare = amount / qty`, `origin='reinvest_div'`.
    */
-  | "dividend_reinvestment";
+  | "dividend_reinvestment"
+  /**
+   * Already-canonical row that should have a lot row (or closure) in
+   * holding_lots / holding_lot_closures but doesn't. Typical cause:
+   * row predates the lot system or was written via a path that
+   * bypassed `applyLotEffectsForTx`. Apply runs the lot hook directly
+   * without UPDATEing the row — the row is correct, the lot just
+   * needs to be created. See `lotAction` on the proposal for which
+   * lot operation (open / close / transfer) to run.
+   */
+  | "missing_lot";
 
 export type Confidence = "high" | "medium" | "low" | "refused";
 
@@ -195,6 +218,12 @@ export interface Proposal {
    * good matches; user picks freely from the full holdings list.
    */
   candidateHoldingIds?: number[];
+  /**
+   * For `missing_lot` proposals: which lot operation the apply path
+   * should run via `applyLotEffectsForTx`. Derived from the row's
+   * `kind` at plan time so the UI can label the proposal clearly.
+   */
+  lotAction?: "open" | "close" | "transfer";
   deltas: ProposalDeltas;
   /**
    * Proposal indices (within the same plan result) this one depends on.
