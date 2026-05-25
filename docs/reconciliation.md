@@ -10,11 +10,21 @@ page.
 > `/reconcile` page now exists for **bank_transactions ↔ transactions**
 > reconciliation, backed by a new `transaction_bank_links` M:N join
 > table. Use cases: link bank-ledger rows to transactions after the fact,
-> materialize a transaction from a bank-only row, accept rule-suggested
-> categories via a dedicated dialog. That surface is documented in
+> materialize a transaction from a bank-only row (uses the canonical
+> [TransactionDialog](../src/components/transactions/transaction-dialog.tsx)
+> prefilled from the bank row, post-save POSTs `/api/reconcile/links`),
+> accept rule-suggested categories. That surface is documented in
 > [architecture/bank-ledger.md](./architecture/bank-ledger.md)
 > "Standalone reconcile page + M:N join (2026-05-23)". This doc covers
 > only the staged-import-pending two-pane UI.
+>
+> **2026-05-25:** Materialize-from-bank-row now uses the canonical
+> `TransactionDialog` (extracted from `/transactions` per
+> [plan/reuse-add-transaction-dialog.md](../../plan/reuse-add-transaction-dialog.md)).
+> The legacy one-off `materialize-dialog.tsx` was deleted. Investment-
+> account bank rows route to `/portfolio/new?fromBankTransactionId=<id>`
+> instead, since the generic dialog can't satisfy the investment-account
+> constraint (every tx must reference a `portfolio_holding`).
 
 Cross-references:
 

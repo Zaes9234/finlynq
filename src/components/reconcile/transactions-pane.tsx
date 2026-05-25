@@ -56,12 +56,18 @@ export function TransactionsPane({
   loading,
   onAccept,
   onReject,
+  onRowClick,
+  highlightedTxIds,
   busySuggestionKey,
 }: {
   rows: TxRow[];
   loading: boolean;
   onAccept: (s: SuggestionDisplay) => void;
   onReject: (s: SuggestionDisplay) => void;
+  /** Click on the row body — drives cross-pane highlight (plan #5). */
+  onRowClick?: (txId: number) => void;
+  /** Transaction ids currently highlighted by a click-through. */
+  highlightedTxIds?: ReadonlySet<number>;
   /** Composite "txId:bankId" key for the suggestion in flight. */
   busySuggestionKey: string | null;
 }) {
@@ -98,9 +104,19 @@ export function TransactionsPane({
                 : null;
               const busy =
                 suggestionKey != null && busySuggestionKey === suggestionKey;
+              const highlighted = highlightedTxIds?.has(r.id) ?? false;
+              const highlightClass = highlighted
+                ? "bg-sky-500/10 outline outline-2 outline-sky-500/40"
+                : "";
               return (
                 <Fragment key={r.id}>
-                  <TableRow>
+                  <TableRow
+                    className={`${highlightClass} cursor-pointer`}
+                    onClick={(e) => {
+                      if ((e.target as HTMLElement).closest("button")) return;
+                      onRowClick?.(r.id);
+                    }}
+                  >
                     <TableCell className="font-mono text-xs">
                       {r.date}
                     </TableCell>

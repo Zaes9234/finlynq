@@ -103,6 +103,12 @@ export interface ReconcileTxSnapshot {
   categoryType: string | null;
   importHash: string | null;
   accountId: number;
+  /** Transfer-pair / portfolio-pair lineage. Surfaced so the
+   *  /reconcile click-to-highlight UX can fan out across pair siblings
+   *  client-side without an extra round-trip per click. Plan #5 (2026-05-25). */
+  linkId: string | null;
+  tradeLinkId: string | null;
+  swapLinkId: string | null;
 }
 
 export interface ReconcileBankSnapshot {
@@ -344,6 +350,9 @@ export async function computeReconcileForAccount(
       categoryType: tx.categoryType,
       importHash: tx.importHash,
       accountId: tx.accountId,
+      linkId: tx.linkId,
+      tradeLinkId: tx.tradeLinkId,
+      swapLinkId: tx.swapLinkId,
     };
   }
   const bankTransactions: Record<string, ReconcileBankSnapshot> = {};
@@ -430,6 +439,9 @@ interface TxLoaded {
   categoryName: string | null;
   categoryType: string | null;
   importHash: string | null;
+  linkId: string | null;
+  tradeLinkId: string | null;
+  swapLinkId: string | null;
 }
 
 /**
@@ -521,6 +533,9 @@ async function loadTxRows(
       currency: schema.transactions.currency,
       payee: schema.transactions.payee,
       importHash: schema.transactions.importHash,
+      linkId: schema.transactions.linkId,
+      tradeLinkId: schema.transactions.tradeLinkId,
+      swapLinkId: schema.transactions.swapLinkId,
       categoryNameCt: schema.categories.nameCt,
       categoryType: schema.categories.type,
     })
@@ -547,6 +562,9 @@ async function loadTxRows(
           : null,
       categoryType: r.categoryType,
       importHash: r.importHash,
+      linkId: r.linkId,
+      tradeLinkId: r.tradeLinkId,
+      swapLinkId: r.swapLinkId,
     }];
   });
 }

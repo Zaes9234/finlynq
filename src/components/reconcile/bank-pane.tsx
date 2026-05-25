@@ -45,8 +45,8 @@ export interface BankRow {
   /** How many statements have included this row. */
   seenCount: number;
   /** Pre-resolved category id from the rule engine; piped through to
-   *  the MaterializeDialog as the default category pick. null when no
-   *  rule matched the bank row's payee. */
+   *  the materialize TransactionDialog as the default category pick.
+   *  null when no rule matched the bank row's payee. */
   suggestedCategoryId: number | null;
   /** Bank row's account id — used by the dialog as the default account. */
   accountId: number;
@@ -57,12 +57,19 @@ export function BankPane({
   loading,
   onMaterialize,
   onUnlink,
+  onRowClick,
+  highlightedBankIds,
   busyBankId,
 }: {
   rows: BankRow[];
   loading: boolean;
   onMaterialize: (bankId: string) => void;
   onUnlink: (bankId: string, transactionId: number) => void;
+  /** Click anywhere on a row body (not the action buttons) — drives the
+   *  cross-pane highlight UX (plan #5). */
+  onRowClick?: (bankId: string) => void;
+  /** Bank ids currently highlighted by a click-through. */
+  highlightedBankIds?: ReadonlySet<string>;
   /** Disable buttons on this row while a mutation is in flight. */
   busyBankId: string | null;
 }) {
@@ -102,8 +109,25 @@ export function BankPane({
                   ? "opacity-70"
                   : "";
               const busy = busyBankId === r.id;
+              const highlighted = highlightedBankIds?.has(r.id) ?? false;
+              const highlightClass = highlighted
+                ? "bg-sky-500/10 outline outline-2 outline-sky-500/40"
+                : "";
               return (
-                <TableRow key={r.id} className={dimmed}>
+                <TableRow
+                  key={r.id}
+                  className={`${dimmed} ${highlightClass} cursor-pointer`}
+                  onClick={(e) => {
+                    // Don't fire the row click when the user is clicking
+                    // the action buttons (Create / Unlink). Buttons
+                    // stopPropagation themselves, but defensive double-
+                    // check here keeps the highlight UX predictable.
+                    if (
+                      (e.target as HTMLElement).closest("button")
+                    ) return;
+                    onRowClick?.(r.id);
+                  }}
+                >
                   <TableCell className="font-mono text-xs">{r.date}</TableCell>
                   <TableCell className="text-xs truncate max-w-[220px]">
                     {r.payee || (
