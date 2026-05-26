@@ -69,7 +69,6 @@ import { parseQfxToCanonical } from "@/lib/external-import/parsers/qfx";
 // → transactions reconciliation surface (future).
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
-import { applyRulesToStagedBatch } from "@/lib/rules/apply-to-staged-batch";
 import { simplifiedUpload } from "@/lib/import/simplified-upload";
 
 export const dynamic = "force-dynamic";
@@ -631,11 +630,6 @@ export async function POST(request: NextRequest) {
     const expiresAt = new Date(Date.now() + STAGE_TTL_MS);
     const dupCount = shaped.filter((r) => r.dedupStatus !== "new").length;
 
-    // FINLYNQ-88 — rule pre-apply outcome carried out of the transaction so
-    // the response can surface `counts.ruleApplied` / `ruleApplyWarning`.
-    let ruleApplyRowsTouched: number | null = null;
-    let ruleApplyWarning: string | null = null;
-
     await db.transaction(async (tx) => {
       await tx.insert(schema.stagedImports).values({
         id: stagedImportId,
@@ -685,32 +679,11 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // FINLYNQ-88 — apply active rules over the freshly-inserted rows BEFORE
-      // the transaction commits so the user lands on /import/pending with
-      // rule effects already visible (renamed payees, flipped tx_type for
-      // create_transfer rules, set_account targets, etc.). Scope: entire new
-      // batch (no merge-append path post the 2026-05-22 two-ledger refactor;
-      // re-uploads of identical files produce a fresh batch with
-      // skipped_duplicate markers on collision, and rules skip those by
-      // construction). Failures inside the helper bubble up via the catch
-      // below and degrade to a soft warning — upload still succeeds.
-      try {
-        const ruleApplyResult = await applyRulesToStagedBatch(
-          tx,
-          userId,
-          dek,
-          stagedImportId,
-        );
-        ruleApplyRowsTouched = ruleApplyResult.rowsTouched;
-      } catch (err) {
-        ruleApplyWarning = err instanceof Error ? err.message : "Rule pre-apply failed";
-        // eslint-disable-next-line no-console
-        console.warn("[upload] applyRulesToStagedBatch threw", {
-          userId,
-          stagedImportId,
-          err: ruleApplyWarning,
-        });
-      }
+      // Phase 3 of import-modes refactor (2026-05-25) — rules no longer fire
+      // at upload time. Categorization happens at /reconcile materialize
+      // time (via match-engine.ts:364 applyRules suggestion + dialog confirm).
+      // The detailed-mode /import/pending review is now parse-verification
+      // only; approve writes ONLY to bank_transactions.
     });
 
     return NextResponse.json({
@@ -723,12 +696,8 @@ export async function POST(request: NextRequest) {
         probableDuplicate: shaped.filter((r) => r.dedupStatus === "probable_duplicate").length,
         skippedDuplicate: shaped.filter((r) => alreadyImportedHashes.has(r.hash)).length,
         errors: rowErrors.length + parseResult.errors.length,
-        // FINLYNQ-88 — null when the helper threw (warning surfaced separately);
-        // a number when the pre-apply pass ran (0 means no matched rows).
-        ruleApplied: ruleApplyRowsTouched,
       },
       tolerance,
-      ruleApplyWarning: ruleApplyWarning ?? undefined,
     });
   } catch (error) {
     const message = safeErrorMessage(error, "Staging upload failed");

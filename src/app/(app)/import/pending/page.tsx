@@ -995,11 +995,16 @@ function PendingImportsPageInner() {
         return;
       }
       if (!res.ok) throw new Error(data.error || "Approve failed");
+      // Phase 3 of import-modes refactor (2026-05-25) — approve now writes
+      // ONLY to bank_transactions. The user goes to /reconcile to
+      // categorize + materialize into the ledger.
+      const approved = data.approved ?? data.imported ?? 0;
+      const skipped = data.skippedDuplicates ?? 0;
       setToast({
         type: "success",
-        msg: `Imported ${data.imported ?? 0} transactions (${
-          data.skippedDuplicates ?? 0
-        } dupes skipped)`,
+        msg: `Sent ${approved} row${approved === 1 ? "" : "s"} to the bank ledger${
+          skipped > 0 ? ` (${skipped} duplicate${skipped === 1 ? "" : "s"} skipped)` : ""
+        }. Open /reconcile to categorize.`,
       });
       closeDetail();
       loadList();
@@ -1299,7 +1304,7 @@ function PendingImportsPageInner() {
           </Button>
           <Button onClick={approve} disabled={acting || selected.size === 0}>
             <Check className="h-4 w-4 mr-1.5" />
-            Import {selected.size > 0 && `(${selected.size})`}
+            Send to bank ledger {selected.size > 0 && `(${selected.size})`}
           </Button>
         </div>
       </div>
