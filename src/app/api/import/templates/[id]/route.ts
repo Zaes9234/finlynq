@@ -4,8 +4,18 @@ import { eq, and } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 import { deserializeTemplate } from "@/lib/import-templates";
-import type { ColumnMapping, DateFormatOverride } from "@/lib/import-templates";
+import type {
+  ColumnMapping,
+  DateFormatOverride,
+  ImportMode,
+} from "@/lib/import-templates";
 import { SUPPORTED_CURRENCIES } from "@/lib/fx/supported-currencies";
+
+/** Phase 2 of import-modes refactor — accept 'simplified' | 'detailed', return
+ *  null for anything else so the PUT only updates when a valid value arrives. */
+function coerceImportMode(raw: unknown): ImportMode | null {
+  return raw === "simplified" || raw === "detailed" ? raw : null;
+}
 
 function clampInt(raw: unknown): number {
   const n = typeof raw === "number" ? raw : Number.parseInt(String(raw ?? 0), 10);
@@ -50,6 +60,7 @@ export async function PUT(
       skipFooterRows?: number;
       dateFormatOverride?: string | null;
       defaultCurrency?: string | null;
+      importMode?: ImportMode | string | null;
     };
 
     const existing = await db
@@ -70,6 +81,8 @@ export async function PUT(
         ;
     }
 
+    const importModeUpdate = coerceImportMode(body.importMode);
+
     const updated = await db
       .update(schema.importTemplates)
       .set({
@@ -82,6 +95,10 @@ export async function PUT(
         ...(body.skipFooterRows !== undefined ? { skipFooterRows: clampInt(body.skipFooterRows) } : {}),
         ...(body.dateFormatOverride !== undefined ? { dateFormatOverride: coerceFormat(body.dateFormatOverride) } : {}),
         ...(body.defaultCurrency !== undefined ? { defaultCurrency: coerceCurrency(body.defaultCurrency) } : {}),
+        // Phase 2 (2026-05-25) — only apply when the payload carries a valid
+        // 'simplified' | 'detailed'. Missing / unknown values leave the
+        // column untouched (pre-Phase-2 clients keep working).
+        ...(importModeUpdate !== null ? { importMode: importModeUpdate } : {}),
         updatedAt: new Date().toISOString(),
       })
       .where(and(eq(schema.importTemplates.id, templateId), eq(schema.importTemplates.userId, userId)))

@@ -70,6 +70,7 @@ import { parseQfxToCanonical } from "@/lib/external-import/parsers/qfx";
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
 import { applyRulesToStagedBatch } from "@/lib/rules/apply-to-staged-batch";
+import { simplifiedUpload } from "@/lib/import/simplified-upload";
 
 export const dynamic = "force-dynamic";
 
@@ -466,6 +467,87 @@ export async function POST(request: NextRequest) {
           .all();
         for (const h of hits) {
           if (h.importHash) alreadyImportedHashes.add(h.importHash);
+        }
+      }
+    }
+
+    // ─── Phase 2 of import-modes refactor (2026-05-25): simplified branch ──
+    //
+    // If the selected template is in `import_mode='simplified'`, skip the
+    // staged review and land rows directly in bank_transactions. The user
+    // goes straight to /reconcile to categorize.
+    //
+    // Preconditions:
+    //   - templateId must be set (auto-detect path stays on detailed for now).
+    //   - accountId must be set (bank-ledger uniqueness key is per-account).
+    //   - Row errors are still surfaced (we don't silently drop bad rows).
+    //
+    // The detailed path below remains the default and handles every case
+    // where the template is detailed OR no template is selected.
+    if (templateId !== null) {
+      const tplRow = await db
+        .select({ importMode: schema.importTemplates.importMode })
+        .from(schema.importTemplates)
+        .where(and(
+          eq(schema.importTemplates.id, templateId),
+          eq(schema.importTemplates.userId, userId),
+        ))
+        .get();
+      if (tplRow?.importMode === "simplified") {
+        if (accountId === null) {
+          return NextResponse.json(
+            {
+              error:
+                "Simplified mode requires a bound account. Pick an account when uploading, or switch the template to Detailed.",
+            },
+            { status: 400 },
+          );
+        }
+        try {
+          const result = await simplifiedUpload({
+            userId,
+            dek,
+            accountId,
+            templateId,
+            rows: shaped.map((r) => ({
+              rowIndex: r.rowIndex,
+              date: r.date,
+              amount: r.amount,
+              currency: r.currency ?? defaultCurrency ?? boundAccountCurrency ?? "CAD",
+              payee: r.payee,
+              note: r.note ?? null,
+              tags: r.tags ?? null,
+              accountName: r.account || null,
+              fitId: r.fitId ?? null,
+              enteredAmount: r.enteredAmount ?? null,
+              enteredCurrency: r.enteredCurrency ?? defaultCurrency ?? null,
+              enteredFxRate: null,
+              quantity: r.quantity ?? null,
+              importHash: r.hash,
+            })),
+            anchors: parseResult.anchors,
+            filename: file.name,
+            source: "upload",
+          });
+          return NextResponse.json({
+            mode: result.mode,
+            batchId: result.batchId,
+            redirectTo: result.redirectTo,
+            format: parseResult.format,
+            counts: {
+              created: result.created,
+              skippedDuplicates: result.skippedDuplicates,
+              anchorsUpserted: result.anchorsUpserted,
+            },
+            rowErrors,
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error("[upload] simplifiedUpload failed", { userId, templateId, err });
+          return NextResponse.json(
+            { error: safeErrorMessage(err, "Simplified upload failed") },
+            { status: 500 },
+          );
         }
       }
     }

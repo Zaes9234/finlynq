@@ -22,6 +22,7 @@ import {
 import type {
   ColumnMapping,
   DateFormatOverride,
+  ImportMode,
   ImportTemplate,
 } from "@/lib/import-templates";
 import { SUPPORTED_CURRENCIES } from "@/lib/fx/supported-currencies";
@@ -67,6 +68,7 @@ export function EditTemplateDialog({
   const [skipFooterRows, setSkipFooterRows] = useState("0");
   const [dateFormatOverride, setDateFormatOverride] = useState<DateFormatUi>("auto");
   const [defaultCurrency, setDefaultCurrency] = useState("");
+  const [importMode, setImportMode] = useState<ImportMode>("detailed");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -81,6 +83,7 @@ export function EditTemplateDialog({
       setSkipFooterRows(String(template.skipFooterRows ?? 0));
       setDateFormatOverride(template.dateFormatOverride ?? "auto");
       setDefaultCurrency(template.defaultCurrency ?? "");
+      setImportMode(template.importMode ?? "detailed");
       setError("");
     }
   }, [open, template]);
@@ -119,6 +122,7 @@ export function EditTemplateDialog({
           skipFooterRows: Number.isFinite(skipF) ? Math.max(0, Math.min(100, skipF)) : 0,
           dateFormatOverride: dateFormatOverride === "auto" ? null : dateFormatOverride,
           defaultCurrency: defaultCurrency || null,
+          importMode,
         }),
       });
       const data = await res.json();
@@ -199,6 +203,59 @@ export function EditTemplateDialog({
               <p className="text-xs text-muted-foreground">
                 Auto-apply this template when headers match.
               </p>
+            </div>
+          </div>
+
+          {/* Phase 2 of import-modes refactor (2026-05-25) — per-template
+              upload mode. Defaults to 'detailed' for safety; 'simplified'
+              lands rows directly in the bank ledger, skipping staged review. */}
+          <div className="space-y-2">
+            <Label className="text-sm font-medium">Upload Mode</Label>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <label
+                className={`flex flex-col gap-1 rounded-lg border p-3 cursor-pointer text-sm transition-colors ${
+                  importMode === "detailed"
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/50"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="import-mode"
+                    value="detailed"
+                    checked={importMode === "detailed"}
+                    onChange={() => setImportMode("detailed")}
+                    className="h-4 w-4"
+                  />
+                  <span className="font-medium">Detailed</span>
+                </div>
+                <p className="text-xs text-muted-foreground pl-6">
+                  Review the parse on /import/pending before rows land. Recommended for new or messy formats.
+                </p>
+              </label>
+              <label
+                className={`flex flex-col gap-1 rounded-lg border p-3 cursor-pointer text-sm transition-colors ${
+                  importMode === "simplified"
+                    ? "border-primary bg-primary/5"
+                    : "border-border hover:border-primary/50"
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="import-mode"
+                    value="simplified"
+                    checked={importMode === "simplified"}
+                    onChange={() => setImportMode("simplified")}
+                    className="h-4 w-4"
+                  />
+                  <span className="font-medium">Simplified</span>
+                </div>
+                <p className="text-xs text-muted-foreground pl-6">
+                  Rows land directly in the bank ledger. Categorize on /reconcile. Use only for trusted, clean formats.
+                </p>
+              </label>
             </div>
           </div>
 

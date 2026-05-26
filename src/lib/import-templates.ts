@@ -29,6 +29,13 @@ export type DateFormatOverride =
   | "MM/DD/YYYY"
   | "YYYY-MM-DD";
 
+/** Per-template upload mode (Phase 2 of import-modes refactor, 2026-05-25).
+ *  - 'detailed'   = rows land in staged_imports + staged_transactions; user
+ *                   reviews the parse on /import/pending before approve.
+ *  - 'simplified' = rows land directly in bank_transactions, skip staged review.
+ *  Schema default is 'detailed' so legacy templates keep today's behavior. */
+export type ImportMode = "simplified" | "detailed";
+
 export interface ImportTemplate {
   id: number;
   userId: string;
@@ -41,6 +48,8 @@ export interface ImportTemplate {
   skipFooterRows: number;
   dateFormatOverride: DateFormatOverride | null;
   defaultCurrency: string | null;
+  /** Phase 2 (2026-05-25). Defaults to 'detailed' for back-compat. */
+  importMode: ImportMode;
   createdAt: string;
   updatedAt: string;
 }
@@ -159,6 +168,7 @@ export function deserializeTemplate(row: {
   skipFooterRows?: number | null;
   dateFormatOverride?: string | null;
   defaultCurrency?: string | null;
+  importMode?: string | null;
   createdAt: string;
   updatedAt: string;
 }): ImportTemplate {
@@ -176,6 +186,7 @@ export function deserializeTemplate(row: {
       ? row.dateFormatOverride
       : null,
     defaultCurrency: row.defaultCurrency ?? null,
+    importMode: isImportMode(row.importMode) ? row.importMode : "detailed",
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -185,4 +196,8 @@ function isDateFormatOverride(
   v: string | null | undefined,
 ): v is DateFormatOverride {
   return v === "DD/MM/YYYY" || v === "MM/DD/YYYY" || v === "YYYY-MM-DD";
+}
+
+function isImportMode(v: string | null | undefined): v is ImportMode {
+  return v === "simplified" || v === "detailed";
 }
