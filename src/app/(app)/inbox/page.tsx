@@ -317,7 +317,24 @@ function InboxPageInner() {
               }}
             >
               <SelectTrigger className="w-[260px]">
-                <SelectValue placeholder="Select an account" />
+                {/* Base UI SelectValue otherwise renders the raw `value`
+                 *  (the account id as string, e.g. "768") on first render
+                 *  before items register their text. Pass an explicit
+                 *  render prop that pulls the decrypted label out of the
+                 *  accounts array so the trigger always shows the
+                 *  account name. (Inbox v4 Phase 5, 2026-05-27.) */}
+                <SelectValue placeholder="Select an account">
+                  {accountId != null
+                    ? (() => {
+                        const a = visibleAccounts.find(
+                          (x) => x.id === accountId,
+                        );
+                        return a
+                          ? `${safeAccountName(a)} · ${a.currency}`
+                          : "Select an account";
+                      })()
+                    : "Select an account"}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 {visibleAccounts.map((a) => (

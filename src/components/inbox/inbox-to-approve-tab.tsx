@@ -495,7 +495,9 @@ export function InboxToApproveTab({
           <CardContent className="py-12 text-center space-y-3">
             <Inbox className="h-10 w-10 text-muted-foreground mx-auto" />
             <div>
-              <p className="text-sm font-medium">Nothing to approve</p>
+              <p className="text-sm font-medium">
+                No rows waiting for approval
+              </p>
               <p className="text-xs text-muted-foreground mt-1">
                 Upload a statement to this account and rows will appear here
                 with one-click approve.

@@ -370,11 +370,13 @@ export function InboxToCategorizeTab({
           <CardContent className="py-12 text-center space-y-3">
             <Inbox className="h-10 w-10 text-muted-foreground mx-auto" />
             <div>
-              <p className="text-sm font-medium">All caught up</p>
+              <p className="text-sm font-medium">
+                Auto-pilot is handling everything
+              </p>
               <p className="text-xs text-muted-foreground mt-1">
-                Either every row was auto-categorized by a rule, or nothing
-                new has come in. Upload a statement to this account to see
-                rows here when no rule matches.
+                Nothing manual to do — either every row was auto-categorized
+                by a rule, or nothing new has come in. Upload a statement to
+                this account to see rows here when no rule matches.
               </p>
             </div>
           </CardContent>

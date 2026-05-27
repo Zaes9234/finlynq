@@ -120,12 +120,13 @@ export function LensChip({
               );
             })}
             <div className="border-t mt-1 pt-2 pb-1 px-2">
-              {/* Phase 5 wires the per-account reconciliation-mode picker.
-               *  Until then the gear points at the account-list settings as
-               *  a graceful fallback — the link from a stranger-id account
-               *  is harmless since the settings route owns its own auth. */}
+              {/* Phase 5 (2026-05-27) — wired to the per-account detail page's
+               *  Reconciliation mode card. `#reconciliation-mode` scrolls the
+               *  user straight to the picker so the policy flip is one click
+               *  away. Opens in the same tab to match the rest of the app's
+               *  in-app navigation (Back arrow returns to /inbox). */}
               <Link
-                href={`/settings/accounts?accountId=${accountId}`}
+                href={`/accounts/${accountId}#reconciliation-mode`}
                 onClick={() => setOpen(false)}
                 className="w-full text-left inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
               >
