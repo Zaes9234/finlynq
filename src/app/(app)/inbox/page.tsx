@@ -52,6 +52,7 @@ import {
   type ReconcileData,
 } from "@/components/inbox/inbox-reconcile-tab";
 import { InboxReconciledTab } from "@/components/inbox/inbox-reconciled-tab";
+import { InboxToApproveTab } from "@/components/inbox/inbox-to-approve-tab";
 import { AvailableNextPhase } from "@/components/inbox/available-next-phase";
 
 interface Account {
@@ -378,9 +379,9 @@ function InboxPageInner() {
 
         {visibleTabs.includes("to-approve") && (
           <TabsContent value="to-approve">
-            <AvailableNextPhase
-              phase="Phase 3"
-              feature="Approve-each card flow — one-click ledger commit per bank row with suggestions"
+            <InboxToApproveTab
+              accountId={account.id}
+              accounts={accounts}
             />
           </TabsContent>
         )}
@@ -397,10 +398,15 @@ function InboxPageInner() {
         <TabsContent value="reconciled">
           {activeLens === "manual" ? (
             <InboxReconciledTab data={reconcileData} />
+          ) : activeLens === "approve" ? (
+            // Approve-each lens self-fetches the snapshot — the Reconcile
+            // tab isn't rendered alongside, so there's no parent-level
+            // snapshot to share.
+            <InboxReconciledTab accountId={account.id} />
           ) : (
             <AvailableNextPhase
-              phase={activeLens === "approve" ? "Phase 3" : "Phase 4"}
-              feature="The reconciled view for this lens shows the rule / auto / manual provenance pills landing alongside the card content."
+              phase="Phase 4"
+              feature="The reconciled view for the Auto-pilot lens shows the rule / auto / manual provenance pills landing alongside the card content."
             />
           )}
         </TabsContent>

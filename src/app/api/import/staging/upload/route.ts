@@ -235,14 +235,20 @@ export async function POST(request: NextRequest) {
     // Resolve the bound account name if accountId is supplied. OFX/QFX
     // single-account statements need it; CSVs use it as a fallback when
     // no `Account` column is present.
+    //
+    // Inbox v4 Phase 3 (2026-05-27): also read `accounts.mode` so we can
+    // override the per-template `import_mode` for Approve-each accounts
+    // (see the simplified-branch block below).
     let defaultAccountName: string | null = null;
     let boundAccountCurrency: string | null = null;
+    let boundAccountMode: "auto" | "approve" | "manual" | null = null;
     if (accountId !== null) {
       const acct = await db
         .select({
           id: schema.accounts.id,
           nameCt: schema.accounts.nameCt,
           currency: schema.accounts.currency,
+          mode: schema.accounts.mode,
         })
         .from(schema.accounts)
         .where(
@@ -260,6 +266,7 @@ export async function POST(request: NextRequest) {
       }
       defaultAccountName = decryptName(acct.nameCt, dek, null) ?? "";
       boundAccountCurrency = acct.currency;
+      boundAccountMode = acct.mode;
     }
 
     const ext = file.name.split(".").pop()?.toLowerCase();
@@ -476,14 +483,42 @@ export async function POST(request: NextRequest) {
     // staged review and land rows directly in bank_transactions. The user
     // goes straight to /reconcile to categorize.
     //
+    // Inbox v4 Phase 3 (2026-05-27): the Approve-each account policy
+    // (`accounts.mode='approve'`) ALSO triggers the simplified path, even
+    // if the picked template is in `import_mode='detailed'`. The account-
+    // level policy override is intentional — Approve-each means "I trust
+    // the parser, but I want one click between bank-ledger and the real
+    // ledger entry." Detailed-staging would add a redundant parse-review
+    // gate before the card flow takes over on /inbox.
+    //
+    // Rules do NOT fire here — that's Phase 4 (Auto-pilot). The bank rows
+    // wait on /inbox's "To approve" tab; the user (or "Accept all
+    // suggested") commits each to the ledger via POST /approve.
+    //
     // Preconditions:
-    //   - templateId must be set (auto-detect path stays on detailed for now).
     //   - accountId must be set (bank-ledger uniqueness key is per-account).
+    //   - For the template-based simplified path: templateId must be set
+    //     (auto-detect stays on detailed for now).
     //   - Row errors are still surfaced (we don't silently drop bad rows).
     //
     // The detailed path below remains the default and handles every case
-    // where the template is detailed OR no template is selected.
-    if (templateId !== null) {
+    // where the account is Manual and the template is Detailed (or no
+    // template is selected).
+    let useSimplifiedPath = false;
+    if (boundAccountMode === "approve") {
+      // Account-policy override: Approve-each accounts always use the
+      // simplified path regardless of the per-template import_mode setting.
+      if (accountId === null) {
+        // boundAccountMode is only set when accountId is non-null, so this
+        // is unreachable — kept as a defensive guard so the TS narrowing
+        // below stays unambiguous.
+        return NextResponse.json(
+          { error: "Approve-each accounts require accountId." },
+          { status: 400 },
+        );
+      }
+      useSimplifiedPath = true;
+    } else if (templateId !== null) {
       const tplRow = await db
         .select({ importMode: schema.importTemplates.importMode })
         .from(schema.importTemplates)
@@ -502,52 +537,56 @@ export async function POST(request: NextRequest) {
             { status: 400 },
           );
         }
-        try {
-          const result = await simplifiedUpload({
-            userId,
-            dek,
-            accountId,
-            templateId,
-            rows: shaped.map((r) => ({
-              rowIndex: r.rowIndex,
-              date: r.date,
-              amount: r.amount,
-              currency: r.currency ?? defaultCurrency ?? boundAccountCurrency ?? "CAD",
-              payee: r.payee,
-              note: r.note ?? null,
-              tags: r.tags ?? null,
-              accountName: r.account || null,
-              fitId: r.fitId ?? null,
-              enteredAmount: r.enteredAmount ?? null,
-              enteredCurrency: r.enteredCurrency ?? defaultCurrency ?? null,
-              enteredFxRate: null,
-              quantity: r.quantity ?? null,
-              importHash: r.hash,
-            })),
-            anchors: parseResult.anchors,
-            filename: file.name,
-            source: "upload",
-          });
-          return NextResponse.json({
-            mode: result.mode,
-            batchId: result.batchId,
-            redirectTo: result.redirectTo,
-            format: parseResult.format,
-            counts: {
-              created: result.created,
-              skippedDuplicates: result.skippedDuplicates,
-              anchorsUpserted: result.anchorsUpserted,
-            },
-            rowErrors,
-          });
-        } catch (err) {
-          // eslint-disable-next-line no-console
-          console.error("[upload] simplifiedUpload failed", { userId, templateId, err });
-          return NextResponse.json(
-            { error: safeErrorMessage(err, "Simplified upload failed") },
-            { status: 500 },
-          );
-        }
+        useSimplifiedPath = true;
+      }
+    }
+
+    if (useSimplifiedPath && accountId !== null) {
+      try {
+        const result = await simplifiedUpload({
+          userId,
+          dek,
+          accountId,
+          templateId,
+          rows: shaped.map((r) => ({
+            rowIndex: r.rowIndex,
+            date: r.date,
+            amount: r.amount,
+            currency: r.currency ?? defaultCurrency ?? boundAccountCurrency ?? "CAD",
+            payee: r.payee,
+            note: r.note ?? null,
+            tags: r.tags ?? null,
+            accountName: r.account || null,
+            fitId: r.fitId ?? null,
+            enteredAmount: r.enteredAmount ?? null,
+            enteredCurrency: r.enteredCurrency ?? defaultCurrency ?? null,
+            enteredFxRate: null,
+            quantity: r.quantity ?? null,
+            importHash: r.hash,
+          })),
+          anchors: parseResult.anchors,
+          filename: file.name,
+          source: "upload",
+        });
+        return NextResponse.json({
+          mode: result.mode,
+          batchId: result.batchId,
+          redirectTo: result.redirectTo,
+          format: parseResult.format,
+          counts: {
+            created: result.created,
+            skippedDuplicates: result.skippedDuplicates,
+            anchorsUpserted: result.anchorsUpserted,
+          },
+          rowErrors,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[upload] simplifiedUpload failed", { userId, templateId, err });
+        return NextResponse.json(
+          { error: safeErrorMessage(err, "Simplified upload failed") },
+          { status: 500 },
+        );
       }
     }
 

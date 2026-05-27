@@ -1,38 +1,89 @@
 "use client";
 
 /**
- * InboxReconciledTab — Manual-lens Reconciled tab body for /inbox.
+ * InboxReconciledTab — Reconciled tab body for /inbox.
  *
  * Read-only list of bank rows that already have a `transaction_bank_links`
- * row in the snapshot returned by /api/reconcile/suggestions. Shares the
- * data fetched by InboxReconcileTab via lifted-up state on the page; no
- * second fetch. Filters down to the rows where `linked.length > 0`.
+ * row in the snapshot returned by /api/reconcile/suggestions.
+ *
+ * Two data sources, exactly one wins per render:
+ *   1. `data` prop — passed by the parent when the Manual-lens Reconcile
+ *      tab has already fetched the snapshot. Sharing it across tabs
+ *      avoids a redundant fetch on Manual.
+ *   2. `accountId` prop — used by the Approve-each lens (Phase 3) and
+ *      Auto-pilot lens (Phase 4) where the sibling tabs don't pre-fetch
+ *      this data. The component self-fetches /api/reconcile/suggestions
+ *      and re-fetches whenever the accountId changes.
+ *
+ * Filters down to the rows where `linked.length > 0`.
  */
 
+import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Check, Inbox } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
 import type { ReconcileData } from "./inbox-reconcile-tab";
 
-export function InboxReconciledTab({ data }: { data: ReconcileData | null }) {
-  if (!data) {
+export function InboxReconciledTab({
+  data,
+  accountId,
+}: {
+  data?: ReconcileData | null;
+  accountId?: number;
+}) {
+  const [fetched, setFetched] = useState<ReconcileData | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // Self-fetch when the parent doesn't pre-load the snapshot (Approve/Auto
+  // lenses). `data` is preferred when present so Manual lens keeps the
+  // lifted-up sharing optimization.
+  useEffect(() => {
+    if (data !== undefined || accountId == null) return;
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/reconcile/suggestions?accountId=${accountId}`)
+      .then((r) => (r.ok ? r.json() : { success: false }))
+      .then((body) => {
+        if (cancelled) return;
+        if (body?.success) setFetched(body.data as ReconcileData);
+        else setFetched(null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setFetched(null);
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [data, accountId]);
+
+  const effective = data ?? fetched;
+
+  if (!effective) {
     return (
       <Card>
         <CardContent className="py-8 text-sm text-muted-foreground text-center">
-          Loading…
+          {loading ? "Loading…" : "No data."}
         </CardContent>
       </Card>
     );
   }
+  // Rename so the rest of the function reads identically to the pre-refactor
+  // version (which referenced `data` locally).
+  const reconcileSnapshot = effective;
 
   // Each bank row may appear in `linked` more than once when the user
   // attached an "extra" link in addition to the primary FK row. Surface
   // each (bank, tx) pair as one reconciled-row entry for transparency.
-  const rows = data.linked
+  const rows = reconcileSnapshot.linked
     .map((l) => {
-      const bank = data.bankTransactions[l.bankTransactionId];
-      const tx = data.transactions[l.transactionId];
+      const bank = reconcileSnapshot.bankTransactions[l.bankTransactionId];
+      const tx = reconcileSnapshot.transactions[l.transactionId];
       if (!bank || !tx) return null;
       return { link: l, bank, tx };
     })

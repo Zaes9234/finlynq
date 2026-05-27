@@ -448,6 +448,20 @@ async function main() {
       accountIds[a.name] = rows[0].id;
     }
 
+    // Inbox v4 Phase 3 (2026-05-27): flip the Visa Rewards demo account to
+    // `mode='approve'` so the Approve-each card flow lights up on /inbox
+    // without anyone having to curl the PATCH endpoint or click through
+    // the Phase 5 settings UI (not yet shipped).
+    //
+    // Chequing stays on the default `manual` so the demo still shows the
+    // two-pane flow side-by-side. Phase 4 will flip Chequing to `auto`.
+    if (accountIds["Visa Rewards"]) {
+      await client.query(
+        `UPDATE accounts SET mode = 'approve' WHERE id = $1 AND user_id = $2`,
+        [accountIds["Visa Rewards"], userId],
+      );
+    }
+
     // 4. Insert categories. Same encrypted-only contract.
     console.log(`[seed-demo] Inserting ${CATEGORIES.length} categories…`);
     const categoryIds: Record<string, number> = {};
