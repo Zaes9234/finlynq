@@ -43,6 +43,7 @@ import { checkRateLimit } from "@/lib/rate-limit";
 import { extractSvixHeaders, verifySvixSignature, SvixVerifyError } from "@/lib/webhooks/svix";
 import { routeAddress } from "@/lib/email-import/address-router";
 import { parseResendAttachments, type ResendAttachment } from "@/lib/email-import/parse-attachments";
+import { fetchResendAttachments } from "@/lib/email-import/fetch-resend-attachments";
 import { stageEmailImport } from "@/lib/email-import/stage-email-import";
 import {
   storeIncomingEmail,
@@ -139,7 +140,17 @@ async function handleResendInbound(request: NextRequest): Promise<NextResponse> 
 
     if (route.category === "import" && route.userId) {
       try {
-        const rows = await parseResendAttachments(parsed.attachments, route.userId);
+        // Resend's email.received webhook payload doesn't inline attachment
+        // bytes — only metadata. If the parser found nothing inline and we
+        // have a Resend received-email ID, fetch via the API. The helper
+        // returns the same ResendAttachment shape (filename + base64 content),
+        // so parseResendAttachments slots in unchanged.
+        let attachments = parsed.attachments;
+        if (attachments.length === 0 && parsed.resendEmailId) {
+          attachments = await fetchResendAttachments(parsed.resendEmailId);
+        }
+
+        const rows = await parseResendAttachments(attachments, route.userId);
         if (rows.length === 0) {
           // No usable attachments — treat as trash so admin can see the
           // body (some banks send HTML bodies with no CSV).
@@ -150,7 +161,7 @@ async function handleResendInbound(request: NextRequest): Promise<NextResponse> 
             subject: parsed.subject,
             bodyText: parsed.text,
             bodyHtml: parsed.html,
-            attachmentCount: parsed.attachments.length,
+            attachmentCount: attachments.length,
             svixId,
           });
           await notifyAdminsOfIncoming("trash", route.address);
@@ -224,6 +235,13 @@ async function handleResendInbound(request: NextRequest): Promise<NextResponse> 
 // ─── Resend payload shape — tolerant parser ─────────────────────────────────
 
 interface ParsedResendPayload {
+  /**
+   * Resend's received-email ID. Used to fetch attachment bytes via the
+   * Resend HTTP API when the webhook payload doesn't inline them — see
+   * `fetchResendAttachments`. May be null on payload-shape variants that
+   * don't expose the ID.
+   */
+  resendEmailId: string | null;
   from: string;
   to: string[];
   subject: string | null;
@@ -249,6 +267,15 @@ function extractResendPayload(raw: unknown): ParsedResendPayload | null {
   const data = (outer.data && typeof outer.data === "object"
     ? (outer.data as Record<string, unknown>)
     : outer);
+
+  // Received-email ID. Resend's payload shape isn't 100% pinned — accept a
+  // few variants. Used downstream to fetch attachment bytes via the API
+  // (the webhook payload itself doesn't inline them).
+  const resendEmailId =
+    typeof data.id === "string" ? data.id
+    : typeof data.email_id === "string" ? data.email_id
+    : typeof outer.id === "string" ? outer.id
+    : null;
 
   const from = extractEmail(data.from);
   if (!from) return null;
@@ -306,7 +333,7 @@ function extractResendPayload(raw: unknown): ParsedResendPayload | null {
       : null,
   };
 
-  return { from, to, subject, text, html, attachments, authVerdict };
+  return { resendEmailId, from, to, subject, text, html, attachments, authVerdict };
 }
 
 function extractEmail(raw: unknown): string | null {
