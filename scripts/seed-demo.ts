@@ -448,6 +448,41 @@ async function main() {
       accountIds[a.name] = rows[0].id;
     }
 
+    // Inbox v4 Phase 3 (2026-05-27): flip the Visa Rewards demo account to
+    // `mode='approve'` so the Approve-each card flow lights up on /inbox
+    // without anyone having to curl the PATCH endpoint or click through
+    // the Phase 5 settings UI (not yet shipped).
+    //
+    // Inbox v4 Phase 4 (2026-05-27): flip Savings to `mode='auto'` so the
+    // Auto-pilot rule-firing-at-upload path is exercisable from the demo.
+    // Chequing stays on `manual` so the demo still shows the two-pane
+    // flow side-by-side.
+    //
+    // To actually exercise rule firing on the demo's Savings account, add
+    // at least one transaction_rules row that matches the demo's payee
+    // patterns. The demo seed doesn't auto-create rules today; the user
+    // can run something like:
+    //   INSERT INTO transaction_rules (user_id, name, conditions, actions,
+    //     is_active, priority, created_at)
+    //   VALUES ('00000000-0000-0000-0000-00000000demo',
+    //           'Coffee → Dining',
+    //           '{"all":[{"field":"payee","op":"contains","value":"STARBUCKS"}]}'::jsonb,
+    //           '[{"kind":"set_category","categoryId":<demo Dining cat id>}]'::jsonb,
+    //           true, 100, NOW()::text);
+    // …then upload a CSV with a STARBUCKS row to Savings under Auto-pilot.
+    if (accountIds["Visa Rewards"]) {
+      await client.query(
+        `UPDATE accounts SET mode = 'approve' WHERE id = $1 AND user_id = $2`,
+        [accountIds["Visa Rewards"], userId],
+      );
+    }
+    if (accountIds["Savings"]) {
+      await client.query(
+        `UPDATE accounts SET mode = 'auto' WHERE id = $1 AND user_id = $2`,
+        [accountIds["Savings"], userId],
+      );
+    }
+
     // 4. Insert categories. Same encrypted-only contract.
     console.log(`[seed-demo] Inserting ${CATEGORIES.length} categories…`);
     const categoryIds: Record<string, number> = {};
@@ -459,6 +494,33 @@ async function main() {
         [userId, c.type, c.group, enc.ct, enc.lookup]
       );
       categoryIds[c.name] = rows[0].id;
+    }
+
+    // ─── Inbox v4 Phase 4 (2026-05-27) — seed a transaction rule ──────
+    // One rule, matching the demo's existing "Bank interest" payee on
+    // Savings → categorize as Interest. When the user uploads a CSV to
+    // the Auto-pilot Savings account with a "Bank interest" row, the
+    // upload-time rule firing materializes it directly to the ledger
+    // with source='auto_rule' — proving out the pipeline end-to-end.
+    // Coffee/Starbucks-style rules require a Dining-mapped income
+    // category that doesn't exist in the demo seed; sticking with
+    // Interest keeps this self-contained.
+    if (categoryIds["Interest"]) {
+      const conditions = {
+        all: [{ field: "payee", op: "contains", value: "Bank interest" }],
+      };
+      const actions = [{ kind: "set_category", categoryId: categoryIds["Interest"] }];
+      await client.query(
+        `INSERT INTO transaction_rules
+           (user_id, name, conditions, actions, is_active, priority, created_at)
+         VALUES ($1, $2, $3::jsonb, $4::jsonb, true, 100, NOW()::text)`,
+        [
+          userId,
+          "Bank interest → Interest",
+          JSON.stringify(conditions),
+          JSON.stringify(actions),
+        ],
+      );
     }
 
     // 5. Insert transactions — payee, note, tags, portfolio_holding encrypted

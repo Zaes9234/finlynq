@@ -27,6 +27,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -45,14 +46,19 @@ import {
 import type { SuggestionDisplay } from "@/components/reconcile/suggestion-card";
 import type { ReconcileBadgeVariant } from "@/components/reconcile/match-pill";
 import {
-  MaterializeDialog,
-  type MaterializeBankPreview,
-  type CategoryOption,
-} from "@/components/reconcile/materialize-dialog";
+  TransactionDialog,
+  type TransactionDialogInitialState,
+  type DialogCategory,
+  type DialogHolding,
+} from "@/components/transactions/transaction-dialog";
 import {
   BalanceSummaryCard,
   type BalanceSummary,
 } from "@/components/reconcile/balance-summary-card";
+import { RecentUploadsPanel } from "@/components/reconcile/recent-uploads-panel";
+import { ConfirmDeleteBankRow } from "@/components/reconcile/confirm-delete-bank-row";
+import { BulkLinkActionBar } from "@/components/reconcile/bulk-link-action-bar";
+import { safeAccountName } from "@/lib/safe-name";
 
 interface Account {
   id: number;
@@ -67,6 +73,10 @@ interface Account {
   alias?: string | null;
   currency: string;
   archived?: boolean;
+  /** Surfaced from /api/accounts so the reconcile materialize button can
+   *  route investment-account bank rows to /portfolio/new instead of the
+   *  generic TransactionDialog (per the investment-account constraint). */
+  isInvestment?: boolean;
 }
 
 /** Date-window preset for the quick-fill chip group. `null` = all time. */
@@ -123,17 +133,6 @@ function describeRange(from: string | null, to: string | null): string {
   return "all time";
 }
 
-/** Friendly display name for an account — alias when set, formal name
- *  otherwise. Falls back to `Account #<id>` if both are missing (DEK
- *  not in cache → decryptNamedRows returns null on both fields). */
-function accountDisplayName(a: Account): string {
-  const alias = a.alias?.trim();
-  if (alias) return alias;
-  const name = a.name?.trim();
-  if (name) return name;
-  return `Account #${a.id}`;
-}
-
 interface ReconcileLink {
   transactionId: number;
   bankTransactionId: string;
@@ -162,6 +161,11 @@ interface TxSnapshot {
   categoryType: string | null;
   importHash: string | null;
   accountId: number;
+  /** Transfer-pair / portfolio-pair lineage for the click-to-highlight UX.
+   *  Plan #5 (2026-05-25). Null when the tx is not part of any pair. */
+  linkId: string | null;
+  tradeLinkId: string | null;
+  swapLinkId: string | null;
 }
 
 interface BankSnapshot {
@@ -221,14 +225,157 @@ export default function ReconcilePage() {
    *  ("30d" → from = today-30d, to = today). Defaults to last 60d. */
   const [dateFrom, setDateFrom] = useState<string | null>(parseDateFromUrl());
   const [dateTo, setDateTo] = useState<string | null>(parseDateToUrl());
-  /** Loaded once on mount. The materialize dialog renders these in its
+  /** Loaded once on mount. TransactionDialog renders these in its
    *  category picker; the bank-pool rule engine already used the same
    *  ids server-side to compute `suggestedCategoryId` per bank row. */
-  const [categories, setCategories] = useState<CategoryOption[]>([]);
-  /** Active materialize target — bank-only row whose Create button was
-   *  clicked. null when the dialog is closed. */
-  const [materializeBank, setMaterializeBank] =
-    useState<MaterializeBankPreview | null>(null);
+  const [categories, setCategories] = useState<DialogCategory[]>([]);
+  const [holdings, setHoldings] = useState<DialogHolding[]>([]);
+  /** Materialize dialog state. `materializeBankId` is set ONLY when the
+   *  dialog was opened from a bank-only row (i.e. should auto-write a
+   *  reconcile link on save); null for other create paths. */
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [dialogInitial, setDialogInitial] = useState<TransactionDialogInitialState | null>(null);
+  const [materializeBankId, setMaterializeBankId] = useState<string | null>(null);
+  const router = useRouter();
+
+  /** Click-to-highlight set (plan #5). Computed client-side from `data`'s
+   *  transaction snapshots + link records when the user clicks a row.
+   *  Clicking the same row clears the set; clicking a different row
+   *  swaps in the new neighborhood. Transient — refresh clears. */
+  const [highlightedTxIds, setHighlightedTxIds] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  const [highlightedBankIds, setHighlightedBankIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  /** Anchor row — the one the user clicked — so a second click on the
+   *  same row toggles the highlight off. Encoded as `tx:<id>` or
+   *  `bank:<uuid>`. Null = no active highlight. */
+  const [highlightAnchor, setHighlightAnchor] = useState<string | null>(null);
+
+  /** Per-row bank-transaction delete (2026-05-27). When a linked bank row
+   *  is clicked, the page shows the ConfirmDeleteBankRow modal first and
+   *  stashes the snapshot here; bank-only rows skip the modal and call
+   *  the delete fetch directly. */
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    bankId: string;
+    date: string;
+    amount: number;
+    currency: string;
+    payee: string | null;
+    linkedTransactionCount: number;
+  } | null>(null);
+
+  /** Bulk-link selection state (2026-05-27). Independent on each pane. */
+  const [selectedTxIds, setSelectedTxIds] = useState<ReadonlySet<number>>(
+    () => new Set(),
+  );
+  const [selectedBankIds, setSelectedBankIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [bulkLinking, setBulkLinking] = useState(false);
+
+  /** Build the neighborhood for a clicked tx. Pair siblings are computed
+   *  from the tx snapshots in `data` — linkId for transfers, tradeLinkId
+   *  for portfolio pairs, swapLinkId for swap quads. Bank-side fan-out
+   *  pulls every bank row joined to any tx in the set. */
+  const computeNeighborhoodFromTx = useCallback(
+    (txId: number) => {
+      const txIds = new Set<number>([txId]);
+      const bankIds = new Set<string>();
+      if (!data) return { txIds, bankIds };
+      const anchor = data.transactions[txId];
+      if (anchor) {
+        const matchKeys: Array<[keyof TxSnapshot, string]> = [
+          ["linkId", anchor.linkId ?? ""],
+          ["tradeLinkId", anchor.tradeLinkId ?? ""],
+          ["swapLinkId", anchor.swapLinkId ?? ""],
+        ];
+        for (const [key, val] of matchKeys) {
+          if (!val) continue;
+          for (const other of Object.values(data.transactions)) {
+            if (other[key] === val) txIds.add(other.id);
+          }
+        }
+      }
+      for (const link of data.linked) {
+        if (txIds.has(link.transactionId)) bankIds.add(link.bankTransactionId);
+      }
+      return { txIds, bankIds };
+    },
+    [data],
+  );
+
+  /** Build the neighborhood for a clicked bank row. Walks tx links then
+   *  fans out through tx pair lineage so a click on a bank row that's
+   *  linked to one leg of a transfer pair highlights both legs. */
+  const computeNeighborhoodFromBank = useCallback(
+    (bankId: string) => {
+      const txIds = new Set<number>();
+      const bankIds = new Set<string>([bankId]);
+      if (!data) return { txIds, bankIds };
+      for (const link of data.linked) {
+        if (link.bankTransactionId === bankId) txIds.add(link.transactionId);
+      }
+      // Expand each linked tx through its pair lineage, then re-fan back
+      // to bank ids for the full neighborhood.
+      const seedTxIds = [...txIds];
+      for (const seedId of seedTxIds) {
+        const seed = data.transactions[seedId];
+        if (!seed) continue;
+        const matchKeys: Array<[keyof TxSnapshot, string]> = [
+          ["linkId", seed.linkId ?? ""],
+          ["tradeLinkId", seed.tradeLinkId ?? ""],
+          ["swapLinkId", seed.swapLinkId ?? ""],
+        ];
+        for (const [key, val] of matchKeys) {
+          if (!val) continue;
+          for (const other of Object.values(data.transactions)) {
+            if (other[key] === val) txIds.add(other.id);
+          }
+        }
+      }
+      for (const link of data.linked) {
+        if (txIds.has(link.transactionId)) bankIds.add(link.bankTransactionId);
+      }
+      return { txIds, bankIds };
+    },
+    [data],
+  );
+
+  const onTxRowClick = useCallback(
+    (txId: number) => {
+      const anchorKey = `tx:${txId}`;
+      if (highlightAnchor === anchorKey) {
+        setHighlightAnchor(null);
+        setHighlightedTxIds(new Set());
+        setHighlightedBankIds(new Set());
+        return;
+      }
+      const { txIds, bankIds } = computeNeighborhoodFromTx(txId);
+      setHighlightAnchor(anchorKey);
+      setHighlightedTxIds(txIds);
+      setHighlightedBankIds(bankIds);
+    },
+    [highlightAnchor, computeNeighborhoodFromTx],
+  );
+
+  const onBankRowClick = useCallback(
+    (bankId: string) => {
+      const anchorKey = `bank:${bankId}`;
+      if (highlightAnchor === anchorKey) {
+        setHighlightAnchor(null);
+        setHighlightedTxIds(new Set());
+        setHighlightedBankIds(new Set());
+        return;
+      }
+      const { txIds, bankIds } = computeNeighborhoodFromBank(bankId);
+      setHighlightAnchor(anchorKey);
+      setHighlightedTxIds(txIds);
+      setHighlightedBankIds(bankIds);
+    },
+    [highlightAnchor, computeNeighborhoodFromBank],
+  );
   /** Bank-vs-system balance summary for the selected account (Bank says /
    *  Finlynq has / Delta). Surfaced above the two-pane layout. */
   const [balanceSummary, setBalanceSummary] = useState<BalanceSummary | null>(
@@ -293,7 +440,7 @@ export default function ReconcilePage() {
     window.history.replaceState({}, "", url.toString());
   }, [selectedAccountId, dateFrom, dateTo]);
 
-  // ─── Load categories (once) ────────────────────────────────────────
+  // ─── Load categories + holdings (once) ─────────────────────────────
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -305,6 +452,7 @@ export default function ReconcilePage() {
           // Nullable for the same DEK-missing reason as Account.name.
           name: string | null;
           type: string;
+          group?: string | null;
         }>;
         if (cancelled) return;
         setCategories(
@@ -312,12 +460,29 @@ export default function ReconcilePage() {
             id: r.id,
             name: r.name?.trim() ? r.name : `Category #${r.id}`,
             type: r.type,
+            group: r.group ?? "",
           })),
         );
       } catch {
         // Non-fatal — the dialog will just show an empty category list.
       }
     })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/portfolio")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((rows) => {
+        if (cancelled) return;
+        setHoldings(Array.isArray(rows) ? rows : []);
+      })
+      .catch(() => {
+        /* dialog handles empty list — non-investment accounts don't need it */
+      });
     return () => {
       cancelled = true;
     };
@@ -597,26 +762,216 @@ export default function ReconcilePage() {
     [refresh],
   );
 
-  // Open the MaterializeDialog with a per-row preview. The dialog owns
-  // the POST so the user picks category/account before the transaction
-  // is minted — fixes the V1 issue where Create produced uncategorized
-  // transactions silently.
+  // Per-row bank-transaction delete (2026-05-27).
+  // Two-phase:
+  //   1. POST with empty body → server may return 409 + requiresConfirmation
+  //      if the row has linked transactions. Surface the modal.
+  //   2. Modal "Delete all" → POST { deleteLinkedTransactions: true }
+  //      Modal "Keep tx"   → POST { deleteLinkedTransactions: false }
+  // Bank-only rows skip the modal entirely (server doesn't 409).
+  const deleteBankRow = useCallback(
+    async (bankId: string, deleteLinkedTransactions: boolean | null) => {
+      setBusyBankId(bankId);
+      try {
+        const body: Record<string, unknown> = {};
+        if (deleteLinkedTransactions != null) {
+          body.deleteLinkedTransactions = deleteLinkedTransactions;
+        }
+        const res = await fetch(
+          `/api/bank-transactions/${encodeURIComponent(bankId)}`,
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        );
+        if (res.status === 409) {
+          const payload = await res.json();
+          const snap = data?.bankTransactions[bankId];
+          setDeleteConfirm({
+            bankId,
+            date: payload.bankDate ?? snap?.date ?? "",
+            amount: payload.bankAmount ?? snap?.amount ?? 0,
+            currency: payload.bankCurrency ?? snap?.currency ?? "CAD",
+            payee: snap?.payee ?? null,
+            linkedTransactionCount: payload.linkedTransactionCount ?? 0,
+          });
+          return;
+        }
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => ({}));
+          throw new Error(errBody.error ?? `HTTP ${res.status}`);
+        }
+        // Drop the row from selection state if it was checked.
+        setSelectedBankIds((prev) => {
+          if (!prev.has(bankId)) return prev;
+          const next = new Set(prev);
+          next.delete(bankId);
+          return next;
+        });
+        setDeleteConfirm(null);
+        await refresh();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusyBankId(null);
+      }
+    },
+    [data, refresh],
+  );
+
+  const onBankDelete = useCallback(
+    (bankId: string) => {
+      // First call sends no body — server will 409 if linked, otherwise
+      // deletes immediately.
+      void deleteBankRow(bankId, null);
+    },
+    [deleteBankRow],
+  );
+
+  // Bulk-link selection handlers (2026-05-27).
+  const onToggleBankSelect = useCallback((bankId: string) => {
+    setSelectedBankIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(bankId)) next.delete(bankId);
+      else next.add(bankId);
+      return next;
+    });
+  }, []);
+
+  const onToggleTxSelect = useCallback((txId: number) => {
+    setSelectedTxIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(txId)) next.delete(txId);
+      else next.add(txId);
+      return next;
+    });
+  }, []);
+
+  const onToggleAllBank = useCallback(
+    (checked: boolean) => {
+      if (!checked) {
+        setSelectedBankIds(new Set());
+        return;
+      }
+      // Select every visible bank row id from the current data snapshot.
+      setSelectedBankIds(
+        new Set(Object.keys(data?.bankTransactions ?? {})),
+      );
+    },
+    [data],
+  );
+
+  const onToggleAllTx = useCallback(
+    (checked: boolean) => {
+      if (!checked) {
+        setSelectedTxIds(new Set());
+        return;
+      }
+      setSelectedTxIds(
+        new Set(
+          Object.keys(data?.transactions ?? {}).map((s) => parseInt(s, 10)),
+        ),
+      );
+    },
+    [data],
+  );
+
+  const clearSelection = useCallback(() => {
+    setSelectedTxIds(new Set());
+    setSelectedBankIds(new Set());
+  }, []);
+
+  // Sum of selected amounts on each pane + delta — surfaced by the bulk
+  // action bar so the user can sanity-check that the selection actually
+  // reconciles before firing the cartesian product.
+  const bulkSelectionSums = useMemo(() => {
+    let txSum = 0;
+    let bankSum = 0;
+    let currency = "CAD";
+    if (data) {
+      for (const id of selectedTxIds) {
+        const t = data.transactions[id];
+        if (t) {
+          txSum += t.amount;
+          currency = t.currency || currency;
+        }
+      }
+      for (const id of selectedBankIds) {
+        const b = data.bankTransactions[id];
+        if (b) {
+          bankSum += b.amount;
+          currency = b.currency || currency;
+        }
+      }
+    }
+    // Fall back to the selected account's currency when no rows are
+    // selected yet (covers the half-selected state — one side empty).
+    if (selectedAccountId != null) {
+      const acct = accounts.find((a) => a.id === selectedAccountId);
+      if (acct?.currency) currency = acct.currency;
+    }
+    return { txSum, bankSum, currency };
+  }, [data, selectedTxIds, selectedBankIds, selectedAccountId, accounts]);
+
+  const onBulkReconcile = useCallback(async () => {
+    if (selectedTxIds.size === 0 || selectedBankIds.size === 0) return;
+    setBulkLinking(true);
+    try {
+      const res = await fetch("/api/reconcile/links/bulk", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          transactionIds: [...selectedTxIds],
+          bankTransactionIds: [...selectedBankIds],
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      clearSelection();
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBulkLinking(false);
+    }
+  }, [selectedTxIds, selectedBankIds, clearSelection, refresh]);
+
+  // Open the canonical TransactionDialog prefilled from the bank row.
+  // Replaces the old MaterializeDialog (2026-05-25, plan/reuse-add-
+  // transaction-dialog.md) so users get the full Add Transaction surface
+  // (payee, splits, advanced) at materialize time, not just a category
+  // picker. The dialog's onSaved POSTs /api/reconcile/links to wire the
+  // transaction_bank_links join row + bump the FK; investment-account
+  // bank rows route to /portfolio/new instead (the generic dialog can't
+  // satisfy the investment-account constraint).
   const onMaterialize = useCallback(
     (bankId: string) => {
       if (!data) return;
       const snap = data.bankTransactions[bankId];
       if (!snap) return;
-      setMaterializeBank({
-        bankTransactionId: snap.id,
-        date: snap.date,
-        amount: snap.amount,
-        currency: snap.currency,
-        payee: snap.payee,
-        accountId: snap.accountId,
-        suggestedCategoryId: snap.suggestedCategoryId,
+      const acct = accounts.find((a) => a.id === snap.accountId);
+      if (acct?.isInvestment === true) {
+        router.push(`/portfolio/new?fromBankTransactionId=${encodeURIComponent(snap.id)}`);
+        return;
+      }
+      setDialogInitial({
+        kind: "transaction-prefill",
+        values: {
+          accountId: String(snap.accountId),
+          categoryId: snap.suggestedCategoryId != null ? String(snap.suggestedCategoryId) : "",
+          date: snap.date,
+          currency: snap.currency,
+          amount: String(snap.amount),
+          payee: snap.payee ?? "",
+        },
       });
+      setMaterializeBankId(snap.id);
+      setDialogOpen(true);
     },
-    [data],
+    [data, accounts, router],
   );
 
   // ─── Render ────────────────────────────────────────────────────────
@@ -685,7 +1040,7 @@ export default function ReconcilePage() {
               <SelectContent>
                 {visibleAccounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
-                    {accountDisplayName(a)} · {a.currency}
+                    {safeAccountName(a)} · {a.currency}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -798,7 +1153,12 @@ export default function ReconcilePage() {
               loading={dataLoading}
               onAccept={onAccept}
               onReject={onReject}
+              onRowClick={onTxRowClick}
+              highlightedTxIds={highlightedTxIds}
               busySuggestionKey={busySuggestionKey}
+              selectedTxIds={selectedTxIds}
+              onToggleSelect={onToggleTxSelect}
+              onToggleSelectAll={onToggleAllTx}
             />
           }
           rightLabel="Bank ledger"
@@ -808,9 +1168,27 @@ export default function ReconcilePage() {
               loading={dataLoading}
               onMaterialize={onMaterialize}
               onUnlink={onUnlink}
+              onDelete={onBankDelete}
+              onRowClick={onBankRowClick}
+              highlightedBankIds={highlightedBankIds}
               busyBankId={busyBankId}
+              selectedBankIds={selectedBankIds}
+              onToggleSelect={onToggleBankSelect}
+              onToggleSelectAll={onToggleAllBank}
             />
           }
+        />
+      )}
+
+      {/* Phase 4 of import-modes refactor (2026-05-25) — Recent Uploads
+          panel lists the last 20 bank_upload_batches for this account and
+          provides a one-click batch-undo affordance for mistaken imports. */}
+      {selectedAccountId != null && (
+        <RecentUploadsPanel
+          accountId={selectedAccountId}
+          onChange={() => {
+            void refresh();
+          }}
         />
       )}
 
@@ -831,20 +1209,78 @@ export default function ReconcilePage() {
         )}
       </div>
 
-      <MaterializeDialog
-        open={materializeBank != null}
+      {/* Confirmation modal for per-row bank-transaction delete (2026-05-27). */}
+      {deleteConfirm && (
+        <ConfirmDeleteBankRow
+          open
+          linkedTransactionCount={deleteConfirm.linkedTransactionCount}
+          bankDate={deleteConfirm.date}
+          bankAmount={deleteConfirm.amount}
+          bankCurrency={deleteConfirm.currency}
+          bankPayee={deleteConfirm.payee}
+          busy={busyBankId === deleteConfirm.bankId}
+          onConfirm={(deleteLinked) => {
+            void deleteBankRow(deleteConfirm.bankId, deleteLinked);
+          }}
+          onCancel={() => setDeleteConfirm(null)}
+        />
+      )}
+
+      {/* Sticky action bar for bulk M:N reconcile (2026-05-27). */}
+      <BulkLinkActionBar
+        txCount={selectedTxIds.size}
+        bankCount={selectedBankIds.size}
+        txSum={bulkSelectionSums.txSum}
+        bankSum={bulkSelectionSums.bankSum}
+        currency={bulkSelectionSums.currency}
+        busy={bulkLinking}
+        onReconcile={() => void onBulkReconcile()}
+        onClear={clearSelection}
+      />
+
+      <TransactionDialog
+        open={dialogOpen}
         onOpenChange={(o) => {
-          if (!o) setMaterializeBank(null);
+          setDialogOpen(o);
+          if (!o) {
+            setDialogInitial(null);
+            setMaterializeBankId(null);
+          }
         }}
-        bank={materializeBank}
-        categories={categories}
         accounts={accounts.map((a) => ({
           id: a.id,
-          name: accountDisplayName(a),
+          name: safeAccountName(a),
           currency: a.currency,
+          isInvestment: a.isInvestment,
         }))}
-        onCreated={() => {
-          void refresh();
+        categories={categories}
+        holdings={holdings}
+        initialState={dialogInitial}
+        onSaved={async (txId) => {
+          // If the dialog was opened from a bank-only Create button, wire
+          // the join row + FK so the new transaction shows as linked on
+          // the next refresh. linkType='primary' bumps the FK; the helper
+          // also sets transactions.bank_transaction_id when it was NULL.
+          if (materializeBankId) {
+            try {
+              await fetch("/api/reconcile/links", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  transactionId: txId,
+                  bankTransactionId: materializeBankId,
+                  linkType: "primary",
+                }),
+              });
+            } catch (e) {
+              // Surface to the page-level banner but don't block — the
+              // transaction landed; the user can manually accept the
+              // suggestion on the next refresh.
+              setError(e instanceof Error ? e.message : String(e));
+            }
+            setMaterializeBankId(null);
+          }
+          await refresh();
         }}
       />
     </div>

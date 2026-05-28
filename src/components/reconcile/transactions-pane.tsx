@@ -56,15 +56,39 @@ export function TransactionsPane({
   loading,
   onAccept,
   onReject,
+  onRowClick,
+  highlightedTxIds,
   busySuggestionKey,
+  selectedTxIds,
+  onToggleSelect,
+  onToggleSelectAll,
 }: {
   rows: TxRow[];
   loading: boolean;
   onAccept: (s: SuggestionDisplay) => void;
   onReject: (s: SuggestionDisplay) => void;
+  /** Click on the row body — drives cross-pane highlight (plan #5). */
+  onRowClick?: (txId: number) => void;
+  /** Transaction ids currently highlighted by a click-through. */
+  highlightedTxIds?: ReadonlySet<number>;
   /** Composite "txId:bankId" key for the suggestion in flight. */
   busySuggestionKey: string | null;
+  /** Transaction ids checked for bulk M:N reconcile (2026-05-27). */
+  selectedTxIds?: ReadonlySet<number>;
+  /** Toggle a single row's checked state. */
+  onToggleSelect?: (txId: number) => void;
+  /** Toggle every visible row's checked state at once (header checkbox). */
+  onToggleSelectAll?: (checked: boolean) => void;
 }) {
+  const selectionEnabled = !!onToggleSelect;
+  const allChecked =
+    selectionEnabled &&
+    rows.length > 0 &&
+    rows.every((r) => selectedTxIds?.has(r.id));
+  const someChecked =
+    selectionEnabled &&
+    !allChecked &&
+    rows.some((r) => selectedTxIds?.has(r.id));
   if (loading) {
     return (
       <p className="p-6 text-sm text-muted-foreground text-center">
@@ -85,6 +109,20 @@ export function TransactionsPane({
         <Table>
           <TableHeader>
             <TableRow>
+              {selectionEnabled && (
+                <TableHead className="w-10">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all transactions"
+                    checked={allChecked}
+                    ref={(el) => {
+                      if (el) el.indeterminate = someChecked;
+                    }}
+                    onChange={(e) => onToggleSelectAll?.(e.target.checked)}
+                    className="h-4 w-4 cursor-pointer"
+                  />
+                </TableHead>
+              )}
               <TableHead>Date</TableHead>
               <TableHead>Payee</TableHead>
               <TableHead>Status</TableHead>
@@ -98,9 +136,33 @@ export function TransactionsPane({
                 : null;
               const busy =
                 suggestionKey != null && busySuggestionKey === suggestionKey;
+              const highlighted = highlightedTxIds?.has(r.id) ?? false;
+              const highlightClass = highlighted
+                ? "bg-sky-500/10 outline outline-2 outline-sky-500/40"
+                : "";
+              const checked = selectedTxIds?.has(r.id) ?? false;
               return (
                 <Fragment key={r.id}>
-                  <TableRow>
+                  <TableRow
+                    className={`${highlightClass} cursor-pointer`}
+                    onClick={(e) => {
+                      const t = e.target as HTMLElement;
+                      if (t.closest("button")) return;
+                      if (t.closest("input")) return;
+                      onRowClick?.(r.id);
+                    }}
+                  >
+                    {selectionEnabled && (
+                      <TableCell className="w-10">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select transaction ${r.date} ${r.payee ?? ""}`}
+                          checked={checked}
+                          onChange={() => onToggleSelect?.(r.id)}
+                          className="h-4 w-4 cursor-pointer"
+                        />
+                      </TableCell>
+                    )}
                     <TableCell className="font-mono text-xs">
                       {r.date}
                     </TableCell>
@@ -131,7 +193,10 @@ export function TransactionsPane({
                   </TableRow>
                   {r.suggestion && (
                     <TableRow>
-                      <TableCell colSpan={4} className="p-0">
+                      <TableCell
+                        colSpan={selectionEnabled ? 5 : 4}
+                        className="p-0"
+                      >
                         <SuggestionCard
                           suggestion={r.suggestion}
                           onAccept={onAccept}

@@ -4,8 +4,18 @@ import { eq } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { safeErrorMessage } from "@/lib/validate";
 import { deserializeTemplate, autoDetectColumnMapping } from "@/lib/import-templates";
-import type { ColumnMapping, DateFormatOverride } from "@/lib/import-templates";
+import type {
+  ColumnMapping,
+  DateFormatOverride,
+  ImportMode,
+} from "@/lib/import-templates";
 import { SUPPORTED_CURRENCIES } from "@/lib/fx/supported-currencies";
+
+/** Phase 2 of import-modes refactor — accept 'simplified' | 'detailed', fall
+ *  back to 'detailed' for anything else (back-compat with pre-Phase-1 clients). */
+function coerceImportMode(raw: unknown): ImportMode {
+  return raw === "simplified" ? "simplified" : "detailed";
+}
 
 /** Coerce + clamp the int knobs and validate the enum knobs. Returns the
  *  shape we feed to Drizzle. Centralized so POST and PUT can't drift. */
@@ -75,6 +85,7 @@ export async function POST(request: NextRequest) {
       skipFooterRows?: number;
       dateFormatOverride?: string | null;
       defaultCurrency?: string | null;
+      importMode?: ImportMode | string | null;
     };
 
     if (!body.name?.trim()) {
@@ -120,6 +131,7 @@ export async function POST(request: NextRequest) {
         skipFooterRows: knobs.skipFooterRows,
         dateFormatOverride: knobs.dateFormatOverride,
         defaultCurrency: knobs.defaultCurrency,
+        importMode: coerceImportMode(body.importMode),
         createdAt: now,
         updatedAt: now,
       })

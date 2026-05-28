@@ -214,6 +214,7 @@ export async function upsertBankBalanceAnchors(
   accountId: number,
   anchors: BalanceAnchor[],
   filename: string | null,
+  uploadBatchId?: string | null,
 ): Promise<void> {
   if (anchors.length === 0) return;
   const rows = anchors.map((a) => ({
@@ -224,6 +225,11 @@ export async function upsertBankBalanceAnchors(
     currency: a.currency,
     source: a.source,
     sourceFilenames: filename ? [filename] : [],
+    // Phase 1 of import-modes refactor (2026-05-25) — anchor lineage to the
+    // upload batch. NULL for legacy paths. On conflict the existing value
+    // is overwritten (anchors are content-immutable per-date EXCEPT for the
+    // batch lineage which tracks the most-recent ingest that touched them).
+    uploadBatchId: uploadBatchId ?? null,
   }));
   // Drizzle PG supports onConflictDoUpdate with target columns. Re-import
   // semantics: newer balance wins, last_seen_at bumps, source_filenames
@@ -244,6 +250,9 @@ export async function upsertBankBalanceAnchors(
         source: sql`EXCLUDED.source`,
         lastSeenAt: sql`NOW()`,
         sourceFilenames: sql`array_append(bank_daily_balances.source_filenames, EXCLUDED.source_filenames[1])`,
+        // Track the most-recent ingest that touched this anchor so Phase 4's
+        // batch-undo can remove the corresponding row.
+        uploadBatchId: sql`COALESCE(EXCLUDED.upload_batch_id, bank_daily_balances.upload_batch_id)`,
       },
     });
 }

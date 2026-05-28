@@ -64,13 +64,20 @@ import {
 } from "@/components/staging/balance-warning-banner";
 import { AccountSelector, type AccountOption } from "@/components/import/reconcile/account-selector";
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
+import { safeName } from "@/lib/safe-name";
 import { FilePane } from "@/components/import/reconcile/file-pane";
 import { DbPane, type DbTransactionRow } from "@/components/import/reconcile/db-pane";
+import {
+  UnboundImportPicker,
+  type PickerAccount,
+  type PickerTemplate,
+} from "@/components/staging/unbound-import-picker";
 import {
   SuggestionsGroup,
   type SuggestionDisplay,
 } from "@/components/import/reconcile/suggestions-group";
-import { Link as LinkIcon, Flag, X as XIcon } from "lucide-react";
+import { ConfirmDeleteBankRow } from "@/components/reconcile/confirm-delete-bank-row";
+import { Link as LinkIcon, Flag, X as XIcon, Trash2 } from "lucide-react";
 
 interface StagedRow {
   id: string;
@@ -106,6 +113,12 @@ interface StagedDetail {
     /** 2026-05-24 — anchors parsed from the file's Balance column.
      *  Same shape persisted to staged_imports.parsed_anchors. */
     parsedAnchors?: ParsedAnchorRow[] | null;
+    /** 2026-05-28 — fallback metadata captured when an email-import CSV
+     *  attachment didn't template-match at parse time. Backs the
+     *  UnboundImportPicker. Both null for upload-path imports and for
+     *  email imports whose CSV did match a template. */
+    headers?: string[] | null;
+    sampleRows?: Array<Record<string, string>> | null;
   };
   rows: StagedEditableRow[];
   reconciliation?: {
@@ -122,6 +135,13 @@ interface StagedDetail {
   /** 2026-05-24 — bank balance pre-flight mismatches. Empty array =
    *  every anchor in the batch lines up with the running total. */
   balanceWarnings?: BalanceWarning[];
+  /** 2026-05-28 — populated by the GET when bound_account_id IS NULL AND
+   *  headers IS NOT NULL. Lets the UnboundImportPicker render template
+   *  + account dropdowns without extra round-trips. */
+  pickerCandidates?: {
+    accounts: PickerAccount[];
+    templates: PickerTemplate[];
+  } | null;
 }
 
 function daysUntil(iso: string): number {
@@ -177,6 +197,33 @@ function PendingImportsPageInner() {
   // FINLYNQ-88 — Re-apply rules confirmation modal.
   const [reapplyModalOpen, setReapplyModalOpen] = useState(false);
   const [reapplying, setReapplying] = useState(false);
+  // Plan #5 Phase 3 — click-to-highlight on both panes. Mirrors the
+  // /reconcile implementation: clicking a row tints its neighborhood
+  // (linked counterpart + transfer-pair peer when present); clicking
+  // the same row toggles the highlight off; clicking a different row
+  // swaps in the new neighborhood. Transient — page state, not URL.
+  const [highlightedStagedIds, setHighlightedStagedIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const [highlightedBankIds, setHighlightedBankIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  /** Anchor encoded as `staged:<id>` or `bank:<uuid>`. Null = no
+   *  active highlight; second click on the same row clears it. */
+  const [highlightAnchor, setHighlightAnchor] = useState<string | null>(null);
+
+  /** Per-row bank-transaction delete (2026-05-27). Mirrors /reconcile's
+   *  flow: first fetch sends empty body; server returns 409 +
+   *  requiresConfirmation when the row has linked transactions, and the
+   *  modal lets the user pick "Delete all" vs "Keep tx". */
+  const [bankDeleteConfirm, setBankDeleteConfirm] = useState<{
+    bankId: string;
+    date: string;
+    amount: number;
+    currency: string;
+    payee: string | null;
+    linkedTransactionCount: number;
+  } | null>(null);
 
   const loadList = useCallback(async () => {
     setLoading(true);
@@ -308,17 +355,13 @@ function PendingImportsPageInner() {
     // Fall back to `Account #<id>` when the loaded account's name decrypted
     // to null/empty (DEK not in cache → decryptNamedRows returns null). The
     // raw integer would otherwise surface in the AccountSelector trigger.
-    const friendlyName = (a: EditorAccountOption): string => {
-      const trimmed = a.name?.trim();
-      return trimmed ? trimmed : `Account #${a.id}`;
-    };
     const opts: AccountOption[] = [];
     for (const [name, count] of byName) {
       const match = accounts.find((a) => a.name === name);
       if (match) {
         opts.push({
           id: match.id,
-          name: friendlyName(match),
+          name: safeName(match.name, "Account", match.id),
           currency: match.currency,
           rowCount: count,
         });
@@ -329,7 +372,7 @@ function PendingImportsPageInner() {
       if (bound) {
         opts.push({
           id: bound.id,
-          name: friendlyName(bound),
+          name: safeName(bound.name, "Account", bound.id),
           currency: bound.currency,
           rowCount: detail.rows.length,
         });
@@ -688,6 +731,144 @@ function PendingImportsPageInner() {
     [linkMode, patchStagedRow, updateDbRowLink],
   );
 
+  // ─── Plan #5 Phase 3 — click-to-highlight neighborhoods ──────────────
+  // Source of truth for staged↔bank join: each side carries the system
+  // transaction id (staged.linkedTransactionId / dbRow.linkedTransactionId)
+  // once a link exists. Two staged rows can also be transfer-pair peers
+  // WITHIN the same batch via staged.peerStagedId (fans out the highlight
+  // to the peer + any bank rows linked to its tx).
+  //
+  // Pair lineage via system-side linkId/tradeLinkId/swapLinkId is NOT
+  // surfaced here — DbTransactionRow doesn't carry those fields and the
+  // staged side never does. Matches /reconcile's out-of-scope note about
+  // cross-account highlights: keep the wiring honest to the data we have.
+  const computeNeighborhoodFromStaged = useCallback(
+    (stagedId: string) => {
+      const stagedIds = new Set<string>([stagedId]);
+      const bankIds = new Set<string>();
+      const rows = detail?.rows ?? [];
+      const stagedById = new Map(rows.map((r) => [r.id, r]));
+      const seed = stagedById.get(stagedId);
+      if (!seed) return { stagedIds, bankIds };
+      const txIds = new Set<number>();
+      if (seed.linkedTransactionId != null) txIds.add(seed.linkedTransactionId);
+      // Transfer-pair peer within the same batch.
+      if (seed.peerStagedId) {
+        const peer = stagedById.get(seed.peerStagedId);
+        if (peer) {
+          stagedIds.add(peer.id);
+          if (peer.linkedTransactionId != null) {
+            txIds.add(peer.linkedTransactionId);
+          }
+        }
+      }
+      for (const dr of dbRows) {
+        if (dr.linkedTransactionId != null && txIds.has(dr.linkedTransactionId)) {
+          bankIds.add(dr.id);
+        }
+      }
+      return { stagedIds, bankIds };
+    },
+    [detail, dbRows],
+  );
+
+  const computeNeighborhoodFromBank = useCallback(
+    (bankId: string) => {
+      const stagedIds = new Set<string>();
+      const bankIds = new Set<string>([bankId]);
+      const rows = detail?.rows ?? [];
+      const stagedById = new Map(rows.map((r) => [r.id, r]));
+      const seed = dbRows.find((r) => r.id === bankId);
+      if (!seed) return { stagedIds, bankIds };
+      const txIds = new Set<number>();
+      if (seed.linkedTransactionId != null) txIds.add(seed.linkedTransactionId);
+      // Pick up the explicit back-reference set by acceptSuggestion /
+      // completeLink — covers the in-flight case where the local row
+      // already mirrors the link but the underlying ledger fetch hasn't
+      // re-run yet.
+      if (seed.linkedStagedRowId) {
+        const linked = stagedById.get(seed.linkedStagedRowId);
+        if (linked) {
+          stagedIds.add(linked.id);
+          if (linked.linkedTransactionId != null) {
+            txIds.add(linked.linkedTransactionId);
+          }
+          if (linked.peerStagedId) {
+            const peer = stagedById.get(linked.peerStagedId);
+            if (peer) {
+              stagedIds.add(peer.id);
+              if (peer.linkedTransactionId != null) {
+                txIds.add(peer.linkedTransactionId);
+              }
+            }
+          }
+        }
+      }
+      for (const sr of rows) {
+        if (sr.linkedTransactionId != null && txIds.has(sr.linkedTransactionId)) {
+          stagedIds.add(sr.id);
+          if (sr.peerStagedId) {
+            const peer = stagedById.get(sr.peerStagedId);
+            if (peer) stagedIds.add(peer.id);
+          }
+        }
+      }
+      // Re-fan to additional bank rows that share any tx we picked up
+      // through the staged side (e.g. multiple bank rows linked to the
+      // same system tx via primary + extra link types).
+      for (const dr of dbRows) {
+        if (dr.linkedTransactionId != null && txIds.has(dr.linkedTransactionId)) {
+          bankIds.add(dr.id);
+        }
+      }
+      return { stagedIds, bankIds };
+    },
+    [detail, dbRows],
+  );
+
+  const clearHighlight = useCallback(() => {
+    setHighlightAnchor(null);
+    setHighlightedStagedIds(new Set());
+    setHighlightedBankIds(new Set());
+  }, []);
+
+  const onStagedRowClick = useCallback(
+    (stagedId: string) => {
+      const anchorKey = `staged:${stagedId}`;
+      if (highlightAnchor === anchorKey) {
+        clearHighlight();
+        return;
+      }
+      const { stagedIds, bankIds } = computeNeighborhoodFromStaged(stagedId);
+      setHighlightAnchor(anchorKey);
+      setHighlightedStagedIds(stagedIds);
+      setHighlightedBankIds(bankIds);
+    },
+    [highlightAnchor, computeNeighborhoodFromStaged, clearHighlight],
+  );
+
+  const onDbRowClick = useCallback(
+    (bankId: string) => {
+      const anchorKey = `bank:${bankId}`;
+      if (highlightAnchor === anchorKey) {
+        clearHighlight();
+        return;
+      }
+      const { stagedIds, bankIds } = computeNeighborhoodFromBank(bankId);
+      setHighlightAnchor(anchorKey);
+      setHighlightedStagedIds(stagedIds);
+      setHighlightedBankIds(bankIds);
+    },
+    [highlightAnchor, computeNeighborhoodFromBank, clearHighlight],
+  );
+
+  // Drop the highlight whenever the user switches accounts or closes the
+  // batch — otherwise stale ids tint rows that aren't even in the current
+  // view's row set.
+  useEffect(() => {
+    clearHighlight();
+  }, [accountId, openId, clearHighlight]);
+
   const flagDbRow = useCallback(
     async (transactionId: number) => {
       setBusyKey(`flag:${transactionId}`);
@@ -740,6 +921,60 @@ function PendingImportsPageInner() {
       }
     },
     [updateDbRowFlag],
+  );
+
+  // Per-row bank-transaction delete on /import/pending (2026-05-27).
+  // Same two-phase contract as /reconcile: first POST sends an empty
+  // body and the server replies 409 when the row has linked txs; the
+  // modal lets the user pick "Delete all" / "Keep tx" / "Cancel".
+  const deleteBankRow = useCallback(
+    async (bankId: string, deleteLinkedTransactions: boolean | null) => {
+      setBusyKey(`bank-delete:${bankId}`);
+      try {
+        const body: Record<string, unknown> = {};
+        if (deleteLinkedTransactions != null) {
+          body.deleteLinkedTransactions = deleteLinkedTransactions;
+        }
+        const res = await fetch(
+          `/api/bank-transactions/${encodeURIComponent(bankId)}`,
+          {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          },
+        );
+        if (res.status === 409) {
+          const payload = await res.json();
+          const snap = dbRows.find((r) => r.id === bankId);
+          setBankDeleteConfirm({
+            bankId,
+            date: payload.bankDate ?? snap?.date ?? "",
+            amount: payload.bankAmount ?? snap?.amount ?? 0,
+            currency: payload.bankCurrency ?? snap?.currency ?? "CAD",
+            payee: snap?.payee ?? null,
+            linkedTransactionCount: payload.linkedTransactionCount ?? 0,
+          });
+          return;
+        }
+        if (!res.ok) {
+          const errBody = await res.json().catch(() => ({}));
+          throw new Error(errBody.error ?? `HTTP ${res.status}`);
+        }
+        // Optimistic removal — drop the row from local state. The next
+        // full bank-ledger reload (account change or page open) will
+        // fetch fresh.
+        setDbRows((rows) => rows.filter((r) => r.id !== bankId));
+        setBankDeleteConfirm(null);
+      } catch (e) {
+        setToast({
+          type: "error",
+          msg: e instanceof Error ? e.message : "Failed to delete bank row",
+        });
+      } finally {
+        setBusyKey(null);
+      }
+    },
+    [dbRows],
   );
 
   // FINLYNQ-56 Phase 4 — live "After approval" balance. The projection
@@ -846,11 +1081,16 @@ function PendingImportsPageInner() {
         return;
       }
       if (!res.ok) throw new Error(data.error || "Approve failed");
+      // Phase 3 of import-modes refactor (2026-05-25) — approve now writes
+      // ONLY to bank_transactions. The user goes to /reconcile to
+      // categorize + materialize into the ledger.
+      const approved = data.approved ?? data.imported ?? 0;
+      const skipped = data.skippedDuplicates ?? 0;
       setToast({
         type: "success",
-        msg: `Imported ${data.imported ?? 0} transactions (${
-          data.skippedDuplicates ?? 0
-        } dupes skipped)`,
+        msg: `Sent ${approved} row${approved === 1 ? "" : "s"} to the bank ledger${
+          skipped > 0 ? ` (${skipped} duplicate${skipped === 1 ? "" : "s"} skipped)` : ""
+        }. Open /reconcile to categorize.`,
       });
       closeDetail();
       loadList();
@@ -1150,7 +1390,7 @@ function PendingImportsPageInner() {
           </Button>
           <Button onClick={approve} disabled={acting || selected.size === 0}>
             <Check className="h-4 w-4 mr-1.5" />
-            Import {selected.size > 0 && `(${selected.size})`}
+            Send to bank ledger {selected.size > 0 && `(${selected.size})`}
           </Button>
         </div>
       </div>
@@ -1285,6 +1525,38 @@ function PendingImportsPageInner() {
               Loading rows…
             </CardContent>
           </Card>
+        ) : detail && detail.pickerCandidates && detail.staged.headers ? (
+          // 2026-05-28 — Unbound email-import path: CSV didn't template-match
+          // at parse time so per-account split would be empty. Render the
+          // template/account picker INSTEAD of the panes; on bind, reload
+          // detail and the panes render normally with populated account_name.
+          <UnboundImportPicker
+            stagedImportId={detail.staged.id}
+            headers={detail.staged.headers}
+            sampleRows={detail.staged.sampleRows ?? []}
+            accounts={detail.pickerCandidates.accounts}
+            templates={detail.pickerCandidates.templates}
+            fromAddress={detail.staged.fromAddress ?? null}
+            subject={detail.staged.subject ?? null}
+            totalRowCount={detail.staged.totalRowCount ?? detail.rows.length}
+            onBound={async () => {
+              // Reload detail so the picker disappears (server stops
+              // sending pickerCandidates after boundAccountId is set)
+              // and the panes render with the now-bound rows.
+              if (openId) {
+                setDetailLoading(true);
+                try {
+                  const resp = await fetch(`/api/import/staged/${openId}`);
+                  if (resp.ok) {
+                    const data = await resp.json();
+                    setDetail(data);
+                  }
+                } finally {
+                  setDetailLoading(false);
+                }
+              }
+            }}
+          />
         ) : detail ? (
           <TwoPaneLayout
             leftLabel="Bank ledger (continuous)"
@@ -1292,6 +1564,8 @@ function PendingImportsPageInner() {
               <DbPane
                 rows={dbRows}
                 loading={dbRowsLoading}
+                onRowClick={onDbRowClick}
+                highlightedBankIds={highlightedBankIds}
                 rowActions={(r) => {
                   // In link-mode: show a Pick button on rows that aren't
                   // already linked to a DIFFERENT staged row. The staged
@@ -1307,66 +1581,102 @@ function PendingImportsPageInner() {
                   // — they're historical bank entries without a current
                   // system-side row.
                   const txId = r.linkedTransactionId;
+                  const deleteBusy = busyKey === `bank-delete:${r.id}`;
+                  // Per-row bank delete (2026-05-27) — always available
+                  // alongside the link/flag affordances.
+                  const deleteBtn = (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void deleteBankRow(r.id, null)}
+                      disabled={deleteBusy}
+                      title="Delete this bank-ledger row"
+                      aria-label="Delete bank row"
+                      className="h-7 w-7 p-0 text-muted-foreground hover:text-rose-700"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  );
                   if (linkMode) {
                     if (!eligibleForLink) {
                       return (
-                        <span className="text-[10px] text-muted-foreground italic">
-                          already linked
-                        </span>
+                        <div className="flex items-center justify-end gap-1">
+                          <span className="text-[10px] text-muted-foreground italic">
+                            already linked
+                          </span>
+                          {deleteBtn}
+                        </div>
                       );
                     }
                     if (txId == null) {
                       return (
-                        <span className="text-[10px] text-muted-foreground italic">
-                          bank-only
-                        </span>
+                        <div className="flex items-center justify-end gap-1">
+                          <span className="text-[10px] text-muted-foreground italic">
+                            bank-only
+                          </span>
+                          {deleteBtn}
+                        </div>
                       );
                     }
                     return (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => completeLink(txId)}
-                        disabled={linkBusy}
-                        className="h-7 px-2"
-                      >
-                        <Check className="h-3.5 w-3.5 mr-1" />
-                        Pick
-                      </Button>
+                      <div className="flex items-center justify-end gap-1">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => completeLink(txId)}
+                          disabled={linkBusy}
+                          className="h-7 px-2"
+                        >
+                          <Check className="h-3.5 w-3.5 mr-1" />
+                          Pick
+                        </Button>
+                        {deleteBtn}
+                      </div>
                     );
                   }
                   if (txId == null) {
-                    // Bank-only history row — flag actions don't apply.
-                    return null;
+                    // Bank-only history row — flag actions don't apply,
+                    // but delete still does.
+                    return (
+                      <div className="flex items-center justify-end gap-1">
+                        {deleteBtn}
+                      </div>
+                    );
                   }
-                  // Default mode: flag / unflag toggle.
+                  // Default mode: flag / unflag toggle + delete.
                   const flagBusy =
                     busyKey === `flag:${txId}` || busyKey === `unflag:${txId}`;
                   if (r.reconciliationFlag) {
                     return (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => unflagDbRow(txId)}
-                        disabled={flagBusy}
-                        className="h-7 px-2 text-rose-700"
-                        title="Remove 'missing from statement' flag"
-                      >
-                        <XIcon className="h-3.5 w-3.5" />
-                      </Button>
+                      <div className="flex items-center justify-end gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => unflagDbRow(txId)}
+                          disabled={flagBusy}
+                          className="h-7 px-2 text-rose-700"
+                          title="Remove 'missing from statement' flag"
+                        >
+                          <XIcon className="h-3.5 w-3.5" />
+                        </Button>
+                        {deleteBtn}
+                      </div>
                     );
                   }
                   return (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => flagDbRow(txId)}
-                      disabled={flagBusy}
-                      className="h-7 px-2 text-muted-foreground hover:text-rose-700"
-                      title="Mark as missing from this statement"
-                    >
-                      <Flag className="h-3.5 w-3.5" />
-                    </Button>
+                    <div className="flex items-center justify-end gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => flagDbRow(txId)}
+                        disabled={flagBusy}
+                        className="h-7 px-2 text-muted-foreground hover:text-rose-700"
+                        title="Mark as missing from this statement"
+                      >
+                        <Flag className="h-3.5 w-3.5" />
+                      </Button>
+                      {deleteBtn}
+                    </div>
                   );
                 }}
               />
@@ -1383,6 +1693,8 @@ function PendingImportsPageInner() {
                 onToggleSelect={toggleSelect}
                 onToggleExpand={toggleExpanded}
                 onRowUpdated={onRowUpdated}
+                onRowClick={onStagedRowClick}
+                highlightedStagedIds={highlightedStagedIds}
                 anchorsByDate={stagedAnchorsByDate}
                 header={
                   displaySuggestions.length > 0 && (
@@ -1462,6 +1774,23 @@ function PendingImportsPageInner() {
           />
         ) : null}
       </div>
+
+      {/* Confirmation modal for per-row bank-transaction delete (2026-05-27). */}
+      {bankDeleteConfirm && (
+        <ConfirmDeleteBankRow
+          open
+          linkedTransactionCount={bankDeleteConfirm.linkedTransactionCount}
+          bankDate={bankDeleteConfirm.date}
+          bankAmount={bankDeleteConfirm.amount}
+          bankCurrency={bankDeleteConfirm.currency}
+          bankPayee={bankDeleteConfirm.payee}
+          busy={busyKey === `bank-delete:${bankDeleteConfirm.bankId}`}
+          onConfirm={(deleteLinked) => {
+            void deleteBankRow(bankDeleteConfirm.bankId, deleteLinked);
+          }}
+          onCancel={() => setBankDeleteConfirm(null)}
+        />
+      )}
     </div>
   );
 }

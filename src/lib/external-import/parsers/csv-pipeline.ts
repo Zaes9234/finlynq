@@ -174,23 +174,48 @@ export async function parseCsvWithFallback(
   }
 
   // 2. Try canonical headers (Date / Amount / Account / Payee).
+  //
+  // Caveat (2026-05-27 fix): the canonical reader keys on the literal
+  // column names `Date` / `Amount` / `Payee` / `Account` and silently
+  // returns `payee: ""` when the file uses a synonym like `Description`
+  // (TD, Tangerine, RBC export shape). The CSVs still satisfy the
+  // canonical Date+Amount minimum so the pipeline used to short-circuit
+  // with empty payees — which then broke downstream rule firing (the
+  // upload-time rule matcher couldn't see the payee) AND the inbox
+  // RowCard display (every card rendered `(no payee)`).
+  //
+  // Guard: if canonical-success returns rows but EVERY row has an empty
+  // payee AND auto-detect finds a payee-mappable header, fall through
+  // to the auto-detect mapping path below so the synonym (Description,
+  // Merchant, Memo, Narrative) gets picked up. Files that genuinely
+  // have no payee at all (e.g. Quicken raw exports) still succeed at
+  // step 2 because auto-detect returns null for them.
   const canonical = csvToRawTransactions(text, dateFormatOverride);
   if (canonical.rows.length > 0) {
-    const filled = applyDefaultAccount(canonical.rows, defaultAccountName);
-    // Canonical path has no explicit ColumnMapping; reuse auto-detect to
-    // find a Balance column when present. Falls back to no anchors when
-    // the file doesn't carry one.
     const auto = autoDetectColumnMapping(headers);
-    const anchors = auto
-      ? extractBalanceAnchors(text, auto, dateFormatOverride, anchorCcy)
-      : [];
-    return {
-      kind: "parsed",
-      rows: filled,
-      errors: canonical.errors,
-      headers,
-      anchors,
-    };
+    const allPayeesEmpty = canonical.rows.every(
+      (r) => !r.payee || r.payee.trim() === "",
+    );
+    const autoFindsPayee = auto && typeof auto.payee === "string" && auto.payee.length > 0;
+    const shouldFallthroughForPayee = allPayeesEmpty && autoFindsPayee;
+
+    if (!shouldFallthroughForPayee) {
+      const filled = applyDefaultAccount(canonical.rows, defaultAccountName);
+      // Canonical path has no explicit ColumnMapping; reuse auto-detect to
+      // find a Balance column when present. Falls back to no anchors when
+      // the file doesn't carry one.
+      const anchors = auto
+        ? extractBalanceAnchors(text, auto, dateFormatOverride, anchorCcy)
+        : [];
+      return {
+        kind: "parsed",
+        rows: filled,
+        errors: canonical.errors,
+        headers,
+        anchors,
+      };
+    }
+    // Fall through to step 3 / 4 below so the payee-mappable header gets used.
   }
 
   // 3. Try an auto-matched saved template (≥80% header overlap). Skipped
@@ -230,6 +255,44 @@ export async function parseCsvWithFallback(
           name: best.template.name,
           score: best.score,
         },
+        anchors,
+      };
+    }
+  }
+
+  // 3.5. Auto-detect direct apply (2026-05-27 fix).
+  //
+  // Before failing back to a needs-mapping prompt, give the auto-detect
+  // engine one chance to drive the parse end-to-end. This is what closes
+  // the "Description column → payee" gap that the canonical short-circuit
+  // used to swallow.
+  //
+  // Only runs when auto-detect finds the three required columns (date,
+  // amount, AND payee). The first two are baseline canonical
+  // requirements; the third is added because a payee-less mapping is
+  // exactly what step 2 already covers — falling through here without a
+  // payee would be a no-op.
+  const directAuto = autoDetectColumnMapping(headers);
+  if (directAuto && directAuto.date && directAuto.amount && directAuto.payee) {
+    const mapped = parseWithMapping(
+      text,
+      directAuto,
+      null,
+      dateFormatOverride,
+    );
+    if (mapped.rows.length > 0) {
+      const filled = applyDefaultAccount(mapped.rows, defaultAccountName);
+      const anchors = extractBalanceAnchors(
+        text,
+        directAuto,
+        dateFormatOverride,
+        anchorCcy,
+      );
+      return {
+        kind: "parsed",
+        rows: filled,
+        errors: mapped.errors,
+        headers,
         anchors,
       };
     }

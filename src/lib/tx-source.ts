@@ -30,6 +30,15 @@ export const SOURCES = [
   // in /transactions and can be filtered out of bank-reconcile flows.
   // See pf-app/docs/architecture/backfill.md.
   "backfill_synth",
+  // Reconcile v4 Phase 4 (2026-05-27). Auto-pilot accounts
+  // (`accounts.mode='auto'`) fire transaction-rules at upload-time. Rows
+  // that match a rule are materialized to `transactions` immediately by
+  // `applyRulesToBankRows` (src/lib/reconcile/match-engine.ts) carrying
+  // this label so the Reconciled tab's "rule" pill + "X rows
+  // auto-applied" banner can attribute them to the rule engine vs. a
+  // user click (`manual`) or two-pane reconcile (`reconcile_link`).
+  // Plan: plan/reconcile-v4-account-anchored-inbox.md.
+  "auto_rule",
 ] as const;
 
 export type TransactionSource = (typeof SOURCES)[number];
@@ -72,6 +81,8 @@ export function labelForSource(s: TransactionSource): string {
       return "Reconcile";
     case "backfill_synth":
       return "Backfill (synthesized)";
+    case "auto_rule":
+      return "Auto-pilot rule";
   }
 }
 

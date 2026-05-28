@@ -38,11 +38,14 @@
  * No writes; no MCP cache invalidations.
  */
 
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
 import { db, schema } from "@/db";
-import { tryDecryptField } from "@/lib/crypto/envelope";
+import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
+import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { applyRules, type TransactionRule } from "@/lib/auto-categorize";
 import type { Action, ConditionGroup } from "@/lib/rules/schema";
+import { invalidateUser } from "@/lib/mcp/user-tx-cache";
+import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
 import {
   buildBankLedgerCandidatePool,
   type BankCandidateRow,
@@ -103,6 +106,12 @@ export interface ReconcileTxSnapshot {
   categoryType: string | null;
   importHash: string | null;
   accountId: number;
+  /** Transfer-pair / portfolio-pair lineage. Surfaced so the
+   *  /reconcile click-to-highlight UX can fan out across pair siblings
+   *  client-side without an extra round-trip per click. Plan #5 (2026-05-25). */
+  linkId: string | null;
+  tradeLinkId: string | null;
+  swapLinkId: string | null;
 }
 
 export interface ReconcileBankSnapshot {
@@ -344,6 +353,9 @@ export async function computeReconcileForAccount(
       categoryType: tx.categoryType,
       importHash: tx.importHash,
       accountId: tx.accountId,
+      linkId: tx.linkId,
+      tradeLinkId: tx.tradeLinkId,
+      swapLinkId: tx.swapLinkId,
     };
   }
   const bankTransactions: Record<string, ReconcileBankSnapshot> = {};
@@ -430,6 +442,9 @@ interface TxLoaded {
   categoryName: string | null;
   categoryType: string | null;
   importHash: string | null;
+  linkId: string | null;
+  tradeLinkId: string | null;
+  swapLinkId: string | null;
 }
 
 /**
@@ -521,6 +536,9 @@ async function loadTxRows(
       currency: schema.transactions.currency,
       payee: schema.transactions.payee,
       importHash: schema.transactions.importHash,
+      linkId: schema.transactions.linkId,
+      tradeLinkId: schema.transactions.tradeLinkId,
+      swapLinkId: schema.transactions.swapLinkId,
       categoryNameCt: schema.categories.nameCt,
       categoryType: schema.categories.type,
     })
@@ -547,6 +565,9 @@ async function loadTxRows(
           : null,
       categoryType: r.categoryType,
       importHash: r.importHash,
+      linkId: r.linkId,
+      tradeLinkId: r.tradeLinkId,
+      swapLinkId: r.swapLinkId,
     }];
   });
 }
@@ -709,4 +730,400 @@ function roundScore(s: number): number {
 
 function roundDelta(d: number): number {
   return Math.round(d * 10000) / 10000;
+}
+
+// ─── Auto-pilot rule firing (Phase 4, 2026-05-27) ────────────────────────
+//
+// The Auto-pilot pipeline (accounts.mode='auto') fires transaction-rules at
+// upload time. The helper below is the canonical entry point: the upload
+// route calls it with the set of bank rows it just inserted; the helper
+// loads each row + its account's rules, fires applyRules, and (when
+// `autoMaterialize=true`) writes a paired `transactions` + `transaction_
+// bank_links` row inside one DB transaction per matched bank row.
+//
+// Idempotent — bank rows that already have a `transaction_bank_links` row
+// are skipped silently. Re-running the helper on the same batch produces
+// no duplicate ledger rows. This is load-bearing for the
+// "rules fire at upload OR /reconcile materialize" invariant: if a user
+// edits a rule and re-runs the upload (or flips an account from
+// Manual→Auto post-hoc and a future ticket replays bank rows), the
+// helper safely no-ops on the already-linked ones.
+//
+// Audit invariants honored (all per CLAUDE.md + sign-category, audit-trio,
+// invalidateUser):
+//   - `source = 'auto_rule'` — distinct attribution from `manual` (Approve
+//      click) and `reconcile_link` (Manual lens materialize). New enum
+//      value added in `scripts/migrations/20260527_transactions_source_auto_rule.sql`
+//      and `src/lib/tx-source.ts`.
+//   - `import_hash` copied VERBATIM from the bank row. Never recomputed.
+//   - `payee` re-encrypted under the user's DEK (transactions is user-tier
+//      only; bank row may be service-tier from the email webhook path).
+//   - Investment-account guard — refuses to materialize into an investment
+//      account (would need a `portfolio_holding_id` which this surface
+//      doesn't collect). Returns `matched: false` with a logged skip.
+//   - Sign-vs-category invariant validated BEFORE INSERT. Mismatch logs a
+//      warning and skips materialization for that row; the bank row stays
+//      in "To categorize" so the user can pick a different category.
+//   - tx + link INSERTs share one DB transaction per bank row.
+//   - `invalidateUser(userId)` after the loop closes so MCP tx cache is
+//      fresh on the next read.
+
+export interface ApplyRulesToBankRowsOptions {
+  /** When true, matched rules trigger a `transactions` + link INSERT for
+   *  that bank row with source='auto_rule'. When false, the helper just
+   *  reports which rows matched without writing anything (planning mode). */
+  autoMaterialize?: boolean;
+}
+
+export interface ApplyRulesPerRowResult {
+  bankRowId: string;
+  matched: boolean;
+  /** Set when matched + autoMaterialize=true + INSERT succeeded. */
+  transactionId?: number;
+  /** Reason a matched row was skipped despite autoMaterialize=true
+   *  (e.g. 'already_linked', 'investment_account', 'sign_category_mismatch',
+   *  'no_set_category_action'). Absent on clean matches. */
+  skipReason?: string;
+}
+
+export interface ApplyRulesToBankRowsResult {
+  /** Number of bank rows that materialized to `transactions` this run. */
+  materialized: number;
+  /** Number of bank rows whose payee/amount/etc matched at least one
+   *  active rule (regardless of autoMaterialize). */
+  rulesFired: number;
+  perRow: ApplyRulesPerRowResult[];
+}
+
+/**
+ * Fire user-configured transaction rules against a batch of bank rows.
+ *
+ * Called from:
+ *   - `POST /api/import/staging/upload` (Auto-pilot account branch) — with
+ *     `autoMaterialize=true` so matched rows land in `transactions`
+ *     immediately and surface as "Reconciled · rule" on /inbox.
+ *
+ * NOT called from the Manual-lens /reconcile path. That surface still
+ * uses the inline `applyRules` call inside `computeReconcileForAccount`
+ * which decorates `bankTransactions[].suggestedCategoryId` for the
+ * materialize dialog — the user clicks Create to commit. We keep both
+ * paths so the Manual lens stays explicit (no silent ledger writes).
+ *
+ * @param userId           — owner of every bank row in the batch.
+ * @param bankRowIds       — UUIDs from `bank_transactions.id`. Cross-tenant
+ *                           guard via `userId` in the SELECT. Empty array
+ *                           returns a zero-result.
+ * @param dek              — required when `autoMaterialize=true` (writes
+ *                           are user-tier). Pass `null` for planning mode.
+ * @param opts.autoMaterialize — write the matched row to `transactions`.
+ */
+export async function applyRulesToBankRows(
+  userId: string,
+  bankRowIds: string[],
+  dek: Buffer | null,
+  opts?: ApplyRulesToBankRowsOptions,
+): Promise<ApplyRulesToBankRowsResult> {
+  const autoMaterialize = opts?.autoMaterialize === true;
+  const perRow: ApplyRulesPerRowResult[] = [];
+  if (bankRowIds.length === 0) {
+    return { materialized: 0, rulesFired: 0, perRow };
+  }
+  if (autoMaterialize && !dek) {
+    throw new Error(
+      "applyRulesToBankRows: DEK is required when autoMaterialize=true",
+    );
+  }
+
+  // Load active rules once; the matcher is pure so we hand the same array
+  // to every bank row.
+  const activeRules = await loadActiveRulesForReconcile(userId);
+
+  // Load the bank rows + their account is_investment flag. Cross-tenant
+  // 404 guard via `userId` on the SELECT.
+  const bankRows = await db
+    .select({
+      id: schema.bankTransactions.id,
+      accountId: schema.bankTransactions.accountId,
+      date: schema.bankTransactions.date,
+      amount: schema.bankTransactions.amount,
+      currency: schema.bankTransactions.currency,
+      enteredAmount: schema.bankTransactions.enteredAmount,
+      enteredCurrency: schema.bankTransactions.enteredCurrency,
+      enteredFxRate: schema.bankTransactions.enteredFxRate,
+      quantity: schema.bankTransactions.quantity,
+      payee: schema.bankTransactions.payee,
+      note: schema.bankTransactions.note,
+      tags: schema.bankTransactions.tags,
+      encryptionTier: schema.bankTransactions.encryptionTier,
+      importHash: schema.bankTransactions.importHash,
+      fitId: schema.bankTransactions.fitId,
+    })
+    .from(schema.bankTransactions)
+    .where(
+      and(
+        eq(schema.bankTransactions.userId, userId),
+        inArray(schema.bankTransactions.id, bankRowIds),
+      ),
+    )
+    .all();
+
+  // Pre-load already-linked bank ids for idempotency. Re-running the
+  // helper on a partial-success batch shouldn't double-materialize.
+  const alreadyLinked = new Set<string>();
+  if (bankRowIds.length > 0) {
+    const links = await db
+      .select({ bankTransactionId: schema.transactionBankLinks.bankTransactionId })
+      .from(schema.transactionBankLinks)
+      .where(
+        and(
+          eq(schema.transactionBankLinks.userId, userId),
+          inArray(schema.transactionBankLinks.bankTransactionId, bankRowIds),
+        ),
+      )
+      .all();
+    for (const l of links) alreadyLinked.add(l.bankTransactionId);
+  }
+
+  // Pre-load account is_investment so we can refuse cleanly. Most batches
+  // are single-account; one extra SELECT is fine.
+  const accountIds = Array.from(new Set(bankRows.map((b) => b.accountId)));
+  const accountInvestmentMap = new Map<number, boolean>();
+  if (accountIds.length > 0) {
+    const accts = await db
+      .select({
+        id: schema.accounts.id,
+        isInvestment: schema.accounts.isInvestment,
+      })
+      .from(schema.accounts)
+      .where(
+        and(
+          eq(schema.accounts.userId, userId),
+          inArray(schema.accounts.id, accountIds),
+        ),
+      )
+      .all();
+    for (const a of accts) accountInvestmentMap.set(a.id, a.isInvestment);
+  }
+
+  let rulesFired = 0;
+  let materialized = 0;
+
+  // Diagnostic — single-line summary at INFO level, scoped to the
+  // autoMaterialize path so /reconcile's per-snapshot calls don't spam
+  // the journal. The Phase-4 dev-launch repro chased a "0 of N matched"
+  // outcome that turned out to be a CSV parser short-circuit dropping
+  // payees before they reached the matcher; keeping this trace makes a
+  // future similar issue debuggable without rebuilding the helper.
+  if (autoMaterialize) {
+    // eslint-disable-next-line no-console
+    console.log("[applyRulesToBankRows] start", {
+      userId,
+      bankRowCount: bankRows.length,
+      activeRuleCount: activeRules.length,
+    });
+  }
+
+  for (const bank of bankRows) {
+    if (alreadyLinked.has(bank.id)) {
+      perRow.push({
+        bankRowId: bank.id,
+        matched: false,
+        skipReason: "already_linked",
+      });
+      continue;
+    }
+
+    const payeePlain = decodeBankString(bank.encryptionTier, dek, bank.payee);
+    const match = applyRules(
+      {
+        payee: payeePlain,
+        amount: bank.amount,
+        accountId: bank.accountId,
+        date: bank.date,
+      },
+      activeRules,
+    );
+    if (!match) {
+      if (autoMaterialize && activeRules.length > 0 && (!payeePlain || payeePlain === "")) {
+        // Surface the most common cause: payee fell through as empty
+        // string (the 2026-05-27 CSV-parser bug). Bounded — only when
+        // payee is actually empty, so the journal stays readable for
+        // healthy uploads.
+        // eslint-disable-next-line no-console
+        console.warn("[applyRulesToBankRows] empty-payee skip", {
+          bankRowId: bank.id,
+          amount: bank.amount,
+        });
+      }
+      perRow.push({ bankRowId: bank.id, matched: false });
+      continue;
+    }
+    rulesFired += 1;
+
+    const categoryId = pickCategoryFromActions(match.actions);
+    if (categoryId == null) {
+      // Rule matched but its actions don't include a `set_category`. We
+      // can't materialize without a category (the row would be
+      // uncategorized and indistinguishable from a no-match row). Skip
+      // and let the user categorize manually via /inbox To-categorize.
+      perRow.push({
+        bankRowId: bank.id,
+        matched: true,
+        skipReason: "no_set_category_action",
+      });
+      continue;
+    }
+
+    if (!autoMaterialize) {
+      perRow.push({ bankRowId: bank.id, matched: true });
+      continue;
+    }
+
+    if (accountInvestmentMap.get(bank.accountId) === true) {
+      perRow.push({
+        bankRowId: bank.id,
+        matched: true,
+        skipReason: "investment_account",
+      });
+      continue;
+    }
+
+    // Sign-vs-category invariant — same enforcement as /materialize and
+    // /approve. Mismatch logs a skip and leaves the bank row in the
+    // unlinked pool so the user can pick a different category.
+    const violation = await validateSignVsCategoryById(
+      userId,
+      dek,
+      categoryId,
+      bank.amount,
+    );
+    if (violation) {
+      perRow.push({
+        bankRowId: bank.id,
+        matched: true,
+        skipReason: "sign_category_mismatch",
+      });
+      continue;
+    }
+
+    // Cross-tenant FK guard on categoryId. The rule's action was already
+    // ownership-checked at rule-create time, but defensive re-check costs
+    // nothing here and matches the materialize/approve pattern.
+    const cat = await db
+      .select({ id: schema.categories.id })
+      .from(schema.categories)
+      .where(
+        and(
+          eq(schema.categories.id, categoryId),
+          eq(schema.categories.userId, userId),
+        ),
+      )
+      .limit(1);
+    if (!cat[0]) {
+      perRow.push({
+        bankRowId: bank.id,
+        matched: true,
+        skipReason: "category_not_owned",
+      });
+      continue;
+    }
+
+    const notePlain = decodeBankString(bank.encryptionTier, dek, bank.note);
+    const tagsPlain = decodeBankString(bank.encryptionTier, dek, bank.tags);
+
+    // INSERT tx + link in a single DB transaction. The dek non-null
+    // assertion is safe — guarded above by the autoMaterialize=>dek check.
+    const dekForWrite = dek!;
+    try {
+      const inserted = await db.transaction(async (tx) => {
+        const txRow = await tx
+          .insert(schema.transactions)
+          .values({
+            userId,
+            date: bank.date,
+            accountId: bank.accountId,
+            categoryId,
+            currency: bank.currency,
+            amount: bank.amount,
+            enteredCurrency: bank.enteredCurrency,
+            enteredAmount: bank.enteredAmount,
+            enteredFxRate: bank.enteredFxRate,
+            quantity: bank.quantity,
+            payee: encryptField(dekForWrite, payeePlain) ?? "",
+            note: encryptField(dekForWrite, notePlain) ?? "",
+            tags: encryptField(dekForWrite, tagsPlain) ?? "",
+            importHash: bank.importHash,
+            fitId: bank.fitId,
+            bankTransactionId: bank.id,
+            // Auto-pilot rule-fired attribution. Allowed by the CHECK
+            // constraint update in
+            // scripts/migrations/20260527_transactions_source_auto_rule.sql.
+            source: "auto_rule",
+            // createdAt + updatedAt + enteredAt all default to NOW() via
+            // the column defaults — no need to set explicitly.
+          })
+          .returning({ id: schema.transactions.id });
+
+        await tx.insert(schema.transactionBankLinks).values({
+          userId,
+          transactionId: txRow[0].id,
+          bankTransactionId: bank.id,
+          linkType: "primary",
+          source: "auto_rule",
+        });
+
+        return txRow[0].id;
+      });
+
+      materialized += 1;
+      perRow.push({
+        bankRowId: bank.id,
+        matched: true,
+        transactionId: inserted,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[applyRulesToBankRows] materialize failed", {
+        bankRowId: bank.id,
+        err,
+      });
+      perRow.push({
+        bankRowId: bank.id,
+        matched: true,
+        skipReason: "insert_failed",
+      });
+    }
+  }
+
+  if (materialized > 0) {
+    // Per-user MCP tx cache must be invalidated after any tx-mutating
+    // write so Claude doesn't read stale payees. Bundled at the end of
+    // the loop instead of per-row to avoid N invalidations on a big batch.
+    invalidateUser(userId);
+  }
+
+  return { materialized, rulesFired, perRow };
+}
+
+/**
+ * Tier-aware decrypt for one of the encrypted text columns on
+ * `bank_transactions`. Mirrors the matching helper in /api/reconcile/
+ * materialize/route.ts and /api/bank-transactions/[bankId]/approve/route.ts.
+ * Kept inline here so the helper has no cross-route import dependency.
+ */
+function decodeBankString(
+  tier: string | null,
+  dek: Buffer | null,
+  value: string | null,
+): string | null {
+  if (value == null || value === "") return value;
+  if ((tier ?? "user") === "user") {
+    if (!dek) return null;
+    return tryDecryptField(dek, value, "bank_transactions");
+  }
+  try {
+    return decryptStaged(value);
+  } catch {
+    return null;
+  }
 }

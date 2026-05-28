@@ -30,13 +30,43 @@ export interface ResendAttachment {
 }
 
 /**
+ * Result of parsing email-import attachments.
+ *
+ * `rows` is the flat per-transaction list (input for stageEmailImport).
+ *
+ * `csvFallbackMeta` carries the headers + first ~3 data rows from the
+ * FIRST CSV attachment, captured unconditionally for every CSV regardless
+ * of whether a template matched. The /import/pending detail page uses it
+ * to render a "Pick template / Bind to account" picker when the resulting
+ * staged_transactions rows lack a usable account_name (either no template
+ * matched, OR a template matched but its defaultAccount was empty — the
+ * smoke-template case that bit us on first ship). The route handler is
+ * what decides whether to surface the picker; the parser just snapshots
+ * the metadata so the data is there if needed. Null for non-CSV inputs.
+ *
+ * We capture only the first CSV because the typical email-import case is
+ * one CSV per email; the second-onwards would overwrite the first in the
+ * staged_imports row anyway, and showing a second metadata snapshot in
+ * the UI would be confusing.
+ */
+export interface ParseResendAttachmentsResult {
+  rows: RawTransaction[];
+  csvFallbackMeta: {
+    headers: string[];
+    sampleRows: Array<Record<string, string>>;
+  } | null;
+}
+
+const SAMPLE_ROW_COUNT = 3;
+
+/**
  * Parse Resend attachments into flat RawTransaction rows for the given user.
  * Unrecognized file types are skipped silently.
  */
 export async function parseResendAttachments(
   attachments: ResendAttachment[],
   userId: string,
-): Promise<RawTransaction[]> {
+): Promise<ParseResendAttachmentsResult> {
   // Load the user's templates once for CSV header matching.
   const templateRows = await db
     .select()
@@ -46,6 +76,7 @@ export async function parseResendAttachments(
   const templates = templateRows.map(deserializeTemplate);
 
   const allRows: RawTransaction[] = [];
+  let csvFallbackMeta: ParseResendAttachmentsResult["csvFallbackMeta"] = null;
 
   for (const att of attachments) {
     const ext = att.filename.split(".").pop()?.toLowerCase();
@@ -72,6 +103,27 @@ export async function parseResendAttachments(
       } else {
         rows = csvToRawTransactions(text).rows;
       }
+
+      // Capture metadata for the FIRST CSV attachment unconditionally —
+      // see interface doc. Picker visibility is decided downstream based
+      // on whether the resulting staged_transactions rows have a usable
+      // account_name (template-matched-with-empty-defaultAccount produces
+      // bound rows here but unbound rows downstream, so capture is the
+      // safe default).
+      if (csvFallbackMeta === null && headers.length > 0) {
+        const sampleRows: Array<Record<string, string>> = [];
+        const dataLines = text.split(/\r?\n/).slice(1, 1 + SAMPLE_ROW_COUNT);
+        for (const line of dataLines) {
+          if (!line.trim()) continue;
+          const cells = parseCsvLine(line);
+          const row: Record<string, string> = {};
+          headers.forEach((h, i) => {
+            row[h] = cells[i] ?? "";
+          });
+          sampleRows.push(row);
+        }
+        csvFallbackMeta = { headers, sampleRows };
+      }
     } else if (ext === "pdf" || att.contentType === "application/pdf") {
       // Dynamic import — PDF parser is heavy (~5 MB), lazy-load.
       const { parsePdfToTransactions } = await import("@/lib/pdf-parser");
@@ -92,5 +144,43 @@ export async function parseResendAttachments(
     allRows.push(...rows);
   }
 
-  return allRows;
+  return { rows: allRows, csvFallbackMeta };
+}
+
+/**
+ * Minimal RFC4180-ish CSV line splitter for sample-row capture. Handles
+ * double-quoted fields with embedded commas + escaped quotes. Not used for
+ * actual import parsing (`csv-parser.ts` owns that) — only for snapshotting
+ * preview rows surfaced in the manual-pick UI.
+ */
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else {
+      if (ch === ",") {
+        out.push(cur);
+        cur = "";
+      } else if (ch === '"' && cur === "") {
+        inQuotes = true;
+      } else {
+        cur += ch;
+      }
+    }
+  }
+  out.push(cur);
+  return out;
 }

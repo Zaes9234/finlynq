@@ -69,7 +69,8 @@ import { parseQfxToCanonical } from "@/lib/external-import/parsers/qfx";
 // → transactions reconciliation surface (future).
 import type { RawTransaction } from "@/lib/import-pipeline";
 import { safeErrorMessage } from "@/lib/validate";
-import { applyRulesToStagedBatch } from "@/lib/rules/apply-to-staged-batch";
+import { simplifiedUpload } from "@/lib/import/simplified-upload";
+import { applyRulesToBankRows } from "@/lib/reconcile/match-engine";
 
 export const dynamic = "force-dynamic";
 
@@ -235,14 +236,20 @@ export async function POST(request: NextRequest) {
     // Resolve the bound account name if accountId is supplied. OFX/QFX
     // single-account statements need it; CSVs use it as a fallback when
     // no `Account` column is present.
+    //
+    // Inbox v4 Phase 3 (2026-05-27): also read `accounts.mode` so we can
+    // override the per-template `import_mode` for Approve-each accounts
+    // (see the simplified-branch block below).
     let defaultAccountName: string | null = null;
     let boundAccountCurrency: string | null = null;
+    let boundAccountMode: "auto" | "approve" | "manual" | null = null;
     if (accountId !== null) {
       const acct = await db
         .select({
           id: schema.accounts.id,
           nameCt: schema.accounts.nameCt,
           currency: schema.accounts.currency,
+          mode: schema.accounts.mode,
         })
         .from(schema.accounts)
         .where(
@@ -260,6 +267,7 @@ export async function POST(request: NextRequest) {
       }
       defaultAccountName = decryptName(acct.nameCt, dek, null) ?? "";
       boundAccountCurrency = acct.currency;
+      boundAccountMode = acct.mode;
     }
 
     const ext = file.name.split(".").pop()?.toLowerCase();
@@ -470,6 +478,177 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // ─── Phase 2 of import-modes refactor (2026-05-25): simplified branch ──
+    //
+    // If the selected template is in `import_mode='simplified'`, skip the
+    // staged review and land rows directly in bank_transactions. The user
+    // goes straight to /reconcile to categorize.
+    //
+    // Inbox v4 Phase 3 (2026-05-27): the Approve-each account policy
+    // (`accounts.mode='approve'`) ALSO triggers the simplified path, even
+    // if the picked template is in `import_mode='detailed'`. The account-
+    // level policy override is intentional — Approve-each means "I trust
+    // the parser, but I want one click between bank-ledger and the real
+    // ledger entry." Detailed-staging would add a redundant parse-review
+    // gate before the card flow takes over on /inbox.
+    //
+    // Rules do NOT fire here — that's Phase 4 (Auto-pilot). The bank rows
+    // wait on /inbox's "To approve" tab; the user (or "Accept all
+    // suggested") commits each to the ledger via POST /approve.
+    //
+    // Preconditions:
+    //   - accountId must be set (bank-ledger uniqueness key is per-account).
+    //   - For the template-based simplified path: templateId must be set
+    //     (auto-detect stays on detailed for now).
+    //   - Row errors are still surfaced (we don't silently drop bad rows).
+    //
+    // The detailed path below remains the default and handles every case
+    // where the account is Manual and the template is Detailed (or no
+    // template is selected).
+    let useSimplifiedPath = false;
+    if (boundAccountMode === "approve" || boundAccountMode === "auto") {
+      // Account-policy override: Approve-each + Auto-pilot accounts always
+      // use the simplified path regardless of the per-template import_mode
+      // setting. Inbox v4 Phase 3 covers Approve-each; Phase 4 extends to
+      // Auto-pilot — both lenses skip the staged-review gate, but the
+      // post-bank-write step differs (Auto-pilot fires rules; Approve-each
+      // just waits for a click).
+      if (accountId === null) {
+        // boundAccountMode is only set when accountId is non-null, so this
+        // is unreachable — kept as a defensive guard so the TS narrowing
+        // below stays unambiguous.
+        return NextResponse.json(
+          { error: "Auto-pilot / Approve-each accounts require accountId." },
+          { status: 400 },
+        );
+      }
+      useSimplifiedPath = true;
+    } else if (templateId !== null) {
+      const tplRow = await db
+        .select({ importMode: schema.importTemplates.importMode })
+        .from(schema.importTemplates)
+        .where(and(
+          eq(schema.importTemplates.id, templateId),
+          eq(schema.importTemplates.userId, userId),
+        ))
+        .get();
+      if (tplRow?.importMode === "simplified") {
+        if (accountId === null) {
+          return NextResponse.json(
+            {
+              error:
+                "Simplified mode requires a bound account. Pick an account when uploading, or switch the template to Detailed.",
+            },
+            { status: 400 },
+          );
+        }
+        useSimplifiedPath = true;
+      }
+    }
+
+    if (useSimplifiedPath && accountId !== null) {
+      try {
+        const result = await simplifiedUpload({
+          userId,
+          dek,
+          accountId,
+          templateId,
+          rows: shaped.map((r) => ({
+            rowIndex: r.rowIndex,
+            date: r.date,
+            amount: r.amount,
+            currency: r.currency ?? defaultCurrency ?? boundAccountCurrency ?? "CAD",
+            payee: r.payee,
+            note: r.note ?? null,
+            tags: r.tags ?? null,
+            accountName: r.account || null,
+            fitId: r.fitId ?? null,
+            enteredAmount: r.enteredAmount ?? null,
+            enteredCurrency: r.enteredCurrency ?? defaultCurrency ?? null,
+            enteredFxRate: null,
+            quantity: r.quantity ?? null,
+            importHash: r.hash,
+          })),
+          anchors: parseResult.anchors,
+          filename: file.name,
+          source: "upload",
+        });
+
+        // ─── Inbox v4 Phase 4 (2026-05-27) — Auto-pilot rule firing ─────
+        //
+        // For Auto-pilot accounts, fire user-configured transaction-rules
+        // against the bank rows we just upserted. Rule-matched rows are
+        // materialized to `transactions` with `source='auto_rule'` inside
+        // the helper; unmatched rows stay in `bank_transactions` and show
+        // up in /inbox's "To categorize" tab.
+        //
+        // Idempotent: re-running on the same batch (re-upload of the same
+        // file) silently skips rows whose `transaction_bank_links` row
+        // already exists, so the helper never duplicates ledger entries.
+        //
+        // Fired AFTER simplifiedUpload returns rather than threaded into
+        // its transaction because: (1) the helper opens its own
+        // per-bank-row tx so a single bad row doesn't roll back the
+        // entire batch ingest; (2) simplifiedUpload doesn't return the
+        // inserted ids today and threading them out would couple the two
+        // module surfaces unnecessarily. Bank-row ids are looked up by
+        // `upload_batch_id` instead — cheap single-account-scoped SELECT.
+        let autoRuleStats: { matched: number; unmatched: number; total: number } | null = null;
+        if (boundAccountMode === "auto") {
+          const insertedBankRows = await db
+            .select({ id: schema.bankTransactions.id })
+            .from(schema.bankTransactions)
+            .where(
+              and(
+                eq(schema.bankTransactions.userId, userId),
+                eq(schema.bankTransactions.uploadBatchId, result.batchId),
+              ),
+            )
+            .all();
+          const bankRowIds = insertedBankRows.map((r) => r.id);
+          if (bankRowIds.length > 0) {
+            const ruleResult = await applyRulesToBankRows(
+              userId,
+              bankRowIds,
+              dek,
+              { autoMaterialize: true },
+            );
+            autoRuleStats = {
+              matched: ruleResult.materialized,
+              unmatched: bankRowIds.length - ruleResult.materialized,
+              total: bankRowIds.length,
+            };
+          } else {
+            autoRuleStats = { matched: 0, unmatched: 0, total: 0 };
+          }
+        }
+
+        return NextResponse.json({
+          mode: result.mode,
+          batchId: result.batchId,
+          redirectTo: result.redirectTo,
+          format: parseResult.format,
+          counts: {
+            created: result.created,
+            skippedDuplicates: result.skippedDuplicates,
+            anchorsUpserted: result.anchorsUpserted,
+            // Phase 4 — populated only on Auto-pilot accounts. Surfaces
+            // the rule-fire results so the UploadDrawer's after-toast can
+            // say "5 of 12 rows auto-categorized."
+            ...(autoRuleStats ? { autoRule: autoRuleStats } : {}),
+          },
+          rowErrors,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[upload] simplifiedUpload failed", { userId, templateId, err });
+        return NextResponse.json(
+          { error: safeErrorMessage(err, "Simplified upload failed") },
+          { status: 500 },
+        );
+      }
+    }
+
     // Statement-balance source priority:
     //   OFX/QFX <LEDGERBAL>  > user-typed (CSV form field)
     const statementBalance =
@@ -549,11 +728,6 @@ export async function POST(request: NextRequest) {
     const expiresAt = new Date(Date.now() + STAGE_TTL_MS);
     const dupCount = shaped.filter((r) => r.dedupStatus !== "new").length;
 
-    // FINLYNQ-88 — rule pre-apply outcome carried out of the transaction so
-    // the response can surface `counts.ruleApplied` / `ruleApplyWarning`.
-    let ruleApplyRowsTouched: number | null = null;
-    let ruleApplyWarning: string | null = null;
-
     await db.transaction(async (tx) => {
       await tx.insert(schema.stagedImports).values({
         id: stagedImportId,
@@ -603,32 +777,11 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      // FINLYNQ-88 — apply active rules over the freshly-inserted rows BEFORE
-      // the transaction commits so the user lands on /import/pending with
-      // rule effects already visible (renamed payees, flipped tx_type for
-      // create_transfer rules, set_account targets, etc.). Scope: entire new
-      // batch (no merge-append path post the 2026-05-22 two-ledger refactor;
-      // re-uploads of identical files produce a fresh batch with
-      // skipped_duplicate markers on collision, and rules skip those by
-      // construction). Failures inside the helper bubble up via the catch
-      // below and degrade to a soft warning — upload still succeeds.
-      try {
-        const ruleApplyResult = await applyRulesToStagedBatch(
-          tx,
-          userId,
-          dek,
-          stagedImportId,
-        );
-        ruleApplyRowsTouched = ruleApplyResult.rowsTouched;
-      } catch (err) {
-        ruleApplyWarning = err instanceof Error ? err.message : "Rule pre-apply failed";
-        // eslint-disable-next-line no-console
-        console.warn("[upload] applyRulesToStagedBatch threw", {
-          userId,
-          stagedImportId,
-          err: ruleApplyWarning,
-        });
-      }
+      // Phase 3 of import-modes refactor (2026-05-25) — rules no longer fire
+      // at upload time. Categorization happens at /reconcile materialize
+      // time (via match-engine.ts:364 applyRules suggestion + dialog confirm).
+      // The detailed-mode /import/pending review is now parse-verification
+      // only; approve writes ONLY to bank_transactions.
     });
 
     return NextResponse.json({
@@ -641,12 +794,8 @@ export async function POST(request: NextRequest) {
         probableDuplicate: shaped.filter((r) => r.dedupStatus === "probable_duplicate").length,
         skippedDuplicate: shaped.filter((r) => alreadyImportedHashes.has(r.hash)).length,
         errors: rowErrors.length + parseResult.errors.length,
-        // FINLYNQ-88 — null when the helper threw (warning surfaced separately);
-        // a number when the pre-apply pass ran (0 means no matched rows).
-        ruleApplied: ruleApplyRowsTouched,
       },
       tolerance,
-      ruleApplyWarning: ruleApplyWarning ?? undefined,
     });
   } catch (error) {
     const message = safeErrorMessage(error, "Staging upload failed");

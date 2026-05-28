@@ -7,13 +7,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { ArrowLeft, Wallet, Layers, Hash, Pencil, Coins, Plus, Trash2 } from "lucide-react";
+import { ArrowLeft, Wallet, Layers, Hash, Pencil, Coins, Plus, Trash2, Inbox } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
+import { ModePicker } from "@/components/inbox/mode-picker";
+import { isMode, type Mode } from "@/components/inbox/modes";
 
 type Transaction = {
   id: number;
@@ -34,6 +36,7 @@ type Account = {
   name: string;
   currency: string;
   isInvestment?: boolean;
+  mode?: Mode;
 };
 
 type CashSleeve = {
@@ -262,7 +265,7 @@ export default function AccountDetailPage() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className={`h-10 w-10 rounded-xl flex items-center justify-center text-sm font-bold ${account.type === "A" ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
-            {account.name.charAt(0)}
+            {(account.name ?? "?").charAt(0)}
           </div>
           <div>
             <h1 className="text-2xl font-bold tracking-tight">{account.name}</h1>
@@ -332,6 +335,29 @@ export default function AccountDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Reconciliation mode — Inbox v4 Phase 5 (2026-05-27).
+          Persists `accounts.mode` via PATCH /api/accounts/[id]/mode.
+          The /inbox lens-chip gear icon deep-links to this card. */}
+      <Card id="reconciliation-mode">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Inbox className="h-4 w-4 text-sky-600" /> Reconciliation mode
+          </CardTitle>
+          <p className="text-xs text-muted-foreground mt-1">
+            How uploads to this account flow through the pipeline. The
+            <code className="px-1 mx-0.5 rounded bg-muted text-[10px]">/inbox</code>
+            chip is a per-render lens; this picker is the persisted policy.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <ModePicker
+            accountId={account.id}
+            initialMode={isMode(account.mode) ? account.mode : "manual"}
+            onSaved={(m) => setAccount({ ...account, mode: m })}
+          />
+        </CardContent>
+      </Card>
 
       {/* Cash sleeves — Phase 2 portfolio-ops UI. Visible on every account so
           users can also see "no sleeves" on non-investment accounts. */}

@@ -59,6 +59,22 @@
  *                                  legs correctly + invoke the lot
  *                                  engine + share the trade_link_id
  *                                  (portfolio ops Phase 1, 2026-05-25).
+ *   9. auto-rule-source-via-helper
+ *                                — any file that literally writes
+ *                                  `source: "auto_rule"` MUST be the
+ *                                  canonical helper at
+ *                                  `src/lib/reconcile/match-engine.ts`
+ *                                  (which calls
+ *                                  `applyRulesToBankRows`). No other
+ *                                  writer surface should mint this
+ *                                  attribution — it identifies rows
+ *                                  the Auto-pilot upload pipeline
+ *                                  materialized at upload time. A
+ *                                  rogue 'auto_rule' write outside the
+ *                                  helper would skew the
+ *                                  "X rows auto-applied" banner and
+ *                                  break the audit-trail contract
+ *                                  (Inbox v4 Phase 4, 2026-05-27).
  *
  * Output:
  *   ALL INVARIANTS PASS                  (exit 0)
@@ -196,6 +212,17 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // ships convertExisting*Pair helpers in operations.ts).
   "src/app/(app)/settings/backfill/[runId]/page.tsx:portfolio-ops-kind-via-operations":
     "Static UI config (OVERRIDE_KIND_OPTIONS) listing override-eligible kinds as radio metadata — no DB writes from this file; paired kinds disabled until follow-up commit wires convertExisting*Pair helpers in operations.ts.",
+  // match-engine.ts is the canonical writer of `source: "auto_rule"` —
+  // it defines applyRulesToBankRows. Self-import would be cargo-culted.
+  // Every OTHER write-site of 'auto_rule' must go through this helper.
+  "src/lib/reconcile/match-engine.ts:auto-rule-source-via-helper":
+    "match-engine.ts IS the canonical helper applyRulesToBankRows; cannot self-import.",
+  // tx-source.ts defines the SOURCES tuple including 'auto_rule' as a
+  // const-array string literal. The regex matches the literal but there
+  // is no DB write here; this is the enum declaration. The runtime
+  // labelForSource() handler matches on the literal but never writes it.
+  "src/lib/tx-source.ts:auto-rule-source-via-helper":
+    "SOURCES enum declaration — tuple member + labelForSource switch case. No DB write from this file.",
 };
 
 interface InvariantConfig {
@@ -353,6 +380,29 @@ const INVARIANTS: InvariantConfig[] = [
     requiredHelper:
       /from\s+["']@\/lib\/portfolio\/operations["']|from\s+["']\.{1,2}\/(?:[^"']*\/)?operations["']/,
     helperName: "import from @/lib/portfolio/operations",
+  },
+  {
+    id: "auto-rule-source-via-helper",
+    description:
+      "any file that writes `source: \"auto_rule\"` MUST be the canonical helper at src/lib/reconcile/match-engine.ts (Inbox v4 Phase 4, 2026-05-27)",
+    fileGlobs: [
+      "src/",
+      "mcp-server/",
+      "packages/import-connectors/",
+      "scripts/",
+    ],
+    // Trigger on a literal `source: "auto_rule"` value (both single and
+    // double quotes). The canonical helper at
+    // src/lib/reconcile/match-engine.ts:applyRulesToBankRows is the only
+    // legitimate writer; the audit baseline-excepts that file below.
+    writeSite: /source\s*:\s*['"]auto_rule['"]/,
+    // The helper file imports `applyRulesToBankRows` from itself OR is
+    // src/lib/reconcile/match-engine.ts (baseline exception). Any other
+    // writer must call through the helper.
+    requiredHelper:
+      /\bapplyRulesToBankRows\b|from\s+["']@\/lib\/reconcile\/match-engine["']/,
+    helperName:
+      "applyRulesToBankRows (call through src/lib/reconcile/match-engine)",
   },
   {
     id: "buildNameFields-on-stream-d-tables",

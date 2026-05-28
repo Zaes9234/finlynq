@@ -99,6 +99,12 @@ export interface BankLedgerRowInput {
   filename?: string | null;
   /** Optional lineage hint — the staged_imports row that introduced this. */
   originalStagedImportId?: string | null;
+  /** Phase 1 of import-modes refactor (2026-05-25) — the bank_upload_batches
+   *  row this write belongs to. Populated by both the simplified-upload
+   *  helper (direct path) and the post-Phase-3 approve route (detailed path).
+   *  NULL for legacy paths that don't yet stamp a batch id. ON CONFLICT
+   *  does NOT update this column — re-imports keep the original batch. */
+  uploadBatchId?: string | null;
 }
 
 export interface BankLedgerUpsertResult {
@@ -148,7 +154,7 @@ export async function upsertBankTransaction(
       user_id, account_id, import_hash, occurrence_index, fit_id, date,
       amount, currency, entered_amount, entered_currency, entered_fx_rate,
       quantity, payee, note, tags, account_name, encryption_tier, source,
-      source_filenames, original_staged_import_id
+      source_filenames, original_staged_import_id, upload_batch_id
     )
     VALUES (
       ${row.userId},
@@ -170,7 +176,8 @@ export async function upsertBankTransaction(
       ${tier},
       ${row.source},
       ${filenamesFragment},
-      ${row.originalStagedImportId ?? null}
+      ${row.originalStagedImportId ?? null},
+      ${row.uploadBatchId ?? null}
     )
     ON CONFLICT (user_id, account_id, import_hash, occurrence_index)
     DO UPDATE SET

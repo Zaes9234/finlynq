@@ -219,25 +219,77 @@ describe("parseCsvWithFallback — step 3 (auto-matched template)", () => {
       updatedAt: "",
     });
     const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
-    // u1 has no templates; canonical fails too -> needs-mapping.
-    expect(r.kind).toBe("needs-mapping");
+    // u1 has no templates; the other user's template is cross-tenant
+    // and ignored. Per the 2026-05-27 Phase 4 fix, step 3.5 now applies
+    // auto-detect (Description→payee, Debit→amount) directly so the
+    // parse succeeds with no `appliedTemplateId`.
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.appliedTemplateId).toBeUndefined();
+    expect(r.rows[0].payee).toBe("Coffee");
+  });
+});
+
+describe("parseCsvWithFallback — step 3.5 (auto-detect direct apply, 2026-05-27 Phase 4 fix)", () => {
+  it("maps Description→payee when canonical headers (Date+Amount) succeed with empty payees", async () => {
+    // Reproduces the Phase 4 bug: a CSV with `Date,Description,Amount` used
+    // to short-circuit the canonical reader with `payee: ""` on every row.
+    // That broke the upload-time rule matcher AND the inbox payee display.
+    // The fix: fall through to step 3.5 (auto-detect direct apply) so the
+    // synonym `Description` maps to payee end-to-end.
+    const csv = `Date,Description,Amount
+2026-05-25,Bank interest payment,18.42
+2026-05-26,Unknown payee XYZ,-12.34`;
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows).toHaveLength(2);
+    expect(r.rows[0].payee).toBe("Bank interest payment");
+    expect(r.rows[1].payee).toBe("Unknown payee XYZ");
+    expect(r.rows[0].amount).toBe(18.42);
+    expect(r.rows[1].amount).toBe(-12.34);
+  });
+
+  it("still uses canonical when both Payee column AND Description column are present", async () => {
+    // Canonical reader keys on the literal `Payee` column; with one
+    // present we should NOT fall through. Description stays as a row
+    // field; only Payee drives the matcher.
+    const csv = `Date,Description,Amount,Payee
+2026-05-25,Random memo,18.42,Bank of America`;
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows[0].payee).toBe("Bank of America");
+  });
+
+  it("does not fall through when canonical succeeds and there's nothing payee-mappable", async () => {
+    // A CSV with literal Payee column (canonical) — we should NOT
+    // re-route through step 3.5 because the rows already have real
+    // payees.
+    const csv = `Date,Account,Amount,Payee
+2024-01-15,Checking,-12.50,Coffee`;
+    const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.rows[0].payee).toBe("Coffee");
   });
 });
 
 describe("parseCsvWithFallback — step 4 (needs-mapping)", () => {
-  it("returns a column-mapping suggestion when nothing else matches", async () => {
-    // Headers that auto-detect can recognize (Description -> payee, Debit -> amount).
+  it("returns parsed via step 3.5 when auto-detect finds date+amount+payee (2026-05-27 fix)", async () => {
+    // Pre-Phase-4: this CSV returned `needs-mapping` because no template
+    // matched. Post-Phase-4: step 3.5 (auto-detect direct apply) maps
+    // Description→payee and Debit→amount, so the parse succeeds without
+    // requiring the column-mapping dialog. Auto-detect MUST find a payee
+    // for step 3.5 to fire — Description satisfies the synonym list.
     const csv = `Posting Date,Description,Debit,Credit
 2024-01-15,Coffee,12.50,
 2024-01-16,Salary,,100.00`;
     const r = await parseCsvWithFallback({ text: csv, userId: "u1" });
-    expect(r.kind).toBe("needs-mapping");
-    if (r.kind !== "needs-mapping") return;
-    expect(r.headers).toEqual(["Posting Date", "Description", "Debit", "Credit"]);
-    expect(r.sampleRows.length).toBeGreaterThan(0);
-    expect(r.suggestedMapping).not.toBeNull();
-    expect(r.suggestedMapping?.date).toBeDefined();
-    expect(r.suggestedMapping?.amount).toBeDefined();
+    expect(r.kind).toBe("parsed");
+    if (r.kind !== "parsed") return;
+    expect(r.appliedTemplateId).toBeUndefined();
+    expect(r.rows[0].payee).toBe("Coffee");
   });
 
   it("returns needs-mapping with a null suggestedMapping when auto-detect fails", async () => {
