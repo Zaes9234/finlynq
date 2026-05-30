@@ -8,6 +8,7 @@ import {
   StyleSheet,
   Alert,
   Switch,
+  Linking,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme, type ThemePreference } from "../theme";
@@ -107,7 +108,7 @@ export default function SettingsScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
-            placeholder="http://localhost:3000"
+            placeholder="https://finlynq.com"
             placeholderTextColor={colors.mutedForeground}
           />
           <TouchableOpacity
@@ -314,6 +315,25 @@ export default function SettingsScreen() {
               {getServerUrl()}
             </Text>
           </View>
+        </View>
+
+        {/* Legal — required for the Play listing + Data Safety form. */}
+        <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>LEGAL</Text>
+        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <TouchableOpacity
+            style={[styles.aboutRow, { borderBottomColor: colors.border }]}
+            onPress={() => Linking.openURL("https://finlynq.com/privacy")}
+          >
+            <Text style={[styles.aboutLabel, { color: colors.foreground }]}>Privacy Policy</Text>
+            <Text style={[styles.aboutValue, { color: colors.primary }]}>↗</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.aboutRow}
+            onPress={() => Linking.openURL("https://finlynq.com/terms")}
+          >
+            <Text style={[styles.aboutLabel, { color: colors.foreground }]}>Terms of Service</Text>
+            <Text style={[styles.aboutValue, { color: colors.primary }]}>↗</Text>
+          </TouchableOpacity>
         </View>
 
         <View style={styles.footer}>
