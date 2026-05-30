@@ -44,7 +44,8 @@
       "url": "https://u.expo.dev/1e34e1d4-ff26-4772-a261-91ec54d9892c"
     },
     "plugins": [
-      "expo-secure-store"
+      "expo-secure-store",
+      "./plugins/withAssetStatements"
     ]
   }
 }
