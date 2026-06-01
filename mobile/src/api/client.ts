@@ -218,6 +218,8 @@ import type {
   AccountFormData,
   CategoryFormData,
   GoalFormData,
+  Announcement,
+  FeedbackFormData,
 } from "../../../shared/types";
 
 // --- Raw shape of GET /api/dashboard (server-computed, pre-aggregation) ---
@@ -391,4 +393,18 @@ export const endpoints = {
     api.get<BudgetWithSpending[]>(
       `/api/budgets?spending=1${month ? `&month=${month}` : ""}`
     ),
+
+  // Announcements — active broadcast items + per-user read flag (bare array).
+  getAnnouncements: () => api.get<Announcement[]>("/api/announcements"),
+  // Mark an announcement read/dismissed (idempotent server-side).
+  markAnnouncementRead: (id: number) =>
+    api.post<{ ok: boolean }>(`/api/announcements/${id}/read`),
+
+  // Feedback — submit a bug report / idea. Server stores it + emails the
+  // maintainer. `appVersion: "mobile"` distinguishes mobile submissions.
+  submitFeedback: (payload: FeedbackFormData) =>
+    api.post<{ ok: boolean; id: number }>("/api/feedback", {
+      ...payload,
+      appVersion: payload.appVersion ?? "mobile",
+    }),
 };

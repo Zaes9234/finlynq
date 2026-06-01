@@ -123,7 +123,9 @@ export default function MoreScreen() {
     {
       title: "Tools",
       rows: [
+        { icon: "whatsNew", label: "What's new", onPress: () => navigation.navigate("WhatsNew") },
         { icon: "settings", label: "Settings", onPress: () => navigation.navigate("Settings") },
+        { icon: "feedback", label: "Send feedback", onPress: () => navigation.navigate("Feedback") },
         { icon: "logout", label: "Sign out", onPress: confirmSignOut, danger: true },
       ],
     },

@@ -9,6 +9,8 @@ import SettingsScreen from "../screens/SettingsScreen";
 import AddTransactionScreen from "../screens/AddTransactionScreen";
 import AddCategoryScreen from "../screens/AddCategoryScreen";
 import AddGoalScreen from "../screens/AddGoalScreen";
+import WhatsNewScreen from "../screens/WhatsNewScreen";
+import FeedbackScreen from "../screens/FeedbackScreen";
 
 export type MoreStackParamList = {
   MoreHome: undefined;
@@ -20,6 +22,8 @@ export type MoreStackParamList = {
   AddTransaction: { mode?: "expense" | "income" | "transfer" } | undefined;
   AddCategory: undefined;
   AddGoal: undefined;
+  WhatsNew: undefined;
+  Feedback: undefined;
 };
 
 const Stack = createNativeStackNavigator<MoreStackParamList>();
@@ -46,6 +50,12 @@ export default function MoreStack() {
       <Stack.Screen
         name="AddGoal"
         component={AddGoalScreen}
+        options={{ presentation: "modal" }}
+      />
+      <Stack.Screen name="WhatsNew" component={WhatsNewScreen} />
+      <Stack.Screen
+        name="Feedback"
+        component={FeedbackScreen}
         options={{ presentation: "modal" }}
       />
     </Stack.Navigator>
