@@ -2,15 +2,25 @@
 
 /**
  * /admin/feedback — review queue for user-submitted feedback. Filter by status,
- * change status inline, attach an admin note. Gated server-side by requireAdmin.
+ * change status inline, attach a PRIVATE admin note, and reply to the user via
+ * the thread dialog (the reply IS visible to the user; the note is not). Gated
+ * server-side by requireAdmin.
  */
 
 import { useCallback, useEffect, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { MessageCircle } from "lucide-react";
+import type { FeedbackMessage, FeedbackThread } from "@shared/types";
 
 interface FeedbackRow {
   id: number;
@@ -24,6 +34,8 @@ interface FeedbackRow {
   createdAt: string;
   username: string | null;
   email: string | null;
+  replyCount: number;
+  adminUnread: boolean;
 }
 
 const FILTERS = ["all", "new", "triaged", "resolved"] as const;
@@ -37,11 +49,184 @@ const typeColor: Record<string, string> = {
   other: "bg-muted text-muted-foreground",
 };
 
+function fmt(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+}
+
+function Bubble({
+  side,
+  label,
+  at,
+  body,
+}: {
+  side: "left" | "right";
+  label: string;
+  at: string;
+  body: string;
+}) {
+  return (
+    <div className={cn("flex flex-col", side === "right" ? "items-end" : "items-start")}>
+      <div
+        className={cn(
+          "max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm",
+          side === "right" ? "bg-primary/10 text-foreground" : "bg-muted text-foreground",
+        )}
+      >
+        {body}
+      </div>
+      <span className="mt-1 text-[10px] text-muted-foreground">
+        {label} · {fmt(at)}
+      </span>
+    </div>
+  );
+}
+
+function AdminThreadDialog({
+  feedbackId,
+  onClose,
+  onChanged,
+}: {
+  feedbackId: number | null;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [thread, setThread] = useState<FeedbackThread | null>(null);
+  const [reply, setReply] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (feedbackId == null) {
+      setThread(null);
+      setReply("");
+      setError(null);
+      return;
+    }
+    let cancelled = false;
+    setThread(null);
+    setError(null);
+    fetch(`/api/admin/feedback/${feedbackId}`)
+      .then((r) => {
+        if (!r.ok) throw new Error("Failed to load");
+        return r.json();
+      })
+      .then((t: FeedbackThread) => {
+        if (!cancelled) setThread(t);
+        // GET marked admin-read server-side — refresh the list dot.
+        onChanged();
+      })
+      .catch(() => {
+        if (!cancelled) setError("Failed to load this thread.");
+      });
+    return () => {
+      cancelled = true;
+    };
+    // onChanged is stable enough (parent useCallback); intentionally omitted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [feedbackId]);
+
+  const send = async () => {
+    const body = reply.trim();
+    if (!body || feedbackId == null) return;
+    setSending(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/admin/feedback/${feedbackId}/reply`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.error || "Failed to send reply.");
+      }
+      const msg: FeedbackMessage = await res.json();
+      setThread((t) =>
+        t
+          ? {
+              ...t,
+              messages: [...t.messages, msg],
+              messageCount: t.messageCount + 1,
+              status: t.status === "new" ? "triaged" : t.status,
+            }
+          : t,
+      );
+      setReply("");
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to send reply.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const who = thread ? thread.username || thread.email || "user" : "";
+
+  return (
+    <Dialog open={feedbackId != null} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="capitalize">
+            {thread ? `${thread.type} feedback` : "Feedback"}
+          </DialogTitle>
+          <DialogDescription>
+            {thread ? `From ${who}. ` : ""}Your reply is visible to the user.
+          </DialogDescription>
+        </DialogHeader>
+
+        {error && !thread && <p className="text-sm text-destructive">{error}</p>}
+
+        {thread && (
+          <>
+            <div className="max-h-[50vh] space-y-3 overflow-y-auto pr-1">
+              <Bubble side="left" label={who} at={thread.createdAt} body={thread.seed} />
+              {thread.messages.map((m) => (
+                <Bubble
+                  key={m.id}
+                  side={m.authorRole === "admin" ? "right" : "left"}
+                  label={m.authorRole === "admin" ? "You" : who}
+                  at={m.createdAt}
+                  body={m.body}
+                />
+              ))}
+            </div>
+            <div className="space-y-2">
+              <textarea
+                value={reply}
+                onChange={(e) => setReply(e.target.value)}
+                rows={3}
+                maxLength={4000}
+                placeholder="Reply to the user…"
+                className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              />
+              {error && <p className="text-sm text-destructive">{error}</p>}
+              <div className="flex justify-end">
+                <Button onClick={send} disabled={sending || !reply.trim()}>
+                  {sending ? "Sending…" : "Send reply"}
+                </Button>
+              </div>
+            </div>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function AdminFeedbackPage() {
   const [rows, setRows] = useState<FeedbackRow[] | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState<Record<number, string>>({});
+  const [openId, setOpenId] = useState<number | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -118,6 +303,15 @@ export default function AdminFeedbackPage() {
               {r.appVersion && r.appVersion !== "web" && (
                 <span className="text-xs text-muted-foreground">· {r.appVersion}</span>
               )}
+              {r.adminUnread && (
+                <span
+                  className="ml-auto inline-flex items-center gap-1 text-xs font-medium text-primary"
+                  title="New reply from the user"
+                >
+                  <span className="h-2 w-2 rounded-full bg-primary" />
+                  New reply
+                </span>
+              )}
             </div>
 
             <p className="mt-2 whitespace-pre-wrap text-sm">{r.message}</p>
@@ -141,25 +335,45 @@ export default function AdminFeedbackPage() {
                   ))}
                 </select>
               </div>
-              <div className="flex flex-1 items-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setOpenId(r.id)}>
+                {r.replyCount > 0
+                  ? `View thread (${r.replyCount})`
+                  : "Reply to user"}
+              </Button>
+            </div>
+
+            <div className="mt-3 flex items-end gap-2">
+              <div className="flex-1">
+                <label className="mb-1 block text-xs text-muted-foreground">
+                  Admin note (private — not shown to the user)
+                </label>
                 <input
                   value={notes[r.id] ?? ""}
                   onChange={(e) => setNotes((n) => ({ ...n, [r.id]: e.target.value }))}
                   placeholder="Admin note…"
-                  className="flex-1 rounded-md border border-border bg-background px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  className="w-full rounded-md border border-border bg-background px-2 py-1 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                 />
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => patch(r.id, { adminNote: notes[r.id] ?? "" })}
-                >
-                  Save note
-                </Button>
               </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => patch(r.id, { adminNote: notes[r.id] ?? "" })}
+              >
+                Save note
+              </Button>
             </div>
           </Card>
         ))}
       </div>
+
+      <AdminThreadDialog
+        feedbackId={openId}
+        onClose={() => {
+          setOpenId(null);
+          load();
+        }}
+        onChanged={load}
+      />
     </div>
   );
 }

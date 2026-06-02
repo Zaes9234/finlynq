@@ -454,6 +454,11 @@ export const feedback = pgTable(
     appVersion: text("app_version"), // 'web' | mobile version string
     status: text("status").notNull().default("new"), // 'new' | 'triaged' | 'resolved'
     adminNote: text("admin_note"),
+    // Two-sided read tracking for the reply thread. NULL = never opened.
+    // unread-for-user = admin message newer than userLastReadAt;
+    // unread-for-admin = user message newer than adminLastReadAt.
+    userLastReadAt: timestamp("user_last_read_at", { withTimezone: true }),
+    adminLastReadAt: timestamp("admin_last_read_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -461,6 +466,24 @@ export const feedback = pgTable(
     index("feedback_status_idx").on(t.status, t.createdAt),
     index("feedback_user_idx").on(t.userId),
   ],
+);
+
+// Reply-thread messages. feedback.message is the immutable SEED (NOT stored
+// here — see the 20260611 migration). Each row is one follow-up from the user
+// or the admin. Plaintext, same rationale as feedback.message.
+export const feedbackMessages = pgTable(
+  "feedback_messages",
+  {
+    id: serial("id").primaryKey(),
+    feedbackId: integer("feedback_id")
+      .notNull()
+      .references(() => feedback.id, { onDelete: "cascade" }),
+    authorRole: text("author_role").notNull(), // 'user' | 'admin'
+    authorId: text("author_id").notNull(),
+    body: text("body").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index("feedback_messages_thread_idx").on(t.feedbackId, t.createdAt)],
 );
 
 export const subscriptions = pgTable("subscriptions", {

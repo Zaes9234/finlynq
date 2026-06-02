@@ -97,6 +97,7 @@ const toolLinks: NavItem[] = [
   { href: "/admin/inbox", label: "Admin Inbox", icon: Inbox, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/admin/announcements", label: "Announcements", icon: Megaphone, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/admin/feedback", label: "Feedback", icon: MessageCircle, color: ACTIVE_ACCENT, mode: "prod" },
+  { href: "/feedback", label: "Your feedback", icon: MessageCircle, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/settings", label: "Settings", icon: Settings, color: ACTIVE_ACCENT, mode: "prod" },
 ];
 
@@ -118,6 +119,7 @@ export function Nav() {
   const [devMode, setDevMode] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [unread, setUnread] = useState(0);
+  const [feedbackUnread, setFeedbackUnread] = useState(0);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
 
   const handleSignOut = async () => {
@@ -158,6 +160,24 @@ export function Nav() {
       .catch(() => {});
   }, [pathname]);
 
+  // Unread feedback-reply count for the "Your feedback" badge. Same
+  // refetch-on-navigation pattern as the announcements badge above — clears
+  // after the user opens a thread (which marks it read server-side).
+  useEffect(() => {
+    fetch("/api/feedback")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list) => {
+        if (Array.isArray(list)) {
+          setFeedbackUnread(list.filter((t: { unread?: boolean }) => t.unread).length);
+        }
+      })
+      .catch(() => {});
+  }, [pathname]);
+
+  // Unread count to badge a given nav link (0 = no badge).
+  const unreadFor = (href: string) =>
+    href === "/whats-new" ? unread : href === "/feedback" ? feedbackUnread : 0;
+
   const toggleCollapsed = () => {
     const next = !collapsed;
     setCollapsed(next);
@@ -170,6 +190,7 @@ export function Nav() {
 
   const renderLink = (item: NavItem, showLabel: boolean) => {
     const isActive = pathname.startsWith(item.href);
+    const badge = unreadFor(item.href);
     return (
       <Link
         key={item.href}
@@ -192,14 +213,14 @@ export function Nav() {
           "h-[18px] w-[18px] shrink-0 transition-all duration-200",
           isActive ? item.color : "text-sidebar-foreground/40 group-hover/link:text-sidebar-foreground/70 group-hover/link:scale-110"
         )} />
-        {/* Collapsed-sidebar unread dot for What's New */}
-        {!showLabel && item.href === "/whats-new" && unread > 0 && (
+        {/* Collapsed-sidebar unread dot (What's New + Your feedback) */}
+        {!showLabel && badge > 0 && (
           <span className="absolute right-1 top-1 h-2 w-2 rounded-full bg-primary" />
         )}
         {showLabel && <span className="truncate">{item.label}</span>}
-        {showLabel && item.href === "/whats-new" && unread > 0 ? (
+        {showLabel && badge > 0 ? (
           <span className="ml-auto rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold leading-none text-primary-foreground">
-            {unread}
+            {badge}
           </span>
         ) : (
           showLabel && isActive && <div className="ml-auto h-1.5 w-1.5 rounded-full bg-sidebar-primary animate-pulse" />

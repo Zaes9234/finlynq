@@ -8,7 +8,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema, getDialect } from "@/db";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, inArray } from "drizzle-orm";
 import { requireAdmin } from "@/lib/auth/require-admin";
 
 export const dynamic = "force-dynamic";
@@ -42,6 +42,7 @@ export async function GET(request: NextRequest) {
       appVersion: schema.feedback.appVersion,
       status: schema.feedback.status,
       adminNote: schema.feedback.adminNote,
+      adminLastReadAt: schema.feedback.adminLastReadAt,
       createdAt: schema.feedback.createdAt,
       updatedAt: schema.feedback.updatedAt,
       username: schema.users.username,
@@ -54,5 +55,28 @@ export async function GET(request: NextRequest) {
     .limit(limit)
     .offset(offset);
 
-  return NextResponse.json({ feedback: rows, limit, offset });
+  // Per-thread reply count + admin-unread (a user reply newer than the admin's
+  // last read of that thread). Fetched only for the current page of rows.
+  const ids = rows.map((r) => r.id);
+  const msgs = ids.length
+    ? await db
+        .select({
+          feedbackId: schema.feedbackMessages.feedbackId,
+          authorRole: schema.feedbackMessages.authorRole,
+          createdAt: schema.feedbackMessages.createdAt,
+        })
+        .from(schema.feedbackMessages)
+        .where(inArray(schema.feedbackMessages.feedbackId, ids))
+    : [];
+
+  const feedback = rows.map((r) => {
+    const threadMsgs = msgs.filter((m) => m.feedbackId === r.id);
+    const readMs = r.adminLastReadAt ? new Date(r.adminLastReadAt).getTime() : 0;
+    const adminUnread = threadMsgs.some(
+      (m) => m.authorRole === "user" && new Date(m.createdAt).getTime() > readMs,
+    );
+    return { ...r, replyCount: threadMsgs.length, adminUnread };
+  });
+
+  return NextResponse.json({ feedback, limit, offset });
 }

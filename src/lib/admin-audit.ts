@@ -24,7 +24,8 @@ export type AdminAuditAction =
   | "announcement_created"
   | "announcement_updated"
   | "announcement_deleted"
-  | "feedback_status_change";
+  | "feedback_status_change"
+  | "feedback_replied";
 
 export async function logAdminAction(opts: {
   adminUserId: string;

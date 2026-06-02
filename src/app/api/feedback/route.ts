@@ -12,11 +12,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { db, schema } from "@/db";
+import { desc, eq, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sendEmail, feedbackNotificationEmail } from "@/lib/email";
 import { getUserById } from "@/lib/auth/queries";
+import { buildThreadSummary } from "@/lib/feedback/thread";
+import type { FeedbackThreadSummary } from "@shared/types";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +53,49 @@ async function notifyMaintainer(
       appVersion: d.appVersion ?? null,
     }),
   );
+}
+
+// GET /api/feedback — the current user's feedback threads (summaries with an
+// `unread` flag driving the nav badge). Bare JSON array, mirroring
+// GET /api/announcements so the nav + mobile client consume it unchanged.
+export async function GET(request: NextRequest) {
+  const auth = await requireAuth(request);
+  if (!auth.authenticated) return auth.response;
+  const { userId } = auth.context;
+
+  const fbRows = await db
+    .select({
+      id: schema.feedback.id,
+      type: schema.feedback.type,
+      status: schema.feedback.status,
+      message: schema.feedback.message,
+      userLastReadAt: schema.feedback.userLastReadAt,
+      adminLastReadAt: schema.feedback.adminLastReadAt,
+      createdAt: schema.feedback.createdAt,
+      updatedAt: schema.feedback.updatedAt,
+    })
+    .from(schema.feedback)
+    .where(eq(schema.feedback.userId, userId))
+    .orderBy(desc(schema.feedback.updatedAt));
+
+  const ids = fbRows.map((r) => r.id);
+  const msgs = ids.length
+    ? await db
+        .select()
+        .from(schema.feedbackMessages)
+        .where(inArray(schema.feedbackMessages.feedbackId, ids))
+    : [];
+  const byThread = new Map<number, typeof msgs>();
+  for (const m of msgs) {
+    const arr = byThread.get(m.feedbackId) ?? [];
+    arr.push(m);
+    byThread.set(m.feedbackId, arr);
+  }
+
+  const data: FeedbackThreadSummary[] = fbRows.map((fb) =>
+    buildThreadSummary(fb, byThread.get(fb.id) ?? [], "user"),
+  );
+  return NextResponse.json(data);
 }
 
 export async function POST(request: NextRequest) {
