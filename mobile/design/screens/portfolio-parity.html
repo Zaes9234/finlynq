@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Finlynq Mobile · Portfolio parity mockups</title>
+  <link rel="stylesheet" href="../tokens.css" />
+  <style>
+    /* local mockup-only helpers (kept out of tokens.css) */
+    .metric-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-bottom:var(--sp-md); }
+    .mcard { background:var(--card); border:1px solid var(--border); border-radius:var(--r-lg); padding:10px 12px; }
+    .mcard .sub-label { margin:0 0 3px; }
+    .donut { width:118px; height:118px; border-radius:50%; display:flex; align-items:center; justify-content:center; flex:0 0 auto; }
+    .donut > .hole { width:74px; height:74px; border-radius:50%; background:var(--card); display:flex; flex-direction:column; align-items:center; justify-content:center; }
+    .legend { flex:1; display:flex; flex-direction:column; gap:7px; }
+    .legend .lg-row { display:flex; align-items:center; gap:8px; font-size:var(--fs-sm); }
+    .legend .dot { width:10px; height:10px; border-radius:3px; flex:0 0 auto; }
+    .legend .lg-val { margin-left:auto; font-weight:600; }
+    .tile { background:var(--card); border:1px solid var(--border); border-radius:var(--r-xl); padding:16px 12px; display:flex; flex-direction:column; align-items:center; gap:8px; text-align:center; }
+    .tile .ti { width:40px; height:40px; border-radius:var(--r-md); background:color-mix(in oklch,var(--primary) 14%,transparent); color:var(--primary); display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:800; }
+    .tile .tl { font-size:var(--fs-sm); font-weight:700; }
+    .tile .ts { font-size:11px; color:var(--muted-fg); }
+    .tile-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .notice { border-radius:var(--r-md); padding:11px 12px; font-size:var(--fs-sm); margin-bottom:var(--sp-md); }
+    .notice.warn { background:color-mix(in oklch,var(--primary) 10%,transparent); border:1px solid color-mix(in oklch,var(--primary) 35%,transparent); color:var(--fg); }
+    .notice.block { background:color-mix(in oklch,var(--destructive) 9%,transparent); border:1px solid color-mix(in oklch,var(--destructive) 35%,transparent); color:var(--fg); }
+    .lot-row { display:flex; align-items:center; gap:10px; padding:11px 0; border-bottom:1px solid var(--border); }
+    .lot-row:last-child { border-bottom:0; }
+    .cbox { width:20px; height:20px; border-radius:5px; border:1.5px solid var(--border); flex:0 0 auto; display:flex; align-items:center; justify-content:center; color:var(--primary-fg); font-size:12px; }
+    .cbox.on { background:var(--primary); border-color:var(--primary); }
+    .qty-mini { min-width:54px; height:34px; border:1px solid var(--input); border-radius:var(--r-sm); display:flex; align-items:center; justify-content:center; font-variant-numeric:tabular-nums; font-weight:600; }
+    .seg { display:flex; background:var(--secondary); border-radius:var(--r-md); padding:3px; gap:3px; margin-bottom:var(--sp-md); }
+    .seg > div { flex:1; text-align:center; padding:8px 0; border-radius:var(--r-sm); font-size:var(--fs-sm); font-weight:600; color:var(--muted-fg); }
+    .seg > div.on { background:var(--primary); color:var(--primary-fg); }
+    .amount-card { background:var(--card); border:1px solid var(--border); border-radius:var(--r-xl); padding:20px; margin-bottom:var(--sp-md); text-align:center; }
+    .amount-card .ac-lbl { font-size:12px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--muted-fg); margin-bottom:6px; }
+    .amount-card .ac-amt { font-size:34px; font-weight:800; font-variant-numeric:tabular-nums; }
+    .gl-row { display:flex; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid var(--border); }
+    .gl-row:last-child { border-bottom:0; }
+    .gl-arrow { width:26px; height:26px; border-radius:var(--r-full); display:flex; align-items:center; justify-content:center; font-size:13px; flex:0 0 auto; }
+    .gl-arrow.up { background:color-mix(in oklch,var(--pos) 15%,transparent); color:var(--pos); }
+    .gl-arrow.dn { background:color-mix(in oklch,var(--neg) 15%,transparent); color:var(--neg); }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <div class="stage-title">Portfolio parity — mobile mockups</div>
+    <div class="stage-sub">Dark theme · iPhone 14 frame. Maps 1:1 to the plan phases. Each frame = one screen/state in <code>pf-app/mobile/src/</code>.</div>
+
+    <!-- ============================================================= -->
+    <div class="stage-title" style="font-size:16px;margin-top:24px">Phase 1 · Read parity</div>
+
+    <!-- 1. OVERVIEW (rich) -->
+    <div class="device-wrap">
+      <div class="device-label">Overview (tab root)</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="content">
+          <div class="header-row">
+            <h1 class="h1 sm">Portfolio</h1>
+            <span class="btn ghost sm">＋ New op</span>
+          </div>
+
+          <div class="card">
+            <p class="label">Total Value</p>
+            <p class="value lg tnum">$248,310</p>
+            <div class="row" style="margin-top:12px">
+              <div class="col"><p class="sub-label">Unrealized</p><p class="sub-value pos tnum">+$18,204 · +7.9%</p></div>
+              <div class="col"><p class="sub-label">Day change</p><p class="sub-value pos tnum">+$642 · +0.3%</p></div>
+            </div>
+          </div>
+
+          <p class="section-label">Investment returns</p>
+          <div class="metric-grid">
+            <div class="mcard"><p class="sub-label">Market value</p><p class="sub-value tnum">$248,310</p></div>
+            <div class="mcard"><p class="sub-label">Cost basis</p><p class="sub-value tnum">$230,106</p></div>
+            <div class="mcard"><p class="sub-label">Unrealized G/L</p><p class="sub-value pos tnum">+$18,204</p></div>
+            <div class="mcard"><p class="sub-label">Realized G/L</p><p class="sub-value pos tnum">+$3,940</p></div>
+            <div class="mcard"><p class="sub-label">Dividends</p><p class="sub-value tnum">$1,205</p></div>
+            <div class="mcard"><p class="sub-label">Total return</p><p class="sub-value pos tnum">+$23,349</p></div>
+          </div>
+
+          <div class="chip-row" style="margin-bottom:var(--sp-md)">
+            <span class="chip">📈 Performance</span>
+            <span class="chip">💰 Realized</span>
+            <span class="chip">🪙 Dividends</span>
+          </div>
+
+          <p class="section-label">Allocation</p>
+          <div class="card">
+            <div class="chip-row" style="margin-bottom:12px"><span class="chip active">By type</span><span class="chip">By account</span></div>
+            <div class="row" style="align-items:center">
+              <div class="donut" style="background:conic-gradient(var(--chart1) 0 54%, var(--chart2) 54% 85%, var(--chart5) 85% 94%, var(--muted-fg) 94% 100%)">
+                <div class="hole"><span class="muted" style="font-size:11px">Total</span><span class="tnum" style="font-weight:800">$248k</span></div>
+              </div>
+              <div class="legend">
+                <div class="lg-row"><span class="dot" style="background:var(--chart1)"></span>ETF<span class="lg-val tnum">54%</span></div>
+                <div class="lg-row"><span class="dot" style="background:var(--chart2)"></span>Stock<span class="lg-val tnum">31%</span></div>
+                <div class="lg-row"><span class="dot" style="background:var(--chart5)"></span>Crypto<span class="lg-val tnum">9%</span></div>
+                <div class="lg-row"><span class="dot" style="background:var(--muted-fg)"></span>Cash<span class="lg-val tnum">6%</span></div>
+              </div>
+            </div>
+          </div>
+
+          <p class="section-label">Top movers</p>
+          <div class="card tight">
+            <div class="gl-row"><span class="gl-arrow up">▲</span><div class="col"><div style="font-weight:600">NVDA</div><div class="muted" style="font-size:12px">Nvidia</div></div><div style="text-align:right"><div class="pos tnum" style="font-weight:600">+17.7%</div><div class="muted tnum" style="font-size:12px">+$2,140</div></div></div>
+            <div class="gl-row"><span class="gl-arrow up">▲</span><div class="col"><div style="font-weight:600">VFV.TO</div><div class="muted" style="font-size:12px">S&amp;P 500 ETF</div></div><div style="text-align:right"><div class="pos tnum" style="font-weight:600">+3.1%</div><div class="muted tnum" style="font-size:12px">+$980</div></div></div>
+            <div class="gl-row"><span class="gl-arrow dn">▼</span><div class="col"><div style="font-weight:600">BTC</div><div class="muted" style="font-size:12px">Bitcoin</div></div><div style="text-align:right"><div class="neg tnum" style="font-weight:600">−4.2%</div><div class="muted tnum" style="font-size:12px">−$610</div></div></div>
+          </div>
+
+          <div class="header-row"><p class="section-label" style="margin:0">Holdings · 12</p><span class="muted" style="font-size:12px">Sort: Value ▼</span></div>
+          <div class="card tight" style="padding:0 var(--sp-md)">
+            <div class="list-row"><div class="lr-main"><div class="lr-title">NVDA</div><div class="lr-sub">Nvidia · 40 units</div></div><div style="text-align:right"><div class="lr-amt tnum">$14,210</div><div class="pos" style="font-size:12px">+17.7%</div></div><span class="chev">›</span></div>
+            <div class="list-row"><div class="lr-main"><div class="lr-title">VFV.TO</div><div class="lr-sub">S&amp;P 500 ETF · 220 units</div></div><div style="text-align:right"><div class="lr-amt tnum">$32,540</div><div class="pos" style="font-size:12px">+9.2%</div></div><span class="chev">›</span></div>
+            <div class="list-row"><div class="lr-main"><div class="lr-title">AAPL</div><div class="lr-sub">Apple · 60 units</div></div><div style="text-align:right"><div class="lr-amt tnum">$13,980</div><div class="neg" style="font-size:12px">−1.4%</div></div><span class="chev">›</span></div>
+          </div>
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-home"/></svg>Home</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-accounts"/></svg>Accounts</div>
+          <div class="tab active"><svg class="licon"><use href="../icons.svg#i-portfolio"/></svg>Portfolio</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-txns"/></svg>Txns</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-more"/></svg>More</div>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- 2. HOLDING DETAIL -->
+    <div class="device-wrap">
+      <div class="device-label">Holding detail</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-back">‹ Portfolio</span><span class="nav-title">NVDA</span><span class="nav-action"></span></div>
+        <div class="content">
+          <p class="muted" style="margin-top:0">Nvidia Corp · Stock · USD</p>
+          <div class="card">
+            <p class="label">Market value</p>
+            <p class="value lg tnum">$14,210</p>
+            <p class="sub-value pos tnum" style="margin-top:4px">+$2,140 · +17.7%</p>
+            <div style="margin-top:12px">
+              <div class="kv-row"><span class="kv-key">40 units @ avg cost</span><span class="kv-val tnum">$300.50</span></div>
+              <div class="kv-row"><span class="kv-key">Cost basis</span><span class="kv-val tnum">$12,070</span></div>
+              <div class="kv-row"><span class="kv-key">Realized G/L</span><span class="kv-val pos tnum">+$420</span></div>
+              <div class="kv-row"><span class="kv-key">Dividends</span><span class="kv-val tnum">$60</span></div>
+            </div>
+          </div>
+
+          <p class="section-label">By account</p>
+          <div class="card tight" style="padding:0 var(--sp-md)">
+            <div class="list-row"><div class="lr-main"><div class="lr-title">RRSP · USD</div><div class="lr-sub">first buy 2022-03-01 · 815d held</div></div><div style="text-align:right"><div class="lr-amt tnum">$8,881</div><div class="muted" style="font-size:12px">25 units</div></div></div>
+            <div class="list-row"><div class="lr-main"><div class="lr-title">TFSA · USD</div><div class="lr-sub">first buy 2023-06-12 · 356d held</div></div><div style="text-align:right"><div class="lr-amt tnum">$5,329</div><div class="muted" style="font-size:12px">15 units</div></div></div>
+          </div>
+
+          <p class="section-label">Open lots</p>
+          <div class="card tight" style="padding:0 var(--sp-md)">
+            <div class="list-row"><div class="lr-main"><div class="lr-title tnum">2022-03-01</div><div class="lr-sub">RRSP · 25 units</div></div><div class="lr-amt tnum">@ $250.10</div></div>
+            <div class="list-row"><div class="lr-main"><div class="lr-title tnum">2023-06-12</div><div class="lr-sub">TFSA · 15 units</div></div><div class="lr-amt tnum">@ $372.00</div></div>
+          </div>
+
+          <p class="section-label">Transactions</p>
+          <div class="card tight" style="padding:0 var(--sp-md)">
+            <div class="list-row"><span class="indicator out">＋</span><div class="lr-main"><div class="lr-title">Buy</div><div class="lr-sub">2024-01-04 · RRSP</div></div><div class="lr-amt tnum">+10u · $3,700</div></div>
+            <div class="list-row"><span class="indicator in">$</span><div class="lr-main"><div class="lr-title">Dividend</div><div class="lr-sub">2023-09-20 · RRSP</div></div><div class="lr-amt tnum">$60</div></div>
+          </div>
+
+          <div class="row" style="margin-top:8px">
+            <span class="btn primary block">＋ Buy</span>
+            <span class="btn block">－ Sell</span>
+          </div>
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-home"/></svg>Home</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-accounts"/></svg>Accounts</div>
+          <div class="tab active"><svg class="licon"><use href="../icons.svg#i-portfolio"/></svg>Portfolio</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-txns"/></svg>Txns</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-more"/></svg>More</div>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- ============================================================= -->
+    <div class="stage-title" style="font-size:16px;margin-top:24px">Phase 2 · Reporting</div>
+
+    <!-- 3. PERFORMANCE -->
+    <div class="device-wrap">
+      <div class="device-label">Performance</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-back">‹ Portfolio</span><span class="nav-title">Performance</span><span class="nav-action"></span></div>
+        <div class="content">
+          <div class="seg" style="margin-top:4px">
+            <div>1M</div><div>3M</div><div>6M</div><div>YTD</div><div class="on">1Y</div><div>All</div>
+          </div>
+          <div class="card">
+            <svg viewBox="0 0 300 130" width="100%" height="130" preserveAspectRatio="none" style="display:block">
+              <line x1="0" y1="32" x2="300" y2="32" stroke="var(--border)" stroke-width="1"/>
+              <line x1="0" y1="80" x2="300" y2="80" stroke="var(--border)" stroke-width="1"/>
+              <polyline fill="none" stroke="var(--muted-fg)" stroke-width="1.5" stroke-dasharray="3 3"
+                points="0,98 50,95 100,92 150,88 200,84 250,80 300,76"/>
+              <polyline fill="none" stroke="var(--chart1)" stroke-width="2.5"
+                points="0,104 50,92 100,96 150,70 200,76 250,48 300,30"/>
+            </svg>
+            <div class="row between" style="margin-top:8px">
+              <span class="muted" style="font-size:11px">Jun 2025</span>
+              <span class="muted" style="font-size:11px">— market value · ···· cost basis</span>
+              <span class="muted" style="font-size:11px">Jun 2026</span>
+            </div>
+          </div>
+          <div class="metric-grid">
+            <div class="mcard"><p class="sub-label">TWRR (1Y)</p><p class="sub-value pos tnum">+9.8%</p></div>
+            <div class="mcard"><p class="sub-label">Annualized</p><p class="sub-value pos tnum">+9.8%</p></div>
+            <div class="mcard"><p class="sub-label">MWRR (XIRR)</p><p class="sub-value pos tnum">+8.4%</p></div>
+            <div class="mcard"><p class="sub-label">Cost basis</p><p class="sub-value tnum">$230,106</p></div>
+          </div>
+          <p class="hint" style="text-align:left">· 3 days gap-filled (shown dashed)</p>
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-home"/></svg>Home</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-accounts"/></svg>Accounts</div>
+          <div class="tab active"><svg class="licon"><use href="../icons.svg#i-portfolio"/></svg>Portfolio</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-txns"/></svg>Txns</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-more"/></svg>More</div>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- 4. REALIZED GAINS -->
+    <div class="device-wrap">
+      <div class="device-label">Realized gains</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-back">‹ Portfolio</span><span class="nav-title">Realized gains</span><span class="nav-action"></span></div>
+        <div class="content">
+          <div class="chip-row" style="margin-top:4px;margin-bottom:8px"><span class="chip">Year: 2025 ▼</span><span class="chip active">All</span><span class="chip">Short</span><span class="chip">Long</span></div>
+          <div class="setting-row" style="padding-top:4px"><div><div class="sr-title">Show in base currency</div><div class="sr-sub">CAD · cross-currency gains</div></div><div class="toggle"><b></b></div></div>
+          <div class="card">
+            <p class="label">Total realized (2025)</p>
+            <p class="value lg pos tnum">+$3,940</p>
+            <p class="hint" style="text-align:left">14 closures · 9 holdings</p>
+          </div>
+          <div class="card tight">
+            <div class="row between"><div style="font-weight:700">AAPL</div><div class="pos tnum" style="font-weight:700">+$612</div></div>
+            <div class="muted" style="font-size:12px;margin-top:3px">Sold 2025-02-10 · 10u · $128.90 → $190.10</div>
+            <div style="margin-top:6px"><span class="badge info">Long · 410d</span></div>
+          </div>
+          <div class="card tight">
+            <div class="row between"><div style="font-weight:700">BTC</div><div class="neg tnum" style="font-weight:700">−$214</div></div>
+            <div class="muted" style="font-size:12px;margin-top:3px">Sold 2025-05-01 · 0.10u · held 95d</div>
+            <div style="margin-top:6px"><span class="badge neg">Short · close</span> <span class="badge info">FX</span></div>
+          </div>
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-home"/></svg>Home</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-accounts"/></svg>Accounts</div>
+          <div class="tab active"><svg class="licon"><use href="../icons.svg#i-portfolio"/></svg>Portfolio</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-txns"/></svg>Txns</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-more"/></svg>More</div>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- 5. DIVIDENDS -->
+    <div class="device-wrap">
+      <div class="device-label">Dividend income</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-back">‹ Portfolio</span><span class="nav-title">Dividend income</span><span class="nav-action"></span></div>
+        <div class="content">
+          <div class="chip-row" style="margin-top:4px;margin-bottom:var(--sp-md)"><span class="chip active">By year</span><span class="chip">By quarter</span><span class="chip">By holding</span></div>
+          <div class="card">
+            <p class="label">Total dividends</p>
+            <p class="value lg tnum">$1,205</p>
+            <p class="hint" style="text-align:left">23 payments</p>
+          </div>
+          <div class="card tight">
+            <div class="row between"><div style="font-weight:700">2025</div><div class="tnum" style="font-weight:700">$640</div></div>
+            <div class="muted" style="font-size:12px;margin-top:3px">12 payments · 3 reinvested · 2 withholding</div>
+          </div>
+          <div class="card tight">
+            <div class="row between"><div style="font-weight:700">2024</div><div class="tnum" style="font-weight:700">$565</div></div>
+            <div class="muted" style="font-size:12px;margin-top:3px">11 payments · 4 reinvested</div>
+          </div>
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-home"/></svg>Home</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-accounts"/></svg>Accounts</div>
+          <div class="tab active"><svg class="licon"><use href="../icons.svg#i-portfolio"/></svg>Portfolio</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-txns"/></svg>Txns</div>
+          <div class="tab"><svg class="licon"><use href="../icons.svg#i-more"/></svg>More</div>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- ============================================================= -->
+    <div class="stage-title" style="font-size:16px;margin-top:24px">Phase 3–4 · Operation entry (the 8 ops)</div>
+
+    <!-- 6. OPS CHOOSER -->
+    <div class="device-wrap">
+      <div class="device-label">New operation (chooser)</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-action left">Cancel</span><span class="nav-title">New operation</span><span class="nav-action"></span></div>
+        <div class="content">
+          <div class="tile-grid">
+            <div class="tile"><span class="ti">＋</span><span class="tl">Buy</span><span class="ts">Acquire shares</span></div>
+            <div class="tile"><span class="ti">－</span><span class="tl">Sell</span><span class="ts">Dispose · lots</span></div>
+            <div class="tile"><span class="ti">⇄</span><span class="tl">Swap</span><span class="ts">Sell + buy</span></div>
+            <div class="tile"><span class="ti">↦</span><span class="tl">Transfer</span><span class="ts">In-kind, acct→acct</span></div>
+            <div class="tile"><span class="ti">＄</span><span class="tl">Income / Expense</span><span class="ts">Dividend · interest · fee</span></div>
+            <div class="tile"><span class="ti">⇋</span><span class="tl">FX Conversion</span><span class="ts">Currency sleeve→sleeve</span></div>
+            <div class="tile"><span class="ti">↓</span><span class="tl">Brokerage Deposit</span><span class="ts">Fund from bank</span></div>
+            <div class="tile"><span class="ti">↑</span><span class="tl">Brokerage Withdrawal</span><span class="ts">Cash out to bank</span></div>
+          </div>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- 7. BUY (normal) -->
+    <div class="device-wrap">
+      <div class="device-label">Buy</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-action left">Cancel</span><span class="nav-title">Buy</span><span class="nav-action">Save</span></div>
+        <div class="content">
+          <div class="amount-card"><div class="ac-lbl">Total cost · USD</div><div class="ac-amt">$1,000.00</div></div>
+          <div class="card">
+            <div class="field"><div class="field-label">Account</div><div class="select"><span class="sel-val">RRSP (USD)</span><span class="chev">›</span></div></div>
+            <div class="field"><div class="field-label">Holding</div><div class="select"><span class="sel-val">NVDA — Nvidia</span><span class="chev">›</span></div><p class="hint" style="text-align:left">Currently holding 40 shares</p></div>
+            <div class="field"><div class="field-label">Quantity</div><div class="input"><span>3</span></div></div>
+            <div class="field"><div class="field-label">Date</div><div class="select"><span class="sel-val tnum">2026-06-02</span><span class="chev">›</span></div></div>
+            <div class="field"><div class="field-label">Payee · Note · Tags (optional)</div><div class="input placeholder">Broker name</div></div>
+          </div>
+          <div class="notice warn">ⓘ Will debit the <b>USD</b> cash sleeve by <b class="tnum">$1,000.00</b>.</div>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- 7b. BUY (cash-sleeve missing) -->
+    <div class="device-wrap">
+      <div class="device-label">Buy · no cash sleeve</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-action left">Cancel</span><span class="nav-title">Buy</span><span class="nav-action muted">Save</span></div>
+        <div class="content">
+          <div class="amount-card"><div class="ac-lbl">Total cost · USD</div><div class="ac-amt">$1,000.00</div></div>
+          <div class="card">
+            <div class="field"><div class="field-label">Account</div><div class="select"><span class="sel-val">RRSP (CAD only)</span><span class="chev">›</span></div></div>
+            <div class="field"><div class="field-label">Holding</div><div class="select"><span class="sel-val">NVDA — Nvidia (USD)</span><span class="chev">›</span></div></div>
+          </div>
+          <div class="notice block">
+            ⚠ No <b>USD</b> cash sleeve in this account.<br/>
+            <span class="btn primary sm" style="margin-top:10px">Create USD cash sleeve</span>
+          </div>
+          <p class="hint" style="text-align:left">Save stays disabled until the sleeve exists (one tap above).</p>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- 8. SELL + LOT PICKER -->
+    <div class="device-wrap">
+      <div class="device-label">Sell · lot picker</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-action left">Cancel</span><span class="nav-title">Sell</span><span class="nav-action">Save</span></div>
+        <div class="content">
+          <div class="amount-card"><div class="ac-lbl">Total proceeds · USD</div><div class="ac-amt">$4,000.00</div></div>
+          <div class="card">
+            <div class="field"><div class="field-label">Account</div><div class="select"><span class="sel-val">RRSP (USD)</span><span class="chev">›</span></div></div>
+            <div class="field"><div class="field-label">Holding</div><div class="select"><span class="sel-val">NVDA — Nvidia</span><span class="chev">›</span></div></div>
+            <div class="field"><div class="field-label">Quantity (sum of lots)</div><div class="input"><span class="tnum">10</span></div></div>
+            <div class="setting-row" style="padding:10px 0"><div class="sr-title">Pick specific lots</div><div class="toggle on"><b></b></div></div>
+          </div>
+          <div class="card">
+            <p class="section-label" style="margin-top:0">Select lots to sell</p>
+            <div class="lot-row"><span class="cbox on">✓</span><div class="col"><div style="font-weight:600" class="tnum">2022-03-01</div><div class="muted" style="font-size:12px">25 units · @ $250.10 · long</div></div><div class="qty-mini">6</div></div>
+            <div class="lot-row"><span class="cbox on">✓</span><div class="col"><div style="font-weight:600" class="tnum">2023-06-12</div><div class="muted" style="font-size:12px">15 units · @ $372.00 · long</div></div><div class="qty-mini">4</div></div>
+            <div class="row between" style="margin-top:10px"><span class="muted" style="font-size:13px">Selected</span><span class="tnum" style="font-weight:700">10 / qty 10 ✓</span></div>
+          </div>
+          <p class="hint" style="text-align:left">Toggle off → FIFO. Selecting beyond long inventory warns + opens a short for the overflow (allowed).</p>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- 9. ADD HOLDING -->
+    <div class="device-wrap">
+      <div class="device-label">New holding (before Buy)</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-action left">Cancel</span><span class="nav-title">New holding</span><span class="nav-action">Save</span></div>
+        <div class="content">
+          <div class="card">
+            <div class="field"><div class="field-label">Account</div><div class="select"><span class="sel-val">RRSP (USD)</span><span class="chev">›</span></div></div>
+            <div class="field"><div class="field-label">Symbol</div><div class="input"><span>NVDA</span></div></div>
+            <div class="field"><div class="field-label">Name</div><div class="input"><span>Nvidia Corp</span></div></div>
+            <div class="field"><div class="field-label">Currency</div><div class="select"><span class="sel-val">USD</span><span class="chev">›</span></div></div>
+            <div class="setting-row" style="padding:10px 0"><div class="sr-title">Crypto?</div><div class="toggle"><b></b></div></div>
+            <div class="field"><div class="field-label">Note (optional)</div><div class="input placeholder">—</div></div>
+          </div>
+          <p class="hint" style="text-align:left">Creates the holding, returns to Buy with it pre-selected. Needed only when the symbol isn't already in the account.</p>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+    <!-- 10. EDIT BLOCKED -->
+    <div class="device-wrap">
+      <div class="device-label">Edit blocked (dependent tx)</div>
+      <div class="device"><div class="screen dark">
+        <div class="dynamic-island"></div>
+        <div class="statusbar"><span class="time">9:41</span><span class="sb-icons">▮▮▮ ⏶ 100﹪</span></div>
+        <div class="navbar"><span class="nav-action left">Cancel</span><span class="nav-title">Edit Buy</span><span class="nav-action muted">Save</span></div>
+        <div class="content">
+          <div class="amount-card"><div class="ac-lbl">Total cost · USD</div><div class="ac-amt">$3,700.00</div></div>
+          <div class="notice block">
+            ⚠ Edit blocked — delete these dependent transactions first:
+            <div class="list-row" style="border-bottom:0;padding:8px 0"><div class="lr-main link">› Transaction #4821</div></div>
+            <div class="list-row" style="border-bottom:0;padding:0 0 4px"><div class="lr-main link">› Transaction #4830</div></div>
+          </div>
+          <p class="hint" style="text-align:left">Tapping a row opens Transactions filtered to that id. No auto-retry — same as web.</p>
+        </div>
+        <div class="home-indicator"></div>
+      </div></div>
+    </div>
+
+  </div>
+</body>
+</html>

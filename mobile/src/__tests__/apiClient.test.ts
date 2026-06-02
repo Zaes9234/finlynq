@@ -303,4 +303,94 @@ describe("API Client", () => {
       );
     });
   });
+
+  describe("portfolio endpoints", () => {
+    it("getPortfolioHoldings unwraps a bare REST array", async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve([{ id: 1, isCash: false }]),
+      });
+      const res = await endpoints.getPortfolioHoldings();
+      expect(res).toEqual({ success: true, data: [{ id: 1, isCash: false }] });
+    });
+
+    it("postPortfolioOperation returns ok+data on 2xx", async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 201,
+        json: () => Promise.resolve({ id: 7 }),
+      });
+      const res = await endpoints.postPortfolioOperation("buy", {
+        accountId: 1,
+        holdingId: 1,
+        qty: 1,
+        totalCost: 10,
+        date: "2026-06-02",
+      });
+      expect(res.ok).toBe(true);
+      expect(res.data).toEqual({ id: 7 });
+    });
+
+    // The load-bearing structured-error passthrough: code / currency / accountId
+    // survive so the op form can drive the cash-sleeve gate + edit-blocked notice.
+    it("postPortfolioOperation preserves a structured 4xx error body", async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: () =>
+          Promise.resolve({
+            error: "No USD cash sleeve",
+            code: "cash_sleeve_not_found",
+            currency: "USD",
+            accountId: 5,
+          }),
+      });
+      const res = await endpoints.postPortfolioOperation("buy", {
+        accountId: 5,
+        holdingId: 1,
+        qty: 1,
+        totalCost: 10,
+        date: "2026-06-02",
+      });
+      expect(res.ok).toBe(false);
+      expect(res.error?.code).toBe("cash_sleeve_not_found");
+      expect(res.error?.currency).toBe("USD");
+      expect(res.error?.accountId).toBe(5);
+    });
+
+    it("postPortfolioOperation preserves blockingClosureTxIds on 409", async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: () =>
+          Promise.resolve({
+            error: "blocked",
+            code: "portfolio_edit_blocked",
+            blockingClosureTxIds: [4821, 4830],
+          }),
+      });
+      const res = await endpoints.postPortfolioOperation("buy", {
+        accountId: 1,
+        holdingId: 1,
+        qty: 1,
+        totalCost: 10,
+        date: "2026-06-02",
+        editId: 99,
+      });
+      expect(res.error?.blockingClosureTxIds).toEqual([4821, 4830]);
+    });
+
+    it("createCashSleeve surfaces the duplicate code on 409", async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: () =>
+          Promise.resolve({ error: "exists", code: "duplicate_cash_sleeve", holdingId: 12 }),
+      });
+      const res = await endpoints.createCashSleeve({ accountId: 1, currency: "USD" });
+      expect(res.ok).toBe(false);
+      expect(res.error?.code).toBe("duplicate_cash_sleeve");
+    });
+  });
 });

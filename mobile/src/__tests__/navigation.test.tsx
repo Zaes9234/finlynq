@@ -5,6 +5,7 @@ import type { Theme } from "../theme";
 import { lightColors } from "../theme/colors";
 import TabNavigator from "../navigation/TabNavigator";
 import TransactionsStack from "../navigation/TransactionsStack";
+import PortfolioStack from "../navigation/PortfolioStack";
 import RootNavigator from "../navigation/RootNavigator";
 
 // Mock all screens to simple components
@@ -60,6 +61,43 @@ jest.mock("../screens/PortfolioScreen", () => {
   const React = require("react");
   const { Text } = require("react-native");
   return () => React.createElement(Text, null, "PortfolioScreen");
+});
+
+// PortfolioStack's other screens — stubbed so importing the stack stays light.
+jest.mock("../screens/HoldingDetailScreen", () => {
+  const React = require("react");
+  const { Text } = require("react-native");
+  return () => React.createElement(Text, null, "HoldingDetailScreen");
+});
+jest.mock("../screens/PortfolioOpsScreen", () => {
+  const React = require("react");
+  const { Text } = require("react-native");
+  return () => React.createElement(Text, null, "PortfolioOpsScreen");
+});
+jest.mock("../screens/OperationFormScreen", () => {
+  const React = require("react");
+  const { Text } = require("react-native");
+  return () => React.createElement(Text, null, "OperationFormScreen");
+});
+jest.mock("../screens/AddHoldingScreen", () => {
+  const React = require("react");
+  const { Text } = require("react-native");
+  return () => React.createElement(Text, null, "AddHoldingScreen");
+});
+jest.mock("../screens/PerformanceScreen", () => {
+  const React = require("react");
+  const { Text } = require("react-native");
+  return () => React.createElement(Text, null, "PerformanceScreen");
+});
+jest.mock("../screens/RealizedGainsScreen", () => {
+  const React = require("react");
+  const { Text } = require("react-native");
+  return () => React.createElement(Text, null, "RealizedGainsScreen");
+});
+jest.mock("../screens/DividendsScreen", () => {
+  const React = require("react");
+  const { Text } = require("react-native");
+  return () => React.createElement(Text, null, "DividendsScreen");
 });
 
 jest.mock("../screens/GoalsScreen", () => {
@@ -180,6 +218,26 @@ describe("TransactionsStack", () => {
     expect(tree).toContain("TransactionsList");
     expect(tree).toContain("TransactionDetail");
     expect(tree).toContain("AddTransaction");
+  });
+});
+
+describe("PortfolioStack", () => {
+  it("renders without crashing", () => {
+    const { toJSON } = renderWithTheme(<PortfolioStack />);
+    expect(toJSON()).toBeTruthy();
+  });
+
+  it("defines the overview root + ops + reporting + detail screens", () => {
+    const { toJSON } = renderWithTheme(<PortfolioStack />);
+    const tree = JSON.stringify(toJSON());
+    expect(tree).toContain("PortfolioOverview");
+    expect(tree).toContain("PortfolioOps");
+    expect(tree).toContain("OperationForm");
+    expect(tree).toContain("HoldingDetail");
+    expect(tree).toContain("AddHolding");
+    expect(tree).toContain("Performance");
+    expect(tree).toContain("RealizedGains");
+    expect(tree).toContain("Dividends");
   });
 });
 

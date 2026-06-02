@@ -288,11 +288,392 @@ export interface PortfolioSummary {
   totalReturnPct: number;
 }
 
+/** One enriched per-account holding row (overview.holdings / topGainers / topLosers). */
+export interface EnrichedHolding {
+  id: number;
+  accountId: number | null;
+  accountName: string;
+  name: string | null;
+  symbol: string | null;
+  currency: string;
+  assetType: "etf" | "stock" | "crypto" | "cash";
+  price: number | null;
+  change: number | null;
+  changePct: number | null;
+  quoteCurrency: string | null;
+  marketCap: number | null;
+  image: string | null;
+  quantity: number | null;
+  avgCostPerShare: number | null;
+  totalCostBasis: number | null;
+  lifetimeCostBasis: number | null;
+  marketValue: number | null;
+  marketValueDisplay: number | null;
+  unrealizedGain: number | null;
+  unrealizedGainPct: number | null;
+  unrealizedGainDisplay: number | null;
+  realizedGain: number | null;
+  dividendsReceived: number | null;
+  totalReturn: number | null;
+  totalReturnDisplay: number | null;
+  totalReturnPct: number | null;
+  firstPurchaseDate: string | null;
+  daysHeld: number | null;
+  pctOfPortfolio: number | null;
+}
+
+/** byType / byAccount bucket from the overview payload. */
+export interface AllocationBucket {
+  count: number;
+  value: number;
+}
+
 export interface PortfolioOverview {
-  holdings: unknown[];
+  holdings: EnrichedHolding[];
   byHolding: PortfolioHoldingSummary[];
   displayCurrency: string;
   summary: PortfolioSummary;
+  /** Asset-type breakdown keyed by etf|stock|crypto|cash. */
+  byType: Record<string, AllocationBucket>;
+  /** Per-account breakdown keyed by (decrypted) account name. */
+  byAccount: Record<string, AllocationBucket>;
+  topGainers: EnrichedHolding[];
+  topLosers: EnrichedHolding[];
+}
+
+/** GET /api/portfolio bare-array row (decrypted names; powers op-form pickers). */
+export interface PortfolioHoldingRow {
+  id: number;
+  accountId: number | null;
+  name: string | null;
+  symbol: string | null;
+  currency: string;
+  isCrypto: number;
+  isCash: boolean;
+  note: string;
+  /** Live SUM(transactions.quantity) for the holding. */
+  currentShares: number;
+  accountName: string | null;
+}
+
+// --- Portfolio performance (GET /api/portfolio/performance, enveloped) ---
+export interface PerformancePoint {
+  date: string;
+  marketValue: number;
+  costBasis: number;
+  contribution: number;
+  gapsFilled: boolean;
+}
+
+export interface PortfolioPerformance {
+  period: string;
+  accountId: number | null;
+  from: string;
+  to: string;
+  currency: string;
+  series: PerformancePoint[];
+  twrr: { period: number; annualized: number; hadContributions: boolean };
+  mwrr: { irr: number; converged: boolean };
+  gapsFilledDays: number;
+}
+
+// --- Realized gains (GET /api/portfolio/realized-gains, enveloped) ---
+export interface RealizedGainRow {
+  closureId: number;
+  closeDate: string;
+  closeTxId: number;
+  lotId: number;
+  holdingId: number;
+  holdingName: string | null;
+  accountId: number;
+  accountName: string | null;
+  qtyClosed: number;
+  proceedsPerShare: number;
+  costPerShare: number;
+  realizedGain: number;
+  currency: string;
+  openDate: string;
+  daysHeld: number;
+  term: "short" | "long";
+  closeKind: string;
+  source: string;
+  /** Present only when ?currency=base. */
+  realizedGainInBase?: number;
+}
+
+export interface RealizedGainsResult {
+  rows: RealizedGainRow[];
+  totals: {
+    realizedGain: number;
+    qtyClosed: number;
+    rowCount: number;
+    byCurrency: Record<string, { realizedGain: number; qtyClosed: number }>;
+  };
+  filter: Record<string, unknown>;
+  /** Present only when ?currency=base. */
+  totalRealizedGainInBase?: number;
+}
+
+// --- Dividend income (GET /api/portfolio/dividends, enveloped) ---
+export interface DividendRow {
+  txId: number;
+  date: string;
+  amount: number;
+  currency: string;
+  isReinvested: boolean;
+  isWithholding: boolean;
+  holdingId: number | null;
+  holdingName: string | null;
+  accountId: number | null;
+  accountName: string | null;
+  payee: string | null;
+}
+
+export interface DividendGroupRow {
+  bucket: string;
+  label: string;
+  amount: number;
+  currency: string;
+  rowCount: number;
+  reinvestedCount: number;
+  withholdingCount: number;
+}
+
+export interface DividendIncomeResult {
+  rows?: DividendRow[];
+  groups?: DividendGroupRow[];
+  totals: {
+    amount: number;
+    rowCount: number;
+    byCurrency: Record<string, number>;
+  };
+  filter: Record<string, unknown>;
+}
+
+// --- Lots (GET /api/portfolio/lots, enveloped { lots }) ---
+export interface LotRow {
+  lotId: number;
+  holdingId: number;
+  accountId: number;
+  openTxId: number;
+  openDate: string;
+  qtyOriginal: number;
+  qtyRemaining: number;
+  /** Alias of qtyRemaining (server provides both). */
+  qty: number;
+  costPerShare: number;
+  costBasis: number;
+  currency: string;
+  origin: string;
+  status: string;
+  parentLotId: number | null;
+}
+
+// --- Portfolio operations ---
+export type PortfolioOpKey =
+  | "buy"
+  | "sell"
+  | "swap"
+  | "transfer"
+  | "income-expense"
+  | "fx-conversion"
+  | "deposit"
+  | "withdrawal";
+
+/** POST /api/portfolio create-holding body (names sent plaintext; server encrypts). */
+export interface HoldingFormData {
+  name: string;
+  accountId: number;
+  symbol?: string;
+  currency?: string;
+  isCrypto?: boolean;
+  note?: string;
+}
+
+/** POST /api/portfolio/holdings/cash-sleeve body. */
+export interface CashSleevePayload {
+  accountId: number;
+  currency: string;
+  name?: string;
+}
+
+/** Structured 4xx body shared by /operations/* + cash-sleeve. The mobile
+ *  postPortfolioOperation helper preserves these fields (the generic
+ *  request() helper would collapse them to a plain string). */
+export interface OpErrorInfo {
+  error: string;
+  code?: string;
+  currency?: string;
+  accountId?: number;
+  holdingId?: number;
+  expected?: string;
+  got?: string;
+  blockingClosureTxIds?: number[];
+}
+
+/** Result envelope from postPortfolioOperation — structured-error aware. */
+export interface OpResult<T> {
+  ok: boolean;
+  status: number;
+  data?: T;
+  error?: OpErrorInfo;
+}
+
+export interface LotSelection {
+  method: "FIFO" | "HIFO" | "SPECIFIC";
+  lotIds?: number[];
+  lots?: Array<{ lotId: number; qty: number }>;
+}
+
+export interface BuyOpBody {
+  accountId: number;
+  holdingId: number;
+  qty: number;
+  totalCost: number;
+  date: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
+  cashSleeveHoldingId?: number;
+  editId?: number;
+}
+
+export interface SellOpBody {
+  accountId: number;
+  holdingId: number;
+  qty: number;
+  totalProceeds: number;
+  date: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
+  cashSleeveHoldingId?: number;
+  lotSelection?: LotSelection;
+  editId?: number;
+}
+
+export interface SwapOpBody {
+  accountId: number;
+  sourceHoldingId: number;
+  sourceQty: number;
+  sourceProceeds: number;
+  destHoldingId: number;
+  destQty: number;
+  destCost: number;
+  date: string;
+  payee?: string;
+  note?: string;
+  editId?: number;
+}
+
+export interface TransferOpBody {
+  sourceAccountId: number;
+  destAccountId: number;
+  holdingId: number;
+  qty: number;
+  date: string;
+  payee?: string;
+  note?: string;
+  editId?: number;
+}
+
+export interface IncomeExpenseOpBody {
+  accountId: number;
+  currency: string;
+  amount: number;
+  relatedHoldingId?: number | null;
+  categoryId?: number | null;
+  date: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
+  editId?: number;
+}
+
+export interface FxConversionOpBody {
+  accountId: number;
+  fromCurrency: string;
+  fromAmount: number;
+  toCurrency: string;
+  toAmount: number;
+  feeAmount?: number;
+  feeCurrency?: string;
+  feeOnSleeveCurrency?: string;
+  date: string;
+  payee?: string;
+  note?: string;
+  editId?: number;
+}
+
+export interface DepositOpBody {
+  sourceAccountId: number;
+  destAccountId: number;
+  destCashSleeveHoldingId?: number;
+  amount: number;
+  date: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
+  editId?: number;
+}
+
+export interface WithdrawalOpBody {
+  sourceAccountId: number;
+  sourceCashSleeveHoldingId?: number;
+  destAccountId: number;
+  amount: number;
+  date: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
+  editId?: number;
+}
+
+export type PortfolioOpBody =
+  | BuyOpBody
+  | SellOpBody
+  | SwapOpBody
+  | TransferOpBody
+  | IncomeExpenseOpBody
+  | FxConversionOpBody
+  | DepositOpBody
+  | WithdrawalOpBody;
+
+/** GET /api/portfolio/operations/load?id=N response data (loose superset —
+ *  shape varies by op kind; the registry's prefillFromLoad guards on `op`). */
+export interface OperationLoadData {
+  op: PortfolioOpKey;
+  primaryTxId: number;
+  accountId?: number | null;
+  holdingId?: number | null;
+  qty?: number;
+  totalCost?: number;
+  totalProceeds?: number;
+  sourceAccountId?: number | null;
+  destAccountId?: number | null;
+  sourceHoldingId?: number | null;
+  destHoldingId?: number | null;
+  sourceQty?: number;
+  sourceProceeds?: number;
+  destQty?: number;
+  destCost?: number;
+  destCashSleeveHoldingId?: number | null;
+  sourceCashSleeveHoldingId?: number | null;
+  amount?: number;
+  currency?: string;
+  fromCurrency?: string;
+  fromAmount?: number;
+  toCurrency?: string;
+  toAmount?: number;
+  feeAmount?: number | null;
+  feeCurrency?: string | null;
+  feeOnSleeveCurrency?: string | null;
+  relatedHoldingId?: number | null;
+  categoryId?: number | null;
+  date?: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
 }
 
 /** POST /api/transactions/transfer body — same-currency transfers only on mobile. */

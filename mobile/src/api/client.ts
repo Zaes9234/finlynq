@@ -170,6 +170,57 @@ export async function getSession(): Promise<SessionInfo> {
   return data;
 }
 
+/**
+ * Structured-error-aware POST for /api/portfolio/operations/* + cash-sleeve.
+ *
+ * Those routes return a BARE `{ id, ... }` on 2xx but a BARE structured error
+ * `{ error, code?, currency?, blockingClosureTxIds?, ... }` on 4xx. The generic
+ * `request()` helper collapses errors to a plain string (dropping `code` /
+ * `currency` / `blockingClosureTxIds`), which the op forms need to drive the
+ * cash-sleeve gate + the edit-blocked notice. This keeps the full error body.
+ */
+async function postPortfolioOperationRaw<T>(
+  path: string,
+  body: unknown
+): Promise<OpResult<T>> {
+  const url = `${_serverUrl}${path}`;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (_authToken) headers["Authorization"] = `Bearer ${_authToken}`;
+
+  const start = Date.now();
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+    logger.error("api", `POST ${path} — network error`, { detail });
+    return { ok: false, status: 0, error: { error: `Network error: ${detail}` } };
+  }
+  const ms = Date.now() - start;
+  const parsed = await safeParseJson(res);
+
+  if (!res.ok) {
+    const errBody: OpErrorInfo =
+      parsed && typeof parsed === "object"
+        ? (parsed as OpErrorInfo)
+        : { error: `HTTP ${res.status}` };
+    if (typeof errBody.error !== "string") errBody.error = `HTTP ${res.status}`;
+    logger.warn("api", `POST ${path} → ${res.status} (${ms}ms)`, {
+      code: errBody.code,
+    });
+    return { ok: false, status: res.status, error: errBody };
+  }
+
+  logger.debug("api", `POST ${path} → ${res.status} (${ms}ms)`, {
+    shape: describeShape(parsed),
+  });
+  return { ok: true, status: res.status, data: parsed as T };
+}
+
 export const api = {
   get<T>(path: string): Promise<ApiResponse<T>> {
     return request<T>(path);
@@ -213,6 +264,18 @@ import type {
   HealthScoreData,
   GoalWithProgress,
   PortfolioOverview,
+  PortfolioHoldingRow,
+  PortfolioPerformance,
+  RealizedGainsResult,
+  DividendIncomeResult,
+  LotRow,
+  OperationLoadData,
+  PortfolioOpKey,
+  PortfolioOpBody,
+  HoldingFormData,
+  CashSleevePayload,
+  OpResult,
+  OpErrorInfo,
   TransferPayload,
   RegisterPayload,
   AccountFormData,
@@ -380,8 +443,58 @@ export const endpoints = {
   loadSampleData: () =>
     api.post<{ transactionsCreated: number }>("/api/onboarding/sample-data"),
 
-  // Portfolio (read-only on mobile) — consolidated holdings + summary.
+  // Portfolio — consolidated holdings + summary (bare JSON → request() wraps).
   getPortfolioOverview: () => api.get<PortfolioOverview>("/api/portfolio/overview"),
+
+  // GET /api/portfolio — bare array of holdings (decrypted name/symbol +
+  // currentShares + isCash). Powers the op-form pickers + holding selectors.
+  getPortfolioHoldings: () => api.get<PortfolioHoldingRow[]>("/api/portfolio"),
+
+  // Reporting — these routes DO return the { success, data } envelope, which
+  // request() passes through unchanged, so res.data is the inner payload.
+  getPortfolioPerformance: (period: string, accountId?: number | null) =>
+    api.get<PortfolioPerformance>(
+      `/api/portfolio/performance?period=${encodeURIComponent(period)}${
+        accountId != null ? `&accountId=${accountId}` : ""
+      }`
+    ),
+  getRealizedGains: (params?: string) =>
+    api.get<RealizedGainsResult>(
+      `/api/portfolio/realized-gains${params ? `?${params}` : ""}`
+    ),
+  getDividends: (params?: string) =>
+    api.get<DividendIncomeResult>(
+      `/api/portfolio/dividends${params ? `?${params}` : ""}`
+    ),
+  getPortfolioLots: (holdingId: number, accountId?: number | null) =>
+    api.get<{ lots: LotRow[] }>(
+      `/api/portfolio/lots?holdingId=${holdingId}&openOnly=1${
+        accountId != null ? `&accountId=${accountId}` : ""
+      }`
+    ),
+  // Edit-prefill load for a portfolio op (either leg id) — enveloped.
+  loadPortfolioOperation: (id: number) =>
+    api.get<OperationLoadData>(`/api/portfolio/operations/load?id=${id}`),
+
+  // Operation POSTs — structured-error aware (see postPortfolioOperationRaw).
+  postPortfolioOperation: <T = { id: number }>(
+    op: PortfolioOpKey,
+    body: PortfolioOpBody
+  ): Promise<OpResult<T>> =>
+    postPortfolioOperationRaw<T>(`/api/portfolio/operations/${op}`, body),
+
+  // Cash sleeve — 201 on create, 409 (code "duplicate_cash_sleeve") when one
+  // already exists. Callers treat the dup as success (the sleeve is present).
+  createCashSleeve: (payload: CashSleevePayload) =>
+    postPortfolioOperationRaw<{ id: number; currency: string }>(
+      "/api/portfolio/holdings/cash-sleeve",
+      payload
+    ),
+
+  // Create a new (non-cash) holding before a Buy when the symbol isn't yet in
+  // the account. Names sent plaintext; the server encrypts via buildNameFields.
+  createPortfolioHolding: (payload: HoldingFormData) =>
+    api.post<{ id: number }>("/api/portfolio", payload),
 
   // Transfer — atomic same-currency pair. Cross-currency (FX) transfers are
   // refused server-side (409 fx-currency-needs-override) and must use the web.

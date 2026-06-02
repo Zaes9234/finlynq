@@ -42,6 +42,7 @@ export default function AddTransactionScreen() {
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [hasInvestment, setHasInvestment] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -64,21 +65,31 @@ export default function AddTransactionScreen() {
   const [openPicker, setOpenPicker] = useState<null | "account" | "category" | "from" | "to">(null);
 
   useEffect(() => {
-    Promise.all([endpoints.getAccounts(), endpoints.getCategories()])
-      .then(([accRes, catRes]) => {
+    Promise.all([
+      endpoints.getAccounts(),
+      endpoints.getCategories(),
+      endpoints.getAccountBalances(),
+    ])
+      .then(([accRes, catRes, balRes]) => {
+        // Investment accounts use the dedicated Portfolio flow (buys/sells/etc.)
+        // — exclude them here, mirroring the web Add Transaction picker. The
+        // isInvestment flag lives on the dashboard balances payload.
+        const investmentIds = new Set<number>(
+          balRes.success ? balRes.data.filter((b) => b.isInvestment).map((b) => b.accountId) : []
+        );
         if (accRes.success) {
-          setAccounts(accRes.data);
-          if (accRes.data.length > 0) {
+          const usable = accRes.data.filter((a) => !investmentIds.has(a.id));
+          setAccounts(usable);
+          setHasInvestment(accRes.data.length !== usable.length);
+          if (usable.length > 0) {
             // Honor a preselected account (e.g. when launched from an account
             // detail screen); otherwise default to the first account.
             const preId = route.params?.preselectedAccountId;
             const defaultId =
-              preId != null && accRes.data.some((a) => a.id === preId)
-                ? preId
-                : accRes.data[0].id;
+              preId != null && usable.some((a) => a.id === preId) ? preId : usable[0].id;
             setSelectedAccountId(defaultId);
             setFromAccountId(defaultId);
-            const other = accRes.data.find((a) => a.id !== defaultId);
+            const other = usable.find((a) => a.id !== defaultId);
             if (other) setToAccountId(other.id);
           }
         } else {
@@ -453,6 +464,13 @@ export default function AddTransactionScreen() {
               />
             </View>
           </View>
+
+          {hasInvestment && !isTransfer && (
+            <Text style={[styles.warning, { color: colors.mutedForeground }]}>
+              Investment accounts aren’t listed here — record buys, sells and dividends in the
+              Portfolio tab.
+            </Text>
+          )}
         </ScrollView>
 
         <PickerSheet

@@ -104,6 +104,42 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
     }
   };
 
+  // Portfolio-op rows (buys/sells/transfers/swaps/income/etc.) carry a quantity
+  // or a holding link. Editing them through the generic transactions PUT would
+  // corrupt the leg pair — route them to the dedicated Portfolio OperationForm
+  // instead (the load endpoint resolves the op kind + primary leg id).
+  const isPortfolioRow =
+    (transaction.quantity != null && transaction.quantity !== 0) ||
+    transaction.portfolioHolding != null;
+
+  const handleEditInPortfolio = async () => {
+    try {
+      const res = await endpoints.loadPortfolioOperation(transaction.id);
+      if (res.success && res.data?.op) {
+        // getParent() is the tab navigator; navigate into the Portfolio tab's
+        // nested OperationForm. Cast to a permissive navigate (cross-navigator
+        // params aren't expressible through the typed parent prop).
+        const parent = navigation.getParent() as
+          | { navigate: (name: string, params?: object) => void }
+          | undefined;
+        parent?.navigate("Portfolio", {
+          screen: "OperationForm",
+          params: { op: res.data.op, editId: res.data.primaryTxId },
+        });
+      } else {
+        Alert.alert(
+          "Edit on the web",
+          "error" in res
+            ? res.error
+            : "This investment transaction can’t be edited on mobile yet."
+        );
+      }
+    } catch (e) {
+      logger.error("tx-detail", "portfolio-load threw", { detail: String(e) });
+      Alert.alert("Error", "Cannot connect to server");
+    }
+  };
+
   const handleDelete = () => {
     Alert.alert("Delete Transaction", "Are you sure you want to delete this transaction?", [
       { text: "Cancel", style: "cancel" },
@@ -242,9 +278,15 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
               </>
             ) : (
               <>
-                <TouchableOpacity onPress={() => setEditing(true)}>
-                  <Text style={[styles.actionBtn, { color: colors.primary }]}>Edit</Text>
-                </TouchableOpacity>
+                {isPortfolioRow ? (
+                  <TouchableOpacity onPress={handleEditInPortfolio}>
+                    <Text style={[styles.actionBtn, { color: colors.primary }]}>In Portfolio</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <TouchableOpacity onPress={() => setEditing(true)}>
+                    <Text style={[styles.actionBtn, { color: colors.primary }]}>Edit</Text>
+                  </TouchableOpacity>
+                )}
                 <TouchableOpacity onPress={handleDelete}>
                   <Text style={[styles.actionBtn, { color: colors.destructive }]}>Delete</Text>
                 </TouchableOpacity>

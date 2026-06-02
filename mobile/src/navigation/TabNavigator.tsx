@@ -7,7 +7,7 @@ import { useTheme } from "../theme";
 import { Icon, type IconName } from "../components/icon";
 import DashboardScreen from "../screens/DashboardScreen";
 import AccountsStack from "./AccountsStack";
-import PortfolioScreen from "../screens/PortfolioScreen";
+import PortfolioStack from "./PortfolioStack";
 import TransactionsStack from "./TransactionsStack";
 import MoreStack, { type MoreStackParamList } from "./MoreStack";
 
@@ -63,7 +63,7 @@ export default function TabNavigator() {
     >
       <Tab.Screen name="Home" component={DashboardScreen} />
       <Tab.Screen name="Accounts" component={AccountsStack} />
-      <Tab.Screen name="Portfolio" component={PortfolioScreen} />
+      <Tab.Screen name="Portfolio" component={PortfolioStack} />
       <Tab.Screen name="Transactions" component={TransactionsStack} />
       <Tab.Screen
         name="More"
