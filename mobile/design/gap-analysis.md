@@ -25,7 +25,8 @@ Everything else lives in the **More** hub.
 - **Home** — Dashboard (net worth, assets/liabilities, monthly income/expense, savings rate,
   health-score ring, top-5 budget progress, recent transactions).
 - **Accounts** — list + grouping → AccountDetail (recent tx) · **Add account** (create).
-- **Portfolio** — read-only overview (holdings, allocation %, unrealized gain/loss, day change).
+- **Portfolio** — full parity: holdings, allocation, performance / realized-gains / dividends, **and
+  all 8 investment write ops** (buy/sell/swap/transfer/income-expense/fx/brokerage). Shipped 2026-06-02.
 - **Transactions** — list + search → TransactionDetail (view / **edit** / **delete**) · **Add**
   (expense / income / **transfer**).
 - **More** hub:
@@ -50,18 +51,18 @@ and **deep configuration** — detailed below.
 | Budgets | `/budgets` | prod | ✅ have (CRUD) | keep | monthly tracking |
 | Goals | `/goals` | prod | ◑ create-only | **➕ wire edit/delete** | endpoints exist; just no UI |
 | Accounts (+ `/accounts/[id]`) | `/accounts` | prod | ◑ create-only | **➕ wire edit/delete/archive** | balances + detail done |
-| Portfolio | `/portfolio` | prod | ◑ read-only | keep read-only v1 | ops entry stays web |
+| Portfolio | `/portfolio` | prod | ✅ parity | keep | full write + reporting shipped 2026-06-02 |
 | Import | `/import` | prod | ◑ lite (pick→preview→execute) | keep lite | full pipeline stays web |
-| Settings | `/settings` | prod | ◑ subset | **➕ add currency toggle** | only connection/security/appearance today |
+| Settings | `/settings` | prod | ◑ subset | **➕ committed (P4)** | currency toggle + edit/delete + reconcile mode/thresholds → plan/mobile-settings-expansion.md |
 | What's New | `/whats-new` | prod | ✅ have | keep | announcements + read state |
-| Reports | `/reports` | prod | ❌ | 🔶 later (lite) | net-worth + spending mini-charts; Sankey/YoY stays web |
+| Reports | `/reports` | prod | ❌ | **➕ committed (P2) — full parity** | income/balance/trends + Sankey + YoY → plan/mobile-reports.md |
 | MCP Guide | `/mcp-guide` | prod | ❌ | 🖥️ web-only | setup/reference doc; link from Settings |
 | Admin / Inbox / Announcements / Feedback (admin) | `/admin*` | prod (admin) | ❌ | 🖥️ web-only | operator tooling |
 | AI Chat | `/chat` | dev | ❌ | 🔶 later (fast-track) | conversational → strong phone fit |
 | Subscriptions | `/subscriptions` | dev | ❌ | 🔶 later | simple list + next-bill |
 | Calendar | `/calendar` | dev | ❌ | 🔶 later | bills/income calendar |
 | Loans & Debt | `/loans` | dev | ❌ | 🔶 later | status glance ok; amortization web |
-| Reconcile | `/reconcile` | dev | ❌ | 🖥️ web-only | two-pane N×M; needs width |
+| Reconcile | `/reconcile` + `/inbox` | dev | ❌ | **➕ committed (P3) — inbox subset** | approve/categorize card flows + mode picker; two-pane N×M stays web → plan/mobile-reconcile-inbox.md |
 | Tax | `/tax` | dev | ❌ | 🖥️ web-only | form-heavy calculators |
 | Scenarios | `/scenarios` | dev | ❌ | 🖥️ web-only | planning calculators |
 | FIRE Calculator | `/fire` | dev | ❌ | 🖥️ web-only | calculator + Monte Carlo |
@@ -86,20 +87,20 @@ can't do. (The first two rows from the old doc are now **shipped**; kept here fo
 | ~~Transfers (account → account)~~ | yes | ✅ same-currency (Add → Transfer) | **done** |
 | ~~Edit transaction~~ | yes | ✅ TransactionDetail view/edit/delete | **done** |
 | **Cross-currency / FX transfers** | yes | ❌ refused server-side (409 `fx-currency-needs-override`) | 🖥️ web-only |
-| **Edit/delete Goals** | yes | ◑ create-only | **➕ add** (update/delete endpoints exist) |
-| **Edit/delete/archive Accounts** + reconciliation-mode picker | yes | ◑ create-only | **➕ add** edit/delete; mode-picker 🖥️ web-only |
-| **Edit/delete Categories** | yes | ◑ create-only | **➕ add** |
+| **Edit/delete Goals** | yes | ◑ create-only | **➕ committed (P4)** — endpoints exist |
+| **Edit/delete/archive Accounts** + reconciliation-mode picker | yes | ◑ create-only | **➕ committed (P4)** — edit/delete/archive + mode picker |
+| **Edit/delete Categories** | yes | ◑ create-only | **➕ committed (P4)** |
 | **Budget templates / seed-from-history / envelope / Age-of-Money** | yes | ❌ (CRUD only) | 🔶 later |
-| **Splits** (one tx across categories) | yes | ❌ | 🔶 later |
+| **Splits** (one tx across categories) | yes | ❌ | **➕ committed (P1)** → plan/mobile-splits.md |
 | **Linked transfer pairs / bulk ops / audit log / tx suggestions** | yes | ❌ | 🖥️ web-only |
 | **Advanced tx filters / sort / custom columns** | yes | ❌ (search only) | 🔶 later (basic filters) |
-| **Investment ops** (buy/sell/dividend/FX/brokerage/swap) | yes (`/portfolio/new`) | ❌ Portfolio read-only | 🖥️ web-only for entry (v1) |
-| **Portfolio sub-views** (dividends, realized gains, performance, rebalancing) | yes | ❌ | 🖥️ web-only |
+| **Investment ops** (buy/sell/dividend/FX/brokerage/swap) | yes (`/portfolio/new`) | ✅ parity (shipped 2026-06-02) | done |
+| **Portfolio sub-views** (dividends, realized gains, performance) | yes | ✅ shipped 2026-06-02 (rebalancing / ETF-xray still web) | done |
 | **Auto-categorize rules** | yes (`/settings/rules`) | ❌ | 🖥️ web-only |
-| **Reconcile / approve-each / inbox modes** | yes | ❌ | 🖥️ web-only |
+| **Reconcile / approve-each / inbox modes** | yes | ❌ | **➕ committed (P3)** — inbox approve/categorize + mode picker; two-pane web-only → plan/mobile-reconcile-inbox.md |
 | **Import: templates / staging review / connectors / email / backfill** | yes | ❌ (lite import only) | 🖥️ web-only |
-| **Net-worth trend / spending charts (Reports)** | yes | ❌ (dashboard shows numbers only) | 🔶 later (Reports-lite) |
-| **Multi-currency display toggle** | yes (Settings → General) | ❌ | **➕ add** to Settings (cheap, high value) |
+| **Net-worth trend / spending charts (Reports)** | yes | ❌ (dashboard shows numbers only) | **➕ committed (P2) — full parity** → plan/mobile-reports.md |
+| **Multi-currency display toggle** | yes (Settings → General) | ❌ | **➕ committed (P4)** to Settings |
 | **MFA / password reset / email verify** | yes | ❌ (login + register only) | 🖥️ web-only for now |
 | **Data export / backup / restore / delete account** | yes | ❌ (web `/account-deletion` satisfies Play's delete-URL req) | 🖥️ web-only |
 | **FX overrides** | yes | ❌ | 🖥️ web-only |
@@ -151,3 +152,24 @@ Transactions tab header.
 
 > Note: this doc lives in the `mobile-dev` worktree (`pf-mobile/mobile/design/`). The copy under
 > `pf-app/mobile/design/` is on the `dev` branch and will sync on the next `mobile-dev → dev` merge.
+
+---
+
+## F. Committed roadmap — 2026-06-02
+
+User committed to closing four gaps **in this order**. Each has a self-contained plan doc (repo root
+`plan/`) and ships as its own `mobile-dev` build. Backend is unchanged for all four (every REST route
+already exists; mobile holds the session DEK). Build **sequentially** — all four target `mobile-dev`
+and several touch `shared/types.ts`.
+
+| # | Feature | Scope | Plan doc |
+|---|---|---|---|
+| **P1** | **Splits** | Split editor on TransactionDetail; `/api/transactions/splits` atomic-replace. Smallest. | `plan/mobile-splits.md` |
+| **P2** | **Reports — FULL parity** | Income statement + balance sheet + trends + **Sankey** + **YoY** + custom date range. Largest (net-new SVG Sankey + date picker). | `plan/mobile-reports.md` |
+| **P3** | **Reconcile — inbox subset** | Account-anchored **Approve + Categorize** card flows + per-account mode picker. Two-pane N×M stays web. | `plan/mobile-reconcile-inbox.md` |
+| **P4** | **Settings expansion** | Display-currency toggle + edit/delete Goals/Accounts/Categories + reconcile mode picker & thresholds. | `plan/mobile-settings-expansion.md` |
+
+**Shared component:** P3 and P4 both use `src/components/inbox/ModePicker.tsx` — whichever ships first
+creates it. **Still deferred / web-only:** AI Chat, Subscriptions, Calendar, Loans, budget templates,
+rules editor, FX overrides, backup/restore, API keys, dropdown order, holding-accounts, backfill, the
+reconcile two-pane grid, MFA/password-reset.
