@@ -40,10 +40,25 @@ function todayISO(): string {
   return new Date().toISOString().split("T")[0];
 }
 
+// FINLYNQ-92 follow-up: Yahoo's chart API OMITS `meta.previousClose` whenever
+// the regular session is closed (weekends, exchange holidays, pre-/after-hours)
+// — it only returns `meta.chartPreviousClose`. For a `range=1d` request the two
+// values are identical during a session, so falling back to chartPreviousClose
+// when previousClose is missing closes the closed-market gap without changing
+// weekday/in-session behavior. Without this, every stock/ETF cache row written
+// while the market is closed gets previous_close=NULL → deriveDayChange short-
+// circuits to 0/0 for the whole calendar day (crypto is unaffected — it reads
+// change data live from CoinGecko, bypassing price_cache).
+export function resolvePreviousClose(
+  meta: { previousClose?: number | null; chartPreviousClose?: number | null } | null | undefined,
+): number | null {
+  return meta?.previousClose ?? meta?.chartPreviousClose ?? null;
+}
+
 // FINLYNQ-92: derive change + changePct from price + previousClose. Returns
 // 0/0 when previousClose is null OR zero (back-compat for pre-migration rows
 // + safety against divide-by-zero on bad data).
-function deriveDayChange(price: number, previousClose: number | null | undefined): { change: number; changePct: number } {
+export function deriveDayChange(price: number, previousClose: number | null | undefined): { change: number; changePct: number } {
   if (previousClose == null || previousClose === 0) {
     return { change: 0, changePct: 0 };
   }
@@ -130,7 +145,7 @@ async function fetchQuoteLive(symbol: string): Promise<QuoteResult | null> {
     if (!meta) return null;
 
     const price = meta.regularMarketPrice ?? 0;
-    const previousClose: number | null = meta.previousClose ?? null;
+    const previousClose: number | null = resolvePreviousClose(meta);
     const { change, changePct } = deriveDayChange(price, previousClose);
     return {
       symbol,
