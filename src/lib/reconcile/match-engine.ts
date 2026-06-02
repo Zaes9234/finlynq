@@ -43,6 +43,7 @@ import { db, schema } from "@/db";
 import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { applyRules, type TransactionRule } from "@/lib/auto-categorize";
+import { decryptRuleFields } from "@/lib/rules/crypto";
 import type { Action, ConditionGroup } from "@/lib/rules/schema";
 import { invalidateUser } from "@/lib/mcp/user-tx-cache";
 import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
@@ -183,7 +184,7 @@ export async function computeReconcileForAccount(
     }),
     loadTxRows(input.userId, input.accountId, input.dek, dateMin, dateMax),
     loadJoinRows(input.userId, input.accountId),
-    loadActiveRulesForReconcile(input.userId),
+    loadActiveRulesForReconcile(input.userId, input.dek),
   ]);
 
   // Pre-filter the bank pool to the same window. Pad symmetrically by the
@@ -476,11 +477,19 @@ function pickCategoryFromActions(actions: Action[]): number | null {
 
 /**
  * Load the user's active transaction rules in priority-descending order,
- * shaped for `applyRules()`. Read-only — no DEK needed because
- * `transaction_rules.conditions` + `actions` are JSONB (not encrypted).
+ * shaped for `applyRules()`.
+ *
+ * 2026-06-01 — rule sensitive free-text (name + payee/note/tags condition
+ * values + rename_payee.to + set_tags.tags) is now user-DEK encrypted at rest.
+ * The DEK is REQUIRED to match: each rule is decrypted before it reaches the
+ * pure matcher. A null DEK leaves the values as ciphertext, which won't
+ * substring-match any plaintext payee — "no DEK ⇒ no match" rather than a
+ * crash, and the materialize dialog simply shows no suggested category.
+ * FK ids inside actions stay plaintext, so the matcher dispatch is unaffected.
  */
 async function loadActiveRulesForReconcile(
   userId: string,
+  dek: Buffer | null,
 ): Promise<TransactionRule[]> {
   const rows = await db
     .select({
@@ -500,14 +509,21 @@ async function loadActiveRulesForReconcile(
     )
     .orderBy(desc(schema.transactionRules.priority), schema.transactionRules.id)
     .all();
-  return rows.map((r) => ({
-    id: r.id,
-    name: r.name,
-    conditions: (r.conditions ?? { all: [] }) as ConditionGroup,
-    actions: (Array.isArray(r.actions) ? r.actions : []) as Action[],
-    isActive: r.isActive,
-    priority: r.priority ?? 0,
-  }));
+  return rows.map((r) => {
+    const dec = decryptRuleFields(dek, {
+      name: r.name,
+      conditions: (r.conditions ?? { all: [] }) as ConditionGroup,
+      actions: (Array.isArray(r.actions) ? r.actions : []) as Action[],
+    });
+    return {
+      id: r.id,
+      name: dec.name ?? r.name,
+      conditions: (dec.conditions ?? { all: [] }) as ConditionGroup,
+      actions: (dec.actions ?? []) as Action[],
+      isActive: r.isActive,
+      priority: r.priority ?? 0,
+    };
+  });
 }
 
 async function loadTxRows(
@@ -835,8 +851,9 @@ export async function applyRulesToBankRows(
   }
 
   // Load active rules once; the matcher is pure so we hand the same array
-  // to every bank row.
-  const activeRules = await loadActiveRulesForReconcile(userId);
+  // to every bank row. Rules are decrypted with the same DEK that decodes the
+  // bank-row payees below (2026-06-01) — both are required to match.
+  const activeRules = await loadActiveRulesForReconcile(userId, dek);
 
   // Load the bank rows + their account is_investment flag. Cross-tenant
   // 404 guard via `userId` on the SELECT.

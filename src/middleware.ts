@@ -314,6 +314,7 @@ export function middleware(request: NextRequest) {
     pathname === "/self-hosted" ||
     pathname === "/about" ||
     pathname === "/blog" ||
+    pathname === "/roadmap" ||
     pathname === "/vs" ||
     pathname === "/glossary" ||
     pathname === "/mcp-guide" ||

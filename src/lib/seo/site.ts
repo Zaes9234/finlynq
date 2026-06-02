@@ -70,7 +70,10 @@ export const VS_META: Record<VsSlug, { name: string; blurb: string }> = {
 };
 
 /** Published blog posts. Convert to a generated list once there is >1. */
-export const BLOG_SLUGS = ["how-finlynq-encrypts-your-money"] as const;
+export const BLOG_SLUGS = [
+  "finlynq-mobile-app",
+  "how-finlynq-encrypts-your-money",
+] as const;
 
 export type StaticRoute = {
   path: string;
@@ -93,6 +96,7 @@ export const STATIC_ROUTES: StaticRoute[] = [
   { path: "/vs", changeFrequency: "monthly", priority: 0.6 },
   { path: "/glossary", changeFrequency: "monthly", priority: 0.5 },
   { path: "/blog", changeFrequency: "weekly", priority: 0.6 },
+  { path: "/roadmap", changeFrequency: "weekly", priority: 0.6 },
   { path: "/privacy", changeFrequency: "yearly", priority: 0.4 },
   { path: "/terms", changeFrequency: "yearly", priority: 0.4 },
   { path: "/account-deletion", changeFrequency: "yearly", priority: 0.3 },

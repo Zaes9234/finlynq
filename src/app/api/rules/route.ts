@@ -31,6 +31,7 @@ import {
   type ConditionGroup as ConditionGroupType,
   type Action as ActionType,
 } from "@/lib/rules/schema";
+import { encryptRuleFields, decryptRuleFields } from "@/lib/rules/crypto";
 
 const postSchema = z.object({
   name: z.string().min(1).max(120),
@@ -113,16 +114,27 @@ export async function GET(request: NextRequest) {
     fetchNames(portfolioHoldings, holdingIdSet),
   ]);
 
-  const rules = rawRules.map((r) => ({
-    ...r,
-    conditions: (r.conditions ?? { all: [] }) as ConditionGroupType,
-    actions: (Array.isArray(r.actions) ? r.actions : []) as ActionType[],
-    actionFKNames: {
-      categories: Object.fromEntries(categoryNames),
-      accounts: Object.fromEntries(accountNames),
-      holdings: Object.fromEntries(holdingNames),
-    },
-  }));
+  const rules = rawRules.map((r) => {
+    // Decrypt the rule's sensitive free-text (name + payee/note/tags condition
+    // values + rename_payee.to + set_tags.tags) for display (2026-06-01). FK ids
+    // collected above are NOT encrypted, so the name batch-load is unaffected.
+    const dec = decryptRuleFields(dek, {
+      name: r.name,
+      conditions: (r.conditions ?? { all: [] }) as ConditionGroupType,
+      actions: (Array.isArray(r.actions) ? r.actions : []) as ActionType[],
+    });
+    return {
+      ...r,
+      name: dec.name ?? r.name,
+      conditions: (dec.conditions ?? { all: [] }) as ConditionGroupType,
+      actions: (dec.actions ?? []) as ActionType[],
+      actionFKNames: {
+        categories: Object.fromEntries(categoryNames),
+        accounts: Object.fromEntries(accountNames),
+        holdings: Object.fromEntries(holdingNames),
+      },
+    };
+  });
 
   return NextResponse.json(rules);
 }
@@ -159,13 +171,21 @@ export async function POST(req: NextRequest) {
       await verifyOwnership(auth.context.userId, { holdingIds: uniqueHoldings });
     }
 
+    // Encrypt sensitive free-text AFTER FK validation (FK guards above read the
+    // plaintext condition/action ids; ciphertext is never re-validated on read).
+    const enc = encryptRuleFields(auth.context.dek, {
+      name: name.trim(),
+      conditions,
+      actions,
+    });
+
     const rule = await db
       .insert(transactionRules)
       .values({
         userId: auth.context.userId,
-        name: name.trim(),
-        conditions: conditions as unknown as object,
-        actions: actions as unknown as object,
+        name: enc.name ?? name.trim(),
+        conditions: enc.conditions as unknown as object,
+        actions: enc.actions as unknown as object,
         isActive: isActive ?? true,
         priority: priority ?? 0,
         createdAt: new Date().toISOString().split("T")[0],
@@ -173,7 +193,13 @@ export async function POST(req: NextRequest) {
       .returning()
       .get();
 
-    return NextResponse.json(rule, { status: 201 });
+    // Decrypt for the response so the client receives plaintext.
+    const decrypted = decryptRuleFields(auth.context.dek, {
+      name: rule.name,
+      conditions: (rule.conditions ?? { all: [] }) as ConditionGroupType,
+      actions: (Array.isArray(rule.actions) ? rule.actions : []) as ActionType[],
+    });
+    return NextResponse.json({ ...rule, ...decrypted }, { status: 201 });
   } catch (error: unknown) {
     if (error instanceof OwnershipError) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -220,10 +246,18 @@ export async function PUT(req: NextRequest) {
       }
     }
 
+    // Encrypt the supplied slices AFTER FK validation (2026-06-01). Passing
+    // undefined for absent fields is a no-op inside encryptRuleFields.
+    const enc = encryptRuleFields(auth.context.dek, {
+      name: updates.name !== undefined ? updates.name.trim() : undefined,
+      conditions: updates.conditions,
+      actions: updates.actions,
+    });
+
     const data: Record<string, unknown> = { updatedAt: new Date() };
-    if (updates.name !== undefined) data.name = updates.name.trim();
-    if (updates.conditions !== undefined) data.conditions = updates.conditions;
-    if (updates.actions !== undefined) data.actions = updates.actions;
+    if (updates.name !== undefined) data.name = enc.name ?? updates.name.trim();
+    if (updates.conditions !== undefined) data.conditions = enc.conditions;
+    if (updates.actions !== undefined) data.actions = enc.actions;
     if (updates.isActive !== undefined) data.isActive = updates.isActive;
     if (updates.priority !== undefined) data.priority = updates.priority;
 
@@ -238,7 +272,13 @@ export async function PUT(req: NextRequest) {
       .get();
 
     if (!rule) return NextResponse.json({ error: "Rule not found" }, { status: 404 });
-    return NextResponse.json(rule);
+    // Decrypt for the response so the client receives plaintext.
+    const decrypted = decryptRuleFields(auth.context.dek, {
+      name: rule.name,
+      conditions: (rule.conditions ?? { all: [] }) as ConditionGroupType,
+      actions: (Array.isArray(rule.actions) ? rule.actions : []) as ActionType[],
+    });
+    return NextResponse.json({ ...rule, ...decrypted });
   } catch (error: unknown) {
     if (error instanceof OwnershipError) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });

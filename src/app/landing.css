@@ -262,6 +262,95 @@ html:has(.fl-landing) body {
   border-radius: 999px;
   font-weight: 500;
 }
+/* Second hero pill ("mobile coming soon") — forced onto its own line below
+   the MCP pill, sized to content, and clickable through to the blog post. */
+.fl-landing .hero-bar-mobile {
+  display: flex;
+  width: fit-content;
+  margin-top: -14px;
+}
+.fl-landing .hero-bar-link {
+  text-decoration: none;
+  transition: border-color 0.18s ease, color 0.18s ease;
+}
+.fl-landing .hero-bar-link:hover {
+  border-color: var(--fl-amber);
+  color: var(--fl-fg);
+}
+/* ROADMAP — horizontal 4-point timeline (stacks vertical on mobile) */
+.fl-landing .roadmap-timeline {
+  list-style: none;
+  margin: 48px 0 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 28px;
+}
+.fl-landing .rm-node {
+  position: relative;
+  padding-top: 30px;
+}
+/* connector from this dot to the next */
+.fl-landing .rm-node::after {
+  content: "";
+  position: absolute;
+  top: 7px;
+  left: 14px;
+  width: calc(100% + 14px);
+  height: 1px;
+  background: var(--fl-rule-2);
+}
+.fl-landing .rm-node:last-child::after {
+  display: none;
+}
+.fl-landing .rm-dot {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: var(--fl-amber);
+  box-shadow: 0 0 0 4px var(--fl-amber-tint);
+}
+.fl-landing .rm-label {
+  font-family: var(--fl-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fl-amber);
+  margin-bottom: 8px;
+}
+.fl-landing .rm-desc {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--fl-fg-mute);
+}
+.fl-landing .roadmap-cta {
+  margin-top: 40px;
+}
+@media (max-width: 760px) {
+  .fl-landing .roadmap-timeline {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+  .fl-landing .rm-node {
+    padding-top: 0;
+    padding-left: 28px;
+    padding-bottom: 30px;
+  }
+  .fl-landing .rm-node::after {
+    top: 14px;
+    left: 5px;
+    width: 1px;
+    height: 100%;
+  }
+  .fl-landing .rm-dot {
+    top: 2px;
+    left: 0;
+  }
+}
 .fl-landing .hero-cta {
   display: flex;
   gap: 12px;

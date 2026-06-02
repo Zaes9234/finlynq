@@ -11,8 +11,10 @@
  * PATCH: update by id
  * DELETE: remove by id
  *
- * No DEK required — overrides are user-owned but plaintext (rates aren't
- * sensitive in the way payee text is).
+ * Rates are plaintext (not sensitive the way payee text is), but the optional
+ * free-text `note` IS user-DEK encrypted at rest (2026-06-01 plaintext-gap
+ * closure) — it can carry merchant/context detail. Cold-DEK writes pass
+ * through plaintext; the login sweep re-encrypts later.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -21,6 +23,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
 import { logApiError, safeErrorMessage, validateBody } from "@/lib/validate";
+import { encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -31,7 +34,11 @@ export async function GET(request: NextRequest) {
     .from(schema.fxOverrides)
     .where(eq(schema.fxOverrides.userId, auth.context.userId))
     .orderBy(schema.fxOverrides.currency, schema.fxOverrides.dateFrom);
-  return NextResponse.json(rows);
+  const decrypted = rows.map((r) => ({
+    ...r,
+    note: decryptOptional(auth.context.dek, r.note),
+  }));
+  return NextResponse.json(decrypted);
 }
 
 const isoCode = z
@@ -83,10 +90,13 @@ export async function POST(request: NextRequest) {
         dateFrom: data.dateFrom,
         dateTo: data.dateTo ?? null,
         rateToUsd: data.rateToUsd,
-        note: data.note ?? "",
+        note: encryptOptional(auth.context.dek, data.note) ?? "",
       })
       .returning();
-    return NextResponse.json(inserted[0], { status: 201 });
+    return NextResponse.json(
+      { ...inserted[0], note: decryptOptional(auth.context.dek, inserted[0]?.note) },
+      { status: 201 },
+    );
   } catch (error: unknown) {
     await logApiError("POST", "/api/fx/overrides", error, userId);
     return NextResponse.json(
@@ -118,11 +128,16 @@ export async function PATCH(request: NextRequest) {
   const parsed = validateBody(body, patchSchema);
   if (parsed.error) return parsed.error;
   const { id, ...data } = parsed.data;
+  // Encrypt the free-text note when present (2026-06-01 plaintext-gap closure).
+  const updatePayload: Record<string, unknown> = { ...data };
+  if (data.note !== undefined) {
+    updatePayload.note = encryptOptional(auth.context.dek, data.note);
+  }
 
   try {
     const updated = await db
       .update(schema.fxOverrides)
-      .set(data)
+      .set(updatePayload)
       .where(
         and(
           eq(schema.fxOverrides.id, id),
@@ -133,7 +148,9 @@ export async function PATCH(request: NextRequest) {
     if (!updated[0]) {
       return NextResponse.json({ error: "Override not found" }, { status: 404 });
     }
-    return NextResponse.json(updated[0]);
+    return NextResponse.json(
+      { ...updated[0], note: decryptOptional(auth.context.dek, updated[0].note) },
+    );
   } catch (error: unknown) {
     await logApiError("PATCH", "/api/fx/overrides", error, userId);
     return NextResponse.json(

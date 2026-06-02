@@ -58,6 +58,7 @@ import {
   type Action as ActionType,
 } from "@/lib/rules/schema";
 import { applyRulesToStagedBatch } from "@/lib/rules/apply-to-staged-batch";
+import { encryptRuleFields } from "@/lib/rules/crypto";
 
 export const dynamic = "force-dynamic";
 
@@ -244,13 +245,19 @@ export async function POST(
 
   const todayISO = new Date().toISOString().split("T")[0];
 
+  // Encrypt sensitive free-text (name + payee/note/tags condition values +
+  // rename_payee.to + set_tags.tags) AFTER the FK guards above (2026-06-01).
+  // The applyRulesToStagedBatch call below re-loads + decrypts the rule before
+  // matching. plan/encryption-plaintext-gaps.md
+  const enc = encryptRuleFields(dek, { name: synthName, conditions, actions });
+
   const inserted = await db
     .insert(schema.transactionRules)
     .values({
       userId,
-      name: synthName,
-      conditions: conditions as unknown as object,
-      actions: actions as unknown as object,
+      name: enc.name ?? synthName,
+      conditions: enc.conditions as unknown as object,
+      actions: enc.actions as unknown as object,
       isActive: true,
       priority: 0,
       createdAt: todayISO,

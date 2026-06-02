@@ -4,7 +4,7 @@ import { eq, and, desc } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
-import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { decryptNamedRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 
 export async function GET(request: NextRequest) {
@@ -27,7 +27,11 @@ export async function GET(request: NextRequest) {
     .all();
   const data = decryptNamedRows(raw, auth.context.dek, {
     accountNameCt: "accountName",
-  });
+  }).map((r) => ({
+    ...r,
+    // Free-text note is user-DEK encrypted at rest (2026-06-01).
+    note: decryptOptional(auth.context.dek, r.note),
+  }));
   return NextResponse.json(data);
 }
 
@@ -57,7 +61,7 @@ export async function POST(request: NextRequest) {
       accountId: parsed.data.accountId,
       date: parsed.data.date,
       value: parsed.data.value,
-      note: parsed.data.note ?? "",
+      note: encryptOptional(auth.context.dek, parsed.data.note) ?? "",
     }).returning().get();
     return NextResponse.json(snap, { status: 201 });
   } catch (error: unknown) {

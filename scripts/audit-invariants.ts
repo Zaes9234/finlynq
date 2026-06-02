@@ -8,7 +8,7 @@
  * one" class of regression (issues #214, #211, #230, #205 cohort) before it
  * ships, not to prove soundness.
  *
- * Seven invariants today (see CLAUDE.md "Load-bearing gotchas"):
+ * Ten invariants today (see CLAUDE.md "Load-bearing gotchas"):
  *
  *   1. sign-vs-category          — every transactions INSERT must call
  *                                  `validateSignVsCategory` or use
@@ -75,6 +75,13 @@
  *                                  "X rows auto-applied" banner and
  *                                  break the audit-trail contract
  *                                  (Inbox v4 Phase 4, 2026-05-27).
+ *  10. note-columns-encrypted     — every raw-SQL write to a registry
+ *                                  note/notes column must compute the value
+ *                                  via `encryptField` / `encryptOptional` /
+ *                                  `encNote` (free-text notes are user-DEK
+ *                                  encrypted at rest; plaintext-gap closure,
+ *                                  2026-06-01). REST Drizzle note writes are
+ *                                  covered by the Phase 1 route unit tests.
  *
  * Output:
  *   ALL INVARIANTS PASS                  (exit 0)
@@ -223,6 +230,15 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // labelForSource() handler matches on the literal but never writes it.
   "src/lib/tx-source.ts:auto-rule-source-via-helper":
     "SOURCES enum declaration — tuple member + labelForSource switch case. No DB write from this file.",
+  // register-core-tools.ts is the stdio MCP transport. Stdio has NO DEK
+  // (PF_USER_ID-scoped, plaintext writes per CLAUDE.md "Stdio MCP writes are
+  // plaintext"), so it CANNOT encrypt note/payee/tags at write time. The
+  // login-time `upgradeUserFieldEncryption` sweep re-encrypts these rows to
+  // v1: on the user's next web/HTTP login. This is the documented parked
+  // tradeoff from plan/encryption-plaintext-gaps.md — accepted as a baseline
+  // exception for the note invariant.
+  "mcp-server/register-core-tools.ts:note-columns-encrypted":
+    "stdio MCP has no DEK; writes plaintext note/payee/tags by design — the login sweep (upgradeUserFieldEncryption) encrypts them on next HTTP login.",
 };
 
 interface InvariantConfig {
@@ -403,6 +419,25 @@ const INVARIANTS: InvariantConfig[] = [
       /\bapplyRulesToBankRows\b|from\s+["']@\/lib\/reconcile\/match-engine["']/,
     helperName:
       "applyRulesToBankRows (call through src/lib/reconcile/match-engine)",
+  },
+  {
+    id: "note-columns-encrypted",
+    description:
+      "every raw-SQL write to a registry note/notes column (loans/goals/snapshots/subscriptions/fx_overrides/accounts/categories/contribution_room/recurring_transactions/net_worth_snapshots) must compute the value via encryptField / encryptOptional / encNote (plaintext-gap closure, 2026-06-01)",
+    fileGlobs: [
+      "src/",
+      "mcp-server/",
+    ],
+    // Raw-SQL write-sites only (mirrors the buildNameFields invariant shape —
+    // Drizzle `.values({ note: ... })` writes in the REST routes are harder to
+    // disambiguate from reads, so they're covered by the Phase 1 route unit
+    // tests instead). Matches an INSERT INTO a note-bearing table whose column
+    // list contains note/notes, OR a `SET note = ` / `SET notes = ` UPDATE.
+    writeSite:
+      /INSERT\s+INTO\s+(?:loans|goals|snapshots|subscriptions|fx_overrides|net_worth_snapshots|contribution_room|recurring_transactions|accounts|categories)\b[\s\S]{0,1500}?\b(?:note|notes)\b|SET\s+(?:note|notes)\s*=/i,
+    // Any of the envelope encrypt helpers present in the file satisfies it.
+    requiredHelper: /\b(?:encryptField|encryptOptional|encNote)\s*\(/,
+    helperName: "encryptField / encryptOptional / encNote",
   },
   {
     id: "buildNameFields-on-stream-d-tables",

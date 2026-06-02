@@ -51,6 +51,7 @@ import { putDEK } from "@/lib/crypto/dek-cache";
 // no plaintext source; both helpers were deleted.
 import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
 import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
+import { enqueueUpgradeUserFieldEncryption } from "@/lib/crypto/upgrade-user-fields";
 
 // Accept either {identifier, password} (preferred) OR {email, password}
 // (legacy clients). Both shapes normalise to an `identifier` string.
@@ -272,6 +273,10 @@ export async function POST(request: NextRequest) {
       // the 60-day window isn't service-key-decryptable for active users.
       // Idempotent, fire-and-forget, errors swallowed.
       enqueueUpgradeStagingEncryption(user.id, dek);
+      // Plaintext-gap closure backstop (2026-06-01): encrypt any remaining
+      // plaintext note/payee/tags columns + rule sensitive fields under the
+      // user's DEK. Idempotent, fire-and-forget. Fixes legacy/stdio plaintext.
+      enqueueUpgradeUserFieldEncryption(user.id, dek);
     }
 
     const response = NextResponse.json({ success: true });

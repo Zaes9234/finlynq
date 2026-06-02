@@ -15,6 +15,7 @@ import { stagedTransactions } from "../src/db/schema-pg";
 import { decryptField, encryptField } from "../src/lib/crypto/envelope";
 import { maybeDecryptFileBytes } from "../src/lib/crypto/file-envelope";
 import { encryptName, nameLookup } from "../src/lib/crypto/encrypted-columns";
+import { encryptRuleFields, decryptRuleFields } from "../src/lib/rules/crypto";
 import { resolveDividendsCategoryId } from "../src/lib/dividends-category";
 import {
   generateAmortizationSchedule,
@@ -1179,6 +1180,19 @@ export function registerPgTools(
   userId: string,
   dek: Buffer | null = null
 ) {
+
+  // Phase 2 (2026-06-01) — free-text note/notes columns are user-DEK encrypted
+  // at rest. DEK is in scope for every HTTP tool (same as the transaction-note
+  // path). Cold-DEK writes pass plaintext through (login sweep cleans up);
+  // reads tolerate both ciphertext and legacy plaintext.
+  // plan/encryption-plaintext-gaps.md
+  const encNote = (v: string | null | undefined): string =>
+    (dek ? encryptField(dek, v ?? "") : (v ?? "")) ?? "";
+  const decNote = (v: string | null | undefined): string | null => {
+    if (v == null || v === "") return v ?? null;
+    if (!dek) return v;
+    return tryDecryptField(dek, v) ?? v;
+  };
 
   // ── get_account_balances ───────────────────────────────────────────────────
   server.tool(
@@ -2661,7 +2675,7 @@ export function registerPgTools(
           name_ct, name_lookup, alias_ct, alias_lookup
         )
         VALUES (
-          ${userId}, ${type}, ${resolvedGroup}, ${currency ?? "CAD"}, ${note ?? ""},
+          ${userId}, ${type}, ${resolvedGroup}, ${currency ?? "CAD"}, ${encNote(note)},
           ${nameEnc.ct}, ${nameEnc.lookup}, ${aliasEnc.ct}, ${aliasEnc.lookup}
         )
         RETURNING id
@@ -4592,7 +4606,7 @@ export function registerPgTools(
       }
       if (group !== undefined) updates.push(sql`"group" = ${group}`);
       if (currency !== undefined) updates.push(sql`currency = ${currency}`);
-      if (note !== undefined) updates.push(sql`note = ${note}`);
+      if (note !== undefined) updates.push(sql`note = ${encNote(note)}`);
       if (alias !== undefined) {
         const trimmed = alias.trim();
         const aliasValue = trimmed ? trimmed : null;
@@ -4850,7 +4864,7 @@ export function registerPgTools(
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       const result = await q(db, sql`
         INSERT INTO categories (user_id, type, "group", note, name_ct, name_lookup)
-        VALUES (${userId}, ${type}, ${group ?? ""}, ${note ?? ""}, ${n.ct}, ${n.lookup})
+        VALUES (${userId}, ${type}, ${group ?? ""}, ${encNote(note)}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       return text({ success: true, data: { categoryId: result[0]?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` } });
@@ -4898,12 +4912,23 @@ export function registerPgTools(
       if (rename_to) actions.push({ kind: "rename_payee", to: rename_to });
       if (assign_tags) actions.push({ kind: "set_tags", tags: assign_tags });
 
+      // Encrypt sensitive free-text (name + payee value + rename/tags) before
+      // persisting (2026-06-01). FK ids stay plaintext so the matcher works
+      // after a decrypt. plan/encryption-plaintext-gaps.md
+      const enc = encryptRuleFields(dek, {
+        name: synthName,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        conditions: conditions as any,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        actions: actions as any,
+      });
+
       await db.execute(sql`
         INSERT INTO transaction_rules
           (user_id, name, conditions, actions, priority, is_active, created_at)
         VALUES
-          (${userId}, ${synthName}, ${JSON.stringify(conditions)}::jsonb,
-           ${JSON.stringify(actions)}::jsonb, ${priority ?? 0}, true, ${todayISO})
+          (${userId}, ${enc.name ?? synthName}, ${JSON.stringify(enc.conditions)}::jsonb,
+           ${JSON.stringify(enc.actions)}::jsonb, ${priority ?? 0}, true, ${todayISO})
       `);
       return text({
         success: true,
@@ -4937,7 +4962,7 @@ export function registerPgTools(
       }
       await db.execute(sql`
         INSERT INTO net_worth_snapshots (user_id, date, balances, note)
-        VALUES (${userId}, ${snapshotDate}, ${JSON.stringify(totalByCurrency)}, ${note ?? ""})
+        VALUES (${userId}, ${snapshotDate}, ${JSON.stringify(totalByCurrency)}, ${encNote(note)})
       `);
       return text({ success: true, data: { date: snapshotDate, balances: totalByCurrency } });
     }
@@ -4986,12 +5011,22 @@ export function registerPgTools(
         hasSideEffects: boolean;
       };
       const rules: ParsedRule[] = rawRules.map((r) => {
-        const actions = (Array.isArray(r.actions) ? r.actions : []) as ParsedRule["actions"];
+        // 2026-06-01 — decrypt rule sensitive free-text BEFORE the inline
+        // matcher runs; the probe payee/tags below are decrypted too, so both
+        // sides must be plaintext to match. FK ids stay plaintext.
+        const dec = decryptRuleFields(dek, {
+          name: String(r.name ?? ""),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          conditions: (r.conditions ?? { all: [] }) as any,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          actions: (Array.isArray(r.actions) ? r.actions : []) as any,
+        });
+        const actions = (Array.isArray(dec.actions) ? dec.actions : []) as ParsedRule["actions"];
         const hasSideEffects = actions.some((a) => a.kind === "set_account" || a.kind === "create_transfer");
         return {
           id: Number(r.id),
-          name: String(r.name ?? ""),
-          conditions: (r.conditions ?? { all: [] }) as ParsedRule["conditions"],
+          name: dec.name ?? String(r.name ?? ""),
+          conditions: (dec.conditions ?? { all: [] }) as ParsedRule["conditions"],
           actions,
           priority: Number(r.priority ?? 0),
           hasSideEffects,
@@ -7149,6 +7184,8 @@ export function registerPgTools(
         ...r,
         name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
         account_name: r.account_name_ct && dek ? decryptField(dek, r.account_name_ct) : null,
+        // Free-text note is user-DEK encrypted at rest (2026-06-01).
+        note: decNote(r.note as string | null),
       }));
       const today = new Date().toISOString().split("T")[0];
       const enriched = rows.map((r) => {
@@ -7228,7 +7265,7 @@ export function registerPgTools(
       // Stream D Phase 4 — plaintext name dropped.
       const result = await q(db, sql`
         INSERT INTO loans (user_id, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, note, name_ct, name_lookup)
-        VALUES (${userId}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${note ?? ""}, ${n.ct}, ${n.lookup})
+        VALUES (${userId}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${encNote(note)}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       return text({ success: true, data: { id: result[0]?.id, message: `Loan "${name}" created — $${principal} at ${annual_rate}% over ${term_months} months` } });
@@ -7288,7 +7325,7 @@ export function registerPgTools(
       if (payment_frequency !== undefined) updates.push(sql`payment_frequency = ${payment_frequency}`);
       if (extra_payment !== undefined) updates.push(sql`extra_payment = ${extra_payment}`);
       if (accountIdUpdate !== undefined) updates.push(sql`account_id = ${accountIdUpdate}`);
-      if (note !== undefined) updates.push(sql`note = ${note}`);
+      if (note !== undefined) updates.push(sql`note = ${encNote(note)}`);
       if (!updates.length) return err("No fields to update");
 
       await db.execute(sql`UPDATE loans SET ${sql.join(updates, sql`, `)} WHERE id = ${id} AND user_id = ${userId}`);
@@ -7518,7 +7555,9 @@ export function registerPgTools(
         FROM fx_overrides WHERE user_id = ${userId}
         ORDER BY currency, date_from DESC
       `);
-      return text({ success: true, data: rows });
+      // Free-text note is user-DEK encrypted at rest (2026-06-01).
+      const decrypted = rows.map((r) => ({ ...r, note: decNote(r.note as string | null) }));
+      return text({ success: true, data: decrypted });
     }
   );
 
@@ -7568,7 +7607,7 @@ export function registerPgTools(
       }
       const result = await q(db, sql`
         INSERT INTO fx_overrides (user_id, currency, date_from, date_to, rate_to_usd, note)
-        VALUES (${userId}, ${currency}, ${dateFrom}, ${dateToFinal}, ${rateToUsd}, ${note ?? ""})
+        VALUES (${userId}, ${currency}, ${dateFrom}, ${dateToFinal}, ${rateToUsd}, ${encNote(note)})
         RETURNING id
       `);
       return text({ success: true, data: { id: Number(result[0]?.id), currency, dateFrom, dateTo: dateToFinal, rateToUsd, action: "created" } });
@@ -7677,7 +7716,8 @@ export function registerPgTools(
         next_date: r.next_date,
         status: r.status,
         cancel_reminder_date: r.cancel_reminder_date,
-        notes: r.notes,
+        // Free-text notes is user-DEK encrypted at rest (2026-06-01).
+        notes: decNote(r.notes as string | null),
         category_id: r.category_id,
         account_id: r.account_id,
         name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
@@ -7735,7 +7775,7 @@ export function registerPgTools(
       // Stream D Phase 4 — plaintext name dropped.
       const result = await q(db, sql`
         INSERT INTO subscriptions (user_id, amount, currency, frequency, category_id, account_id, next_date, status, notes, name_ct, name_lookup)
-        VALUES (${userId}, ${amount}, ${currency ?? "CAD"}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes ?? null}, ${n.ct}, ${n.lookup})
+        VALUES (${userId}, ${amount}, ${currency ?? "CAD"}, ${cadence}, ${categoryId}, ${accountId}, ${next_billing_date}, 'active', ${notes != null ? encNote(notes) : null}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
       return text({ success: true, data: { id: Number(result[0]?.id), message: `Subscription "${name}" created — ${currency ?? "CAD"} ${amount} ${cadence}, next ${next_billing_date}` } });
@@ -7803,7 +7843,7 @@ export function registerPgTools(
       if (accountIdUpdate !== undefined) updates.push(sql`account_id = ${accountIdUpdate}`);
       if (status !== undefined) updates.push(sql`status = ${status}`);
       if (cancel_reminder_date !== undefined) updates.push(sql`cancel_reminder_date = ${cancel_reminder_date}`);
-      if (notes !== undefined) updates.push(sql`notes = ${notes}`);
+      if (notes !== undefined) updates.push(sql`notes = ${notes != null ? encNote(notes) : null}`);
       if (!updates.length) return err("No fields to update");
 
       await db.execute(sql`UPDATE subscriptions SET ${sql.join(updates, sql`, `)} WHERE id = ${id} AND user_id = ${userId}`);
@@ -7878,21 +7918,33 @@ export function registerPgTools(
           holdingNames[Number(r.id)] = r.name_ct && dek ? decryptField(dek, String(r.name_ct)) : null;
         }
       }
-      const rows = rawRows.map((r) => ({
-        id: Number(r.id),
-        name: String(r.name ?? ""),
-        conditions: r.conditions ?? { all: [] },
-        actions: Array.isArray(r.actions) ? r.actions : [],
-        is_active: r.is_active,
-        priority: Number(r.priority ?? 0),
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-        actionFKNames: {
-          categories: categoryNames,
-          accounts: accountNames,
-          holdings: holdingNames,
-        },
-      }));
+      const rows = rawRows.map((r) => {
+        // Decrypt sensitive free-text (name + payee/note/tags condition values +
+        // rename_payee.to + set_tags.tags) for display (2026-06-01). FK ids
+        // collected above are NOT encrypted, so the name batch-load is unaffected.
+        const dec = decryptRuleFields(dek, {
+          name: String(r.name ?? ""),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          conditions: (r.conditions ?? { all: [] }) as any,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          actions: (Array.isArray(r.actions) ? r.actions : []) as any,
+        });
+        return {
+          id: Number(r.id),
+          name: dec.name ?? String(r.name ?? ""),
+          conditions: dec.conditions ?? { all: [] },
+          actions: dec.actions ?? [],
+          is_active: r.is_active,
+          priority: Number(r.priority ?? 0),
+          created_at: r.created_at,
+          updated_at: r.updated_at,
+          actionFKNames: {
+            categories: categoryNames,
+            accounts: accountNames,
+            holdings: holdingNames,
+          },
+        };
+      });
       return text({ success: true, data: rows });
     }
   );
@@ -7934,8 +7986,8 @@ export function registerPgTools(
         return err("Cannot mix legacy shorthand (match_payee/assign_category) with v2 shape (conditions/actions) on the same update_rule call");
       }
 
-      let condsJson: string | undefined;
-      let actionsJson: string | undefined;
+      let condsObj: unknown | undefined;
+      let actionsObj: unknown | undefined;
 
       if (hasLegacy) {
         // Synthesize the full replacement.
@@ -7951,22 +8003,33 @@ export function registerPgTools(
           assignCategoryId = Number(cat.id);
         }
         const cleanedValue = match_payee.replace(/%/g, "");
-        condsJson = JSON.stringify({ all: [{ field: "payee", op: "contains", value: cleanedValue }] });
+        condsObj = { all: [{ field: "payee", op: "contains", value: cleanedValue }] };
         const actionsArr: Array<Record<string, unknown>> = [];
         if (assignCategoryId != null) actionsArr.push({ kind: "set_category", categoryId: assignCategoryId });
         if (rename_to != null) actionsArr.push({ kind: "rename_payee", to: rename_to });
         if (assign_tags != null) actionsArr.push({ kind: "set_tags", tags: assign_tags });
         if (actionsArr.length === 0) return err("Legacy shorthand resolves to an empty action list — pass assign_category");
-        actionsJson = JSON.stringify(actionsArr);
+        actionsObj = actionsArr;
       } else if (hasV2) {
-        if (conditions !== undefined) condsJson = JSON.stringify(conditions);
-        if (actions !== undefined) actionsJson = JSON.stringify(actions);
+        if (conditions !== undefined) condsObj = conditions;
+        if (actions !== undefined) actionsObj = actions;
       }
 
+      // Encrypt sensitive free-text (name + payee/note/tags values + rename/tags)
+      // before persisting (2026-06-01). FK ids stay plaintext. Undefined slices
+      // are no-ops inside encryptRuleFields. plan/encryption-plaintext-gaps.md
+      const enc = encryptRuleFields(dek, {
+        name,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        conditions: condsObj as any,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        actions: actionsObj as any,
+      });
+
       const updates: ReturnType<typeof sql>[] = [];
-      if (name !== undefined) updates.push(sql`name = ${name}`);
-      if (condsJson !== undefined) updates.push(sql`conditions = ${condsJson}::jsonb`);
-      if (actionsJson !== undefined) updates.push(sql`actions = ${actionsJson}::jsonb`);
+      if (name !== undefined) updates.push(sql`name = ${enc.name ?? name}`);
+      if (condsObj !== undefined) updates.push(sql`conditions = ${JSON.stringify(enc.conditions)}::jsonb`);
+      if (actionsObj !== undefined) updates.push(sql`actions = ${JSON.stringify(enc.actions)}::jsonb`);
       if (is_active !== undefined) updates.push(sql`is_active = ${is_active}`);
       if (priority !== undefined) updates.push(sql`priority = ${priority}`);
       updates.push(sql`updated_at = NOW()`);
@@ -8140,8 +8203,17 @@ export function registerPgTools(
       const payeeLower = payee.toLowerCase();
       const matchedRules: Array<{ id: number; name: string; assignCategoryId: number | null; assignTags: string | null; renameTo: string | null }> = [];
       for (const r of rules) {
-        const conditions = (r.conditions ?? { all: [] }) as { all: Array<Record<string, unknown>> };
-        const actions = (Array.isArray(r.actions) ? r.actions : []) as Array<Record<string, unknown>>;
+        // 2026-06-01 — decrypt rule sensitive free-text before matching against
+        // the plaintext payee input. FK ids stay plaintext.
+        const dec = decryptRuleFields(dek, {
+          name: String(r.name ?? ""),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          conditions: (r.conditions ?? { all: [] }) as any,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          actions: (Array.isArray(r.actions) ? r.actions : []) as any,
+        });
+        const conditions = (dec.conditions ?? { all: [] }) as { all: Array<Record<string, unknown>> };
+        const actions = (Array.isArray(dec.actions) ? dec.actions : []) as Array<Record<string, unknown>>;
         // Probe — payee + amount only (this tool's input domain).
         const conds = conditions.all ?? [];
         if (conds.length === 0) continue;
@@ -8182,7 +8254,7 @@ export function registerPgTools(
         }
         matchedRules.push({
           id: Number(r.id),
-          name: String(r.name ?? ""),
+          name: dec.name ?? String(r.name ?? ""),
           assignCategoryId,
           assignTags,
           renameTo,

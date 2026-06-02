@@ -12,6 +12,16 @@
  * Phase 3 extensions:
  *   - transaction_splits: note, description, tags
  *
+ * Plaintext-gap closure (2026-06-01) — `encryptOptional` / `decryptOptional`:
+ *   - free-text note columns: loans.note, goals.note, snapshots.note,
+ *     subscriptions.notes, fx_overrides.note, contribution_room.note,
+ *     recurring_transactions.{payee,note}, plus MCP-write-only accounts.note /
+ *     categories.note. Registry: src/lib/crypto/user-encrypted-registry.ts.
+ *   - transaction_rules sensitive fields (name + payee/note/tags condition
+ *     values + rename_payee.to + set_tags.tags) via src/lib/rules/crypto.ts.
+ *   - Login sweep `upgradeUserFieldEncryption` is the backstop for legacy /
+ *     stdio / email-import plaintext. → plan/encryption-plaintext-gaps.md
+ *
  * Stream D (2026-04-24):
  *   - accounts: name, alias
  *   - categories: name
@@ -37,7 +47,45 @@
  */
 
 import { createHmac } from "crypto";
-import { encryptField, decryptField } from "./envelope";
+import { encryptField, decryptField, tryDecryptField } from "./envelope";
+
+// ─── Optional free-text envelope columns (2026-06-01) ───────────────────────
+//
+// Plaintext-gap closure plan (plan/encryption-plaintext-gaps.md). These two
+// helpers cover the "optional, ciphertext-only, null/DEK-safe" shape used by
+// the free-text `note`/`notes` columns on goals/loans/snapshots/subscriptions/
+// fx_overrides/contribution_room/recurring_transactions. Unlike the Stream D
+// `name` columns there is no `name_lookup` HMAC sibling — notes are never
+// queried by exact match, only displayed.
+//
+// Contract:
+//   - Cold DEK (`dek == null`) writes pass plaintext through unchanged; the
+//     login sweep (upgradeUserFieldEncryption) re-encrypts it on next login.
+//   - Empty/null inputs pass through unchanged (no `v1:` on empty strings).
+//   - Reads tolerate legacy plaintext (`tryDecryptField` passthrough) and
+//     surface the raw value rather than crashing on auth-tag failure.
+
+/** Encrypt an optional free-text value. Returns the value unchanged when the
+ *  DEK is null (plaintext passthrough) or when the value is null/empty. */
+export function encryptOptional(
+  dek: Buffer | null,
+  v: string | null | undefined,
+): string | null {
+  if (v == null || v === "") return v ?? null;
+  return dek ? encryptField(dek, v) : v;
+}
+
+/** Decrypt an optional free-text value. Tolerates legacy plaintext and a null
+ *  DEK (returns the stored value unchanged). On auth-tag failure returns the
+ *  raw ciphertext rather than throwing (the `?? v` fallback). */
+export function decryptOptional(
+  dek: Buffer | null,
+  v: string | null | undefined,
+): string | null {
+  if (v == null) return null;
+  if (!dek) return v;
+  return tryDecryptField(dek, v) ?? v;
+}
 
 /** Columns on `transactions` that are ciphertext-at-rest in Phase 1.
  *  `portfolioHolding` was removed by Phase 5 (2026-04-29) — the FK

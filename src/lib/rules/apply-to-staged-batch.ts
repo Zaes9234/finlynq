@@ -76,6 +76,7 @@ import { decryptStaged, encryptStaged } from "@/lib/crypto/staging-envelope";
 import { tryDecryptField, encryptField, decryptField } from "@/lib/crypto/envelope";
 import { applyRules, type TransactionRule, type TransactionInput } from "@/lib/auto-categorize";
 import { computePureActionPatch } from "@/lib/rules/execute";
+import { decryptRuleFields } from "@/lib/rules/crypto";
 import type { Action, ConditionGroup } from "@/lib/rules/schema";
 import { defaultHoldingForInvestmentAccount } from "@/lib/investment-account";
 import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
@@ -148,14 +149,23 @@ export async function applyRulesToStagedBatch(
     }>;
 
   const activeRules: TransactionRule[] = ruleRows
-    .map((r) => ({
-      id: r.id,
-      name: r.name,
-      conditions: (r.conditions ?? { all: [] }) as ConditionGroup,
-      actions: (Array.isArray(r.actions) ? r.actions : []) as Action[],
-      isActive: r.isActive,
-      priority: r.priority,
-    }))
+    .map((r) => {
+      // 2026-06-01 — decrypt rule sensitive free-text before matching. The DEK
+      // is the function param (same one that decodes the staged-row payees).
+      const dec = decryptRuleFields(dek, {
+        name: r.name,
+        conditions: (r.conditions ?? { all: [] }) as ConditionGroup,
+        actions: (Array.isArray(r.actions) ? r.actions : []) as Action[],
+      });
+      return {
+        id: r.id,
+        name: dec.name ?? r.name,
+        conditions: (dec.conditions ?? { all: [] }) as ConditionGroup,
+        actions: (dec.actions ?? []) as Action[],
+        isActive: r.isActive,
+        priority: r.priority,
+      };
+    })
     // Stable sort: priority DESC, id ASC — first-match-wins semantics from
     // `applyRules()` already does the priority sort, but we resort here so the
     // ownership pre-fetch below is deterministic.

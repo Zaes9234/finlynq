@@ -4,7 +4,7 @@ import { eq, and, inArray } from "drizzle-orm";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, AppError } from "@/lib/validate";
-import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { buildNameFields, decryptNamedRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
 import { computeGoalProgress } from "@/lib/goals-progress";
 
 const postSchema = z.object({
@@ -137,6 +137,8 @@ export async function GET(request: NextRequest) {
       const accounts = linked?.names ?? [];
       return {
         ...g,
+        // Free-text note is user-DEK encrypted at rest (2026-06-01).
+        note: decryptOptional(auth.context.dek, g.note),
         accountIds,
         accounts,
         // Legacy compat — first linked account name. Existing UI consumers
@@ -214,7 +216,7 @@ export async function POST(request: NextRequest) {
       accountId: accountIds[0] ?? null,
       priority: d.priority ?? 1,
       status: d.status ?? "active",
-      note: d.note ?? "",
+      note: encryptOptional(auth.context.dek, d.note) ?? "",
       ...enc,
     }).returning({ id: schema.goals.id });
     const newId = inserted[0]?.id;
@@ -265,6 +267,10 @@ export async function PUT(request: NextRequest) {
     // Build the UPDATE set including the legacy `accountId` mirror only when
     // `accountIds` was supplied (issue #130 — keep first id as legacy fallback).
     const updatePayload: Record<string, unknown> = { ...data, ...enc };
+    // Encrypt the free-text note when present (2026-06-01 plaintext-gap closure).
+    if (data.note !== undefined) {
+      updatePayload.note = encryptOptional(auth.context.dek, data.note);
+    }
     if (replaceAccountIds !== null) {
       updatePayload.accountId = replaceAccountIds[0] ?? null;
     }

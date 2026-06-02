@@ -10,7 +10,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
-import { buildNameFields, decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { buildNameFields, decryptNamedRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 // Issue #213 — shared YYYY-MM-DD validator (regex + leap-year/Feb-30 round-trip).
 import { ymdDate, parseYmdSafe } from "../../../../mcp-server/lib/date-validators";
@@ -75,7 +75,11 @@ export async function GET(request: NextRequest) {
   const loans = decryptNamedRows(rawLoans, auth.context.dek, {
     nameCt: "name",
     accountNameCt: "accountName",
-  });
+  }).map((l) => ({
+    ...l,
+    // Free-text note is user-DEK encrypted at rest (2026-06-01).
+    note: decryptOptional(auth.context.dek, l.note),
+  }));
 
   // Add amortization summary for each loan
   const withSummary = loans.map((loan) => {
@@ -174,7 +178,7 @@ export async function POST(request: NextRequest) {
       paymentAmount: d.paymentAmount,
       paymentFrequency: d.paymentFrequency ?? "monthly",
       extraPayment: d.extraPayment ?? 0,
-      note: d.note ?? "",
+      note: encryptOptional(auth.context.dek, d.note) ?? "",
       ...enc,
     }).returning().get();
 
@@ -205,8 +209,13 @@ export async function PUT(request: NextRequest) {
     if (name !== undefined) toEncrypt.name = name;
     const enc = buildNameFields(auth.context.dek, toEncrypt);
     if (data.currency) data.currency = data.currency.toUpperCase();
+    const updatePayload: Record<string, unknown> = { ...data, ...enc };
+    // Encrypt the free-text note when present (2026-06-01 plaintext-gap closure).
+    if (data.note !== undefined) {
+      updatePayload.note = encryptOptional(auth.context.dek, data.note);
+    }
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const loan = await db.update(schema.loans).set({ ...data, ...enc } as any).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId))).returning().get();
+    const loan = await db.update(schema.loans).set(updatePayload as any).where(and(eq(schema.loans.id, id), eq(schema.loans.userId, auth.context.userId))).returning().get();
     return NextResponse.json(loan);
   } catch (error: unknown) {
     if (error instanceof OwnershipError) {

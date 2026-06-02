@@ -327,6 +327,15 @@ async function autoCategory(sqlite: PgCompatDb, userId: string, payee: string): 
   //     set_portfolio_holding, set_entered_currency — are IGNORED so the
   //     stdio write path can't fire a side-effect action without the user's
   //     explicit hand on the wheel).
+  //
+  // 2026-06-01 — rule condition values (payee) are now user-DEK encrypted at
+  // rest. Stdio has NO DEK (plaintext, PF_USER_ID-scoped), so it cannot decrypt
+  // them: an encrypted `payee/contains` condition value won't substring-match
+  // the plaintext `payee` probe, and the rule silently won't fire. This is the
+  // PARKED tradeoff from plan/encryption-plaintext-gaps.md — stdio rule
+  // matching returns when self-hosted gets a single server-held key. The
+  // historical-frequency fallback below still works (it reads the user's own
+  // plaintext-payee history, which is plaintext over stdio writes).
   const rules = await sqlite.prepare(
     `SELECT id, name, conditions, actions, is_active, priority
      FROM transaction_rules

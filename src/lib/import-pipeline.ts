@@ -12,6 +12,7 @@ import {
 import { upsertBankTransaction, type BankLedgerSource } from "./bank-ledger";
 import { applyRulesToBatch, type TransactionRule } from "./auto-categorize";
 import { computePureActionPatch } from "./rules/execute";
+import { decryptRuleFields } from "./rules/crypto";
 import type { ConditionGroup, Action } from "./rules/schema";
 import { normalizeDate, parseAmount as parseAmountStr } from "./csv-parser";
 import { encryptField, decryptField, tryDecryptField } from "./crypto/envelope";
@@ -604,14 +605,23 @@ export async function executeImport(
         isActive: boolean;
         priority: number;
       }>;
-    const activeRules: TransactionRule[] = rawRules.map((r) => ({
-      id: r.id,
-      name: r.name,
-      conditions: (r.conditions ?? { all: [] }) as ConditionGroup,
-      actions: (Array.isArray(r.actions) ? r.actions : []) as Action[],
-      isActive: r.isActive,
-      priority: r.priority,
-    }));
+    const activeRules: TransactionRule[] = rawRules.map((r) => {
+      // 2026-06-01 — decrypt rule sensitive free-text before matching. Without a
+      // DEK the values stay ciphertext and simply won't match (no crash).
+      const dec = decryptRuleFields(userDek ?? null, {
+        name: r.name,
+        conditions: (r.conditions ?? { all: [] }) as ConditionGroup,
+        actions: (Array.isArray(r.actions) ? r.actions : []) as Action[],
+      });
+      return {
+        id: r.id,
+        name: dec.name ?? r.name,
+        conditions: (dec.conditions ?? { all: [] }) as ConditionGroup,
+        actions: (dec.actions ?? []) as Action[],
+        isActive: r.isActive,
+        priority: r.priority,
+      };
+    });
 
     if (activeRules.length > 0) {
       const uncategorized = toInsert.filter((r) => !r.categoryId);

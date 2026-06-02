@@ -42,6 +42,7 @@ import { deriveKEK, unwrapDEK } from "@/lib/crypto/envelope";
 import { putDEK } from "@/lib/crypto/dek-cache";
 import { enqueueCanonicalizePortfolioNames } from "@/lib/crypto/stream-d-canonicalize-portfolio";
 import { enqueueUpgradeStagingEncryption } from "@/lib/email-import/upgrade-staging-encryption";
+import { enqueueUpgradeUserFieldEncryption } from "@/lib/crypto/upgrade-user-fields";
 
 const DEMO_IDENTIFIER = "demo@finlynq.com";
 const DEMO_PASSWORD = "finlynq-demo";
@@ -173,6 +174,8 @@ export async function GET(request: NextRequest) {
       // demo experience matches what a real user gets.
       enqueueCanonicalizePortfolioNames(user.id, dek);
       enqueueUpgradeStagingEncryption(user.id, dek);
+      // Plaintext-gap closure backstop (2026-06-01) — see login route.
+      enqueueUpgradeUserFieldEncryption(user.id, dek);
     }
 
     // Build the absolute redirect URL from the X-Forwarded-* headers Caddy

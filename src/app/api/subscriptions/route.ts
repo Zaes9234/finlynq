@@ -6,7 +6,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { requireDevMode } from "@/lib/require-dev-mode";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
-import { buildNameFields, decryptNamedRows, decryptTxRows } from "@/lib/crypto/encrypted-columns";
+import { buildNameFields, decryptNamedRows, decryptTxRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
 
 const createSchema = z.object({
@@ -57,11 +57,13 @@ export async function GET(request: NextRequest) {
   // Stream D: decrypt joined name columns. Sort then happens in memory by
   // (status, name) since `ORDER BY name` on the SQL side won't sort encrypted
   // rows correctly.
-  const decrypted = decryptNamedRows(rawSubs, auth.context.dek, {
+  const decrypted = (decryptNamedRows(rawSubs, auth.context.dek, {
     nameCt: "name",
     categoryNameCt: "categoryName",
     accountNameCt: "accountName",
-  }) as Array<typeof rawSubs[number] & { name: string | null; categoryName: string | null; accountName: string | null }>;
+  }) as Array<typeof rawSubs[number] & { name: string | null; categoryName: string | null; accountName: string | null }>)
+    // Free-text `notes` is user-DEK encrypted at rest (2026-06-01).
+    .map((r) => ({ ...r, notes: decryptOptional(auth.context.dek, r.notes) }));
   const subs = decrypted.sort((a, b) => {
     const s = (a.status ?? "").localeCompare(b.status ?? "");
     if (s !== 0) return s;
@@ -159,7 +161,7 @@ export async function POST(request: NextRequest) {
         nextDate: d.nextDate || null,
         status: d.status ?? "active",
         cancelReminderDate: d.cancelReminderDate || null,
-        notes: d.notes || null,
+        notes: encryptOptional(auth.context.dek, d.notes || null),
         ...enc,
       })
       .returning()
@@ -209,6 +211,11 @@ export async function PUT(request: NextRequest) {
     const enc = typeof rawName === "string"
       ? buildNameFields(auth.context.dek, { name: rawName })
       : {};
+    // Encrypt the free-text `notes` when present (2026-06-01 plaintext-gap closure).
+    const rawNotes = (data as Record<string, unknown>).notes;
+    if (typeof rawNotes === "string") {
+      (data as Record<string, unknown>).notes = encryptOptional(auth.context.dek, rawNotes);
+    }
     const sub = await db
       .update(schema.subscriptions)
       .set({ ...data, ...enc })
