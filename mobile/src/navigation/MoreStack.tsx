@@ -16,6 +16,7 @@ import IncomeStatementScreen from "../screens/IncomeStatementScreen";
 import BalanceSheetScreen from "../screens/BalanceSheetScreen";
 import TrendsScreen from "../screens/TrendsScreen";
 import CashFlowSankeyScreen from "../screens/CashFlowSankeyScreen";
+import YearOverYearScreen from "../screens/YearOverYearScreen";
 
 /** Date range + display currency threaded from the Reports hub to a detail
  *  screen (trends/sankey/income-statement responses don't all carry currency). */
@@ -46,6 +47,7 @@ export type MoreStackParamList = {
   BalanceSheet: { endDate: string; displayCurrency: string };
   Trends: ReportRangeRouteParams;
   CashFlowSankey: ReportRangeRouteParams;
+  YearOverYear: { displayCurrency: string };
 };
 
 const Stack = createNativeStackNavigator<MoreStackParamList>();
@@ -85,6 +87,7 @@ export default function MoreStack() {
       <Stack.Screen name="BalanceSheet" component={BalanceSheetScreen} />
       <Stack.Screen name="Trends" component={TrendsScreen} />
       <Stack.Screen name="CashFlowSankey" component={CashFlowSankeyScreen} />
+      <Stack.Screen name="YearOverYear" component={YearOverYearScreen} />
     </Stack.Navigator>
   );
 }

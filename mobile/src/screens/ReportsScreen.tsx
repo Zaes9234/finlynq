@@ -135,7 +135,12 @@ export default function ReportsScreen() {
       sub: "Sankey: where money flows",
       onPress: () => navigation.navigate("CashFlowSankey", rangeParams),
     },
-    // Year over year link is added in the next phase.
+    {
+      icon: "transfer",
+      label: "Year over year",
+      sub: "Compare two calendar years",
+      onPress: () => navigation.navigate("YearOverYear", { displayCurrency }),
+    },
   ];
 
   return (
