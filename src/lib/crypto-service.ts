@@ -2,7 +2,7 @@
 // Caches prices in priceCache table with "CRYPTO:" prefix
 
 import { db, schema } from "@/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
@@ -98,6 +98,110 @@ export async function getCryptoPrices(coinIds: string[]): Promise<CryptoPrice[]>
   } catch {
     return [];
   }
+}
+
+// Bulk cache lookup for crypto spot prices on a single date. Returns a map of
+// "CRYPTO:<SYMBOL>" -> { price, currency } for the rows that exist. Mirrors
+// price-service's readPriceCacheBulk (the stock equivalent). Crypto prices are
+// always cached in CAD (see cacheCryptoPrice / vs_currency=cad).
+async function readCryptoCacheBulk(
+  symbols: string[],
+  date: string,
+): Promise<Map<string, { price: number; currency: string }>> {
+  const out = new Map<string, { price: number; currency: string }>();
+  if (symbols.length === 0) return out;
+  const cacheSymbols = [...new Set(symbols.map((s) => `CRYPTO:${s.toUpperCase()}`))];
+  try {
+    const rows = await db
+      .select()
+      .from(schema.priceCache)
+      .where(and(inArray(schema.priceCache.symbol, cacheSymbols), eq(schema.priceCache.date, date)));
+    for (const r of rows) out.set(r.symbol, { price: r.price, currency: r.currency ?? "CAD" });
+  } catch {
+    // A cache-read failure degrades to "all misses" -> live fetch below.
+  }
+  return out;
+}
+
+// Pure partition: given the requested (coinId, symbol) pairs and the set of
+// "CRYPTO:<SYMBOL>" keys present in today's cache, decide which come from cache
+// (hits) vs need a live CoinGecko fetch (misses). De-dupes by coinId (keeping
+// the first symbol seen) and normalizes symbols to upper-case so the cache key
+// format matches cacheCryptoPrice. Exported for unit testing.
+export function splitCryptoCacheHits(
+  coins: Array<{ coinId: string; symbol: string }>,
+  cachedSymbolKeys: Set<string>,
+): { hits: Array<{ coinId: string; symbol: string }>; misses: Array<{ coinId: string; symbol: string }> } {
+  const uniq = new Map<string, string>(); // coinId -> SYMBOL (upper)
+  for (const c of coins) {
+    if (!c.coinId || !c.symbol) continue;
+    if (!uniq.has(c.coinId)) uniq.set(c.coinId, c.symbol.toUpperCase());
+  }
+  const hits: Array<{ coinId: string; symbol: string }> = [];
+  const misses: Array<{ coinId: string; symbol: string }> = [];
+  for (const [coinId, symbol] of uniq) {
+    if (cachedSymbolKeys.has(`CRYPTO:${symbol}`)) hits.push({ coinId, symbol });
+    else misses.push({ coinId, symbol });
+  }
+  return { hits, misses };
+}
+
+/**
+ * Cache-first spot prices for VALUATION (price only). The crypto analogue of
+ * price-service's `fetchMultipleQuotes`: read price_cache for today in one
+ * query, fetch only the misses live (which also writes the cache), and merge.
+ *
+ * On a cache HIT the rich fields (change24h, changePct24h, marketCap, image)
+ * are NOT reconstructed — they aren't stored in price_cache, so a hit returns
+ * `price` with those fields zeroed/undefined (same lossiness as the stock cache
+ * path). Callers that need rich display data (the /portfolio/overview and
+ * /portfolio/crypto pages) must keep using `getCryptoPrices` (live). Use THIS
+ * for the snapshot-rebuild / net-worth-history loop so a ~200-day rebuild makes
+ * ~1 CoinGecko call instead of ~200 (and re-runs hit cache).
+ *
+ * Each entry passes BOTH the CoinGecko coin id and the holding's base symbol so
+ * the returned `symbol` matches what symbol-keyed callers look up by, even when
+ * CoinGecko's returned symbol differs (e.g. MATIC vs POL share matic-network).
+ */
+export async function getCryptoSpotPrices(
+  coins: Array<{ coinId: string; symbol: string }>,
+): Promise<CryptoPrice[]> {
+  if (coins.length === 0) return [];
+  const today = new Date().toISOString().split("T")[0];
+  const symbols = coins.filter((c) => c.coinId && c.symbol).map((c) => c.symbol);
+  const cacheMap = await readCryptoCacheBulk(symbols, today);
+  const { hits, misses } = splitCryptoCacheHits(coins, new Set(cacheMap.keys()));
+
+  const out: CryptoPrice[] = [];
+  for (const h of hits) {
+    const row = cacheMap.get(`CRYPTO:${h.symbol}`);
+    if (!row) continue; // defensive — splitCryptoCacheHits keyed off the same set
+    out.push({
+      id: h.coinId,
+      symbol: h.symbol,
+      name: h.symbol,
+      price: row.price,
+      change24h: 0,
+      changePct24h: 0,
+      marketCap: 0,
+      image: undefined,
+    });
+  }
+
+  if (misses.length > 0) {
+    // Live fetch for the misses; getCryptoPrices() also writes price_cache, so
+    // the next call (e.g. the next day in a rebuild) hits the cache instead.
+    const live = await getCryptoPrices(misses.map((m) => m.coinId));
+    const liveById = new Map(live.map((p) => [p.id, p]));
+    for (const m of misses) {
+      const lp = liveById.get(m.coinId);
+      // Re-key to the CALLER's symbol so downstream symbol-keyed lookups resolve
+      // even when CoinGecko returns a different symbol for the same coin id.
+      if (lp) out.push({ ...lp, symbol: m.symbol });
+    }
+  }
+
+  return out;
 }
 
 export async function searchCrypto(query: string): Promise<CryptoSearchResult[]> {

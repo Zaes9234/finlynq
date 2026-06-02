@@ -240,10 +240,13 @@ async function fetchYahooRateToUsd(currency: string, date: string): Promise<numb
 async function fetchCryptoRateToUsd(currency: string): Promise<number | null> {
   if (currency === "USDC" || currency === "USDT") return 1;
   try {
-    const { getCryptoPrices, symbolToCoinGeckoId } = await import("@/lib/crypto-service");
+    const { getCryptoSpotPrices, symbolToCoinGeckoId } = await import("@/lib/crypto-service");
     const id = symbolToCoinGeckoId(currency);
     if (!id) return null;
-    const prices = await getCryptoPrices([id]);
+    // Cache-first: getCryptoSpotPrices reads today's price_cache before any
+    // CoinGecko call. Returns the same CAD price as getCryptoPrices did, so the
+    // (pre-existing) rate-to-usd value is unchanged — only the cache read is new.
+    const prices = await getCryptoSpotPrices([{ coinId: id, symbol: currency }]);
     const match = prices.find((p) => p.id === id);
     return match && match.price > 0 ? match.price : null;
   } catch {

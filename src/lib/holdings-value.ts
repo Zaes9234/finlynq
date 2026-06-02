@@ -14,7 +14,7 @@ import { db, schema } from "@/db";
 import { and, eq, isNotNull, lte, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { fetchMultipleQuotes, fetchMultipleQuotesAtDate } from "@/lib/price-service";
-import { getCryptoPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
+import { getCryptoSpotPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, getRate } from "@/lib/fx-service";
 import { isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
@@ -211,15 +211,24 @@ export async function getHoldingsValueByAccount(
         : await fetchMultipleQuotesAtDate(stockSymbols, asOfDate))
     : new Map();
 
-  const cgIds: string[] = [];
+  // Cache-first crypto spot prices (price-only). Pass both the CoinGecko coin
+  // id AND the holding's base symbol so the returned price re-keys to the symbol
+  // `cryptoByUpperSymbol` looks up by. getCryptoSpotPrices reads today's
+  // price_cache first and only calls CoinGecko for misses — so a multi-day
+  // snapshot rebuild makes ~1 call per coin instead of one per day.
+  const cgPairs: Array<{ coinId: string; symbol: string }> = [];
+  const seenCg = new Set<string>();
   for (const h of holdings) {
     if (h.isCrypto === 1 || isCrypto(h.symbol)) {
       const base = (h.symbol ?? "").toUpperCase().split("-")[0];
-      const cg = symbolToCoinGeckoId(base);
-      if (cg && !cgIds.includes(cg)) cgIds.push(cg);
+      const cg = base ? symbolToCoinGeckoId(base) : null;
+      if (cg && !seenCg.has(cg)) {
+        seenCg.add(cg);
+        cgPairs.push({ coinId: cg, symbol: base });
+      }
     }
   }
-  const cryptoPrices = cgIds.length > 0 ? await getCryptoPrices(cgIds) : [];
+  const cryptoPrices = cgPairs.length > 0 ? await getCryptoSpotPrices(cgPairs) : [];
   const cryptoByUpperSymbol = new Map(cryptoPrices.map(p => [p.symbol.toUpperCase(), p]));
 
   // Accumulate market value per accountId, converting holding currency -> account currency via FX
