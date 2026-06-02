@@ -14,7 +14,7 @@ import { db, schema } from "@/db";
 import { and, eq, isNotNull, lte, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { fetchMultipleQuotes, fetchMultipleQuotesAtDate } from "@/lib/price-service";
-import { getCryptoSpotPrices, symbolToCoinGeckoId } from "@/lib/crypto-service";
+import { getCryptoSpotPrices, getCryptoPricesAtDate, symbolToCoinGeckoId } from "@/lib/crypto-service";
 import { getLatestFxRate, getRate } from "@/lib/fx-service";
 import { isSupportedCurrency, isMetalCurrency } from "@/lib/fx/supported-currencies";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
@@ -211,11 +211,13 @@ export async function getHoldingsValueByAccount(
         : await fetchMultipleQuotesAtDate(stockSymbols, asOfDate))
     : new Map();
 
-  // Cache-first crypto spot prices (price-only). Pass both the CoinGecko coin
-  // id AND the holding's base symbol so the returned price re-keys to the symbol
-  // `cryptoByUpperSymbol` looks up by. getCryptoSpotPrices reads today's
-  // price_cache first and only calls CoinGecko for misses — so a multi-day
-  // snapshot rebuild makes ~1 call per coin instead of one per day.
+  // Cache-first crypto prices (price-only). Pass both the CoinGecko coin id AND
+  // the holding's base symbol so the returned price re-keys to the symbol
+  // `cryptoByUpperSymbol` looks up by. For TODAY use getCryptoSpotPrices (live,
+  // cached); for a PAST snapshot date use getCryptoPricesAtDate so crypto is
+  // valued at its HISTORICAL price (mirrors the stock fetchMultipleQuotesAtDate
+  // branch above) instead of today's price. Both read price_cache first, so a
+  // multi-day snapshot rebuild makes ~1 CoinGecko call per coin.
   const cgPairs: Array<{ coinId: string; symbol: string }> = [];
   const seenCg = new Set<string>();
   for (const h of holdings) {
@@ -228,7 +230,11 @@ export async function getHoldingsValueByAccount(
       }
     }
   }
-  const cryptoPrices = cgPairs.length > 0 ? await getCryptoSpotPrices(cgPairs) : [];
+  const cryptoPrices = cgPairs.length === 0
+    ? []
+    : isToday
+      ? await getCryptoSpotPrices(cgPairs)
+      : await getCryptoPricesAtDate(cgPairs, asOfDate);
   const cryptoByUpperSymbol = new Map(cryptoPrices.map(p => [p.symbol.toUpperCase(), p]));
 
   // Accumulate market value per accountId, converting holding currency -> account currency via FX
