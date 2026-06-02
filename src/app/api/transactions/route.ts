@@ -18,7 +18,8 @@ import {
 import { canEditPortfolioRow } from "@/lib/portfolio/operations";
 import type { TxRowForLots } from "@/lib/portfolio/lots/types";
 import { db, schema } from "@/db";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
+import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { isSortableColumnId } from "@/lib/transactions/columns";
@@ -506,6 +507,10 @@ export async function POST(request: NextRequest) {
       const ctx = await buildLotContext(auth.userId, auth.dek);
       await applyLotEffectsForTx(tx as TxRowForLots, ctx);
     }
+    // Snapshot history is stale from this date forward for investment rows.
+    if (tx && tx.portfolioHoldingId != null) {
+      await markSnapshotsDirty(auth.userId, tx.date);
+    }
     return NextResponse.json(
       signWarn ? { ...tx, warning: signWarn.message } : tx,
       { status: 201 },
@@ -640,6 +645,11 @@ export async function PUT(request: NextRequest) {
       const ctx = await buildLotContext(auth.userId, auth.dek);
       await applyLotEffectsForTx(tx as TxRowForLots, ctx);
     }
+    // Snapshot history is stale from this date forward for investment rows
+    // (a back-dated edit can move the affected date earlier than today).
+    if (tx && tx.portfolioHoldingId != null) {
+      await markSnapshotsDirty(auth.userId, tx.date);
+    }
     return NextResponse.json(
       signWarn ? { ...tx, warning: signWarn.message } : tx,
     );
@@ -760,6 +770,27 @@ export async function DELETE(request: NextRequest) {
   }
   const allIds = Array.from(idSet);
 
+  // Snapshot freshness — if any row in the delete set touches an investment
+  // holding, capture the earliest affected date BEFORE the rows are gone so we
+  // can mark snapshots dirty after the commit. Best-effort.
+  let snapshotDirtyFrom: string | null = null;
+  try {
+    const delRows = await db
+      .select({
+        date: schema.transactions.date,
+        portfolioHoldingId: schema.transactions.portfolioHoldingId,
+      })
+      .from(schema.transactions)
+      .where(and(eq(schema.transactions.userId, userId), inArray(schema.transactions.id, allIds)));
+    for (const r of delRows) {
+      if (r.portfolioHoldingId != null) {
+        if (snapshotDirtyFrom == null || r.date < snapshotDirtyFrom) snapshotDirtyFrom = r.date;
+      }
+    }
+  } catch {
+    /* best-effort — never block the delete */
+  }
+
   // Portfolio edit-guard — applies to EVERY id in the delete set. The user
   // can't delete a buy that has been sold (the sell's closures lock the buy
   // in place); they have to delete the sell first. We check each row in the
@@ -799,6 +830,7 @@ export async function DELETE(request: NextRequest) {
     await deleteTransaction(txId, userId);
   }
   invalidateUserTxCache(userId);
+  if (snapshotDirtyFrom) await markSnapshotsDirty(userId, snapshotDirtyFrom);
   return NextResponse.json({
     success: true,
     deletedIds: allIds,

@@ -57,4 +57,25 @@ export async function register() {
     // eslint-disable-next-line no-console
     console.error("[instrumentation] failed to register portfolio-snapshots cron:", err);
   }
+
+  // ─── Snapshot-drain cron ───────────────────────────────────────────────
+  // Auto-rebuild stale snapshots after back-dated investment edits. Reads the
+  // portfolio_snapshot_dirty work-queue (stamped by markSnapshotsDirty on
+  // every investment write) every ~5 minutes and re-materializes each user's
+  // dirty range. plan/net-worth-over-time.md Part B.
+  try {
+    const { runSnapshotDrainCron } = await import("./lib/cron/snapshot-drain");
+    const FIVE_MIN = 5 * 60 * 1000;
+    const drainTimer: NodeJS.Timeout = setInterval(() => {
+      runSnapshotDrainCron().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error("[snapshot-drain-cron] run failed:", err);
+      });
+    }, FIVE_MIN);
+    if (drainTimer.unref) drainTimer.unref();
+    console.log("[instrumentation] snapshot-drain cron registered (5m interval)");
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error("[instrumentation] failed to register snapshot-drain cron:", err);
+  }
 }

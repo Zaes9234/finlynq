@@ -16,10 +16,9 @@
  * Phase 3 of plan/portfolio-lots-and-performance.md.
  */
 
-import { eq, sql } from "drizzle-orm";
 import { PostgresAdapter } from "../src/db/adapters/postgres";
-import { setAdapter, setDialect, db, schema } from "../src/db";
-import { buildDailySnapshot } from "../src/lib/portfolio/snapshots/builder";
+import { setAdapter, setDialect } from "../src/db";
+import { rebuildPortfolioSnapshots } from "../src/lib/portfolio/snapshots/rebuild";
 
 async function main(): Promise<number> {
   const userId = process.argv[2];
@@ -44,40 +43,16 @@ async function main(): Promise<number> {
   setAdapter(adapter);
 
   try {
-    // Discover the user's earliest transaction date.
-    let fromDate = fromArg;
-    if (!fromDate) {
-      const row = await db
-        .select({ minDate: sql<string>`MIN(${schema.transactions.date})` })
-        .from(schema.transactions)
-        .where(eq(schema.transactions.userId, userId));
-      fromDate = row[0]?.minDate ?? new Date().toISOString().slice(0, 10);
-    }
-    const toDate = new Date().toISOString().slice(0, 10);
-
+    // Shared walk loop (also used by the manual rebuild endpoint + the
+    // auto-rebuild drain cron) — discovers fromDate = MIN(tx.date) when null.
     console.log(`Backfilling daily snapshots for user ${userId}`);
-    console.log(`  Range: ${fromDate} → ${toDate}`);
-    console.log("");
-
-    let day = fromDate;
-    let count = 0;
-    let gapsFilledDays = 0;
-    while (day <= toDate) {
-      const result = await buildDailySnapshot({ userId, date: day, dek: null });
-      if (result.gapsFilled) gapsFilledDays++;
-      count++;
-      if (count % 30 === 0) {
-        console.log(`  …${day} (${count} snapshots written)`);
-      }
-      const next = new Date(`${day}T00:00:00Z`);
-      next.setUTCDate(next.getUTCDate() + 1);
-      day = next.toISOString().slice(0, 10);
-    }
+    const summary = await rebuildPortfolioSnapshots(userId, fromArg, null, null);
+    console.log(`  Range: ${summary.fromDate} → ${summary.toDate}`);
     console.log("");
     console.log("Summary");
     console.log("───────");
-    console.log(`  Days processed:        ${count}`);
-    console.log(`  Days with gap-fills:   ${gapsFilledDays}`);
+    console.log(`  Days processed:        ${summary.daysProcessed}`);
+    console.log(`  Days with gap-fills:   ${summary.gapsFilledDays}`);
     console.log("");
     console.log("Next step — visit /portfolio and click the Performance chart's All button.");
     return 0;

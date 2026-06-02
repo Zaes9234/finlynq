@@ -1551,6 +1551,22 @@ export const portfolioSnapshots = pgTable("portfolio_snapshots", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// ─── portfolio_snapshot_dirty — auto-rebuild work queue (2026-06-02)
+//
+// One row per user with stale snapshot history. The nightly snapshot cron is
+// forward-only (writes only today), so a back-dated investment edit leaves
+// history stale. Every investment-affecting tx write stamps this row
+// (markSnapshotsDirty) co-located with invalidateUser; the snapshot-drain cron
+// re-materializes `[from_date, today]` and clears rows whose marked_at is
+// unchanged (writes arriving mid-rebuild bump marked_at and survive to the
+// next tick). `from_date` is the earliest affected date, coalesced via LEAST.
+// plan/net-worth-over-time.md Part B.
+export const portfolioSnapshotDirty = pgTable("portfolio_snapshot_dirty", {
+  userId: text("user_id").primaryKey(),
+  fromDate: text("from_date").notNull(),
+  markedAt: timestamp("marked_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // ─── portfolio_legacy_realized_gain_snapshot — pre-cutover avg-cost gain
 //
 // Avg-cost realized gain ≠ FIFO realized gain on partial-sell users. This

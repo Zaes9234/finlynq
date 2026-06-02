@@ -35,11 +35,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Briefcase, Plus, Pencil, ArrowRight } from "lucide-react";
+import { Briefcase, Plus, Pencil, ArrowRight, History } from "lucide-react";
 import {
   HoldingEditForm,
   type HoldingEditFormHolding,
 } from "@/components/holdings/holding-edit-form";
+import { RebuildSnapshotsButton } from "@/components/portfolio/rebuild-snapshots-button";
 
 type Holding = {
   id: number;
@@ -244,6 +245,32 @@ export default function InvestmentsSettingsPage() {
             </Link>
           </div>
         </CardHeader>
+      </Card>
+
+      {/* Rebuild investment history — re-materializes daily portfolio_snapshots
+          from the first transaction to today so the "Net Worth / Balance Over
+          Time" charts reflect back-dated investment edits. The nightly cron is
+          forward-only; auto-rebuild usually catches up within minutes, this is
+          the manual trigger. plan/net-worth-over-time.md Part B. */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600">
+              <History className="h-5 w-5" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Rebuild investment history</CardTitle>
+              <CardDescription>
+                Recompute daily portfolio value snapshots from your first
+                transaction to today. Run this if the &ldquo;Net Worth Over
+                Time&rdquo; chart looks stale after a back-dated trade edit.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <RebuildSnapshotsButton />
+        </CardContent>
       </Card>
 
       {/* Shared edit/create dialog — wraps <HoldingEditForm> in a v4

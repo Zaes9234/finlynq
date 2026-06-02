@@ -49,6 +49,7 @@ import {
   invalidateUser as invalidateUserTxCache,
   getUserTransactions,
 } from "../src/lib/mcp/user-tx-cache";
+import { markSnapshotsDirty } from "../src/lib/portfolio/snapshots/dirty";
 import {
   applyLotEffectsForTx,
   buildLotContext,
@@ -2959,6 +2960,10 @@ export function registerPgTools(
         };
         await applyLotEffectsForTx(lotTx, lotCtx);
       }
+      // Snapshot history is stale from this date forward for investment rows.
+      if (resolvedHoldingId != null) {
+        await markSnapshotsDirty(userId, txDate);
+      }
       return text({
         success: true,
         data: {
@@ -4237,6 +4242,8 @@ export function registerPgTools(
       }
 
       invalidateUserTxCache(userId);
+      // Snapshot history is stale from this trade date forward — auto-rebuild.
+      await markSnapshotsDirty(userId, txDate);
       return text({
         success: true,
         data: {

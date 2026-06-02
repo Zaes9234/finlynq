@@ -8,7 +8,7 @@
  * one" class of regression (issues #214, #211, #230, #205 cohort) before it
  * ships, not to prove soundness.
  *
- * Ten invariants today (see CLAUDE.md "Load-bearing gotchas"):
+ * Eleven invariants today (see CLAUDE.md "Load-bearing gotchas"):
  *
  *   1. sign-vs-category          — every transactions INSERT must call
  *                                  `validateSignVsCategory` or use
@@ -82,6 +82,13 @@
  *                                  encrypted at rest; plaintext-gap closure,
  *                                  2026-06-01). REST Drizzle note writes are
  *                                  covered by the Phase 1 route unit tests.
+ *  11. investment-write-marks-snapshots-dirty
+ *                                — every portfolio-operation route that calls
+ *                                  `invalidateUser` must also call
+ *                                  `markSnapshotsDirty` so the auto-rebuild
+ *                                  drain re-materializes stale daily snapshots
+ *                                  after a back-dated investment edit
+ *                                  (plan/net-worth-over-time.md Part B).
  *
  * Output:
  *   ALL INVARIANTS PASS                  (exit 0)
@@ -463,6 +470,21 @@ const INVARIANTS: InvariantConfig[] = [
       /INSERT\s+INTO\s+(?:accounts|categories|goals|loans|subscriptions|portfolio_holdings)\b[\s\S]{0,1000}?name_ct\b|SET\s+name_ct\s*=|SET\s+name_lookup\s*=/i,
     requiredHelper: /\b(?:buildNameFields|encryptName)\s*\(/,
     helperName: "buildNameFields or encryptName",
+  },
+  {
+    id: "investment-write-marks-snapshots-dirty",
+    description:
+      "every portfolio-operation route that calls invalidateUser must also call markSnapshotsDirty so the auto-rebuild drain re-materializes stale snapshots after a back-dated investment edit (plan/net-worth-over-time.md Part B)",
+    // Scoped to the operations directory — every file there is UNCONDITIONALLY
+    // an investment write (buy/sell/swap/transfer/fx/income-expense/deposit/
+    // withdrawal) and is where new operations get added. The conditional sites
+    // (transactions route POST/PUT/DELETE, MCP record_*) gate markSnapshotsDirty
+    // on investment-row detection, so they're wired but not audited here (the
+    // co-occurrence check can't express the gate).
+    fileGlobs: ["src/app/api/portfolio/operations/"],
+    writeSite: /invalidateUser(?:TxCache)?\s*\(/,
+    requiredHelper: /\bmarkSnapshotsDirty\s*\(/,
+    helperName: "markSnapshotsDirty",
   },
 ];
 

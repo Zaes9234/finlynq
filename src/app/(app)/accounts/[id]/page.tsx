@@ -16,6 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { SUPPORTED_FIAT_CURRENCIES } from "@/lib/fx/supported-currencies";
 import { ModePicker } from "@/components/inbox/mode-picker";
 import { isMode, type Mode } from "@/components/inbox/modes";
+import { NetWorthHistoryChart } from "@/components/net-worth-history-chart";
 
 type Transaction = {
   id: number;
@@ -335,6 +336,11 @@ export default function AccountDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Balance Over Time — accurate daily series (cash live from
+          transactions, investments from stored snapshots).
+          plan/net-worth-over-time.md Part A. */}
+      <NetWorthHistoryChart accountId={account.id} title="Balance Over Time" />
 
       {/* Reconciliation mode — Inbox v4 Phase 5 (2026-05-27).
           Persists `accounts.mode` via PATCH /api/accounts/[id]/mode.

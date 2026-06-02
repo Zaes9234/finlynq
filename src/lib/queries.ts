@@ -1,5 +1,5 @@
 import { db, schema, getDialect } from "@/db";
-import { eq, and, gte, lte, desc, sql, asc, inArray } from "drizzle-orm";
+import { eq, and, gte, lte, desc, sql, asc, inArray, isNotNull } from "drizzle-orm";
 import type { SQL, AnyColumn } from "drizzle-orm";
 import { requireHoldingForInvestmentAccount } from "@/lib/investment-account";
 import type { TransactionSource } from "@/lib/tx-source";
@@ -823,5 +823,76 @@ export async function getNetWorthOverTime(userId: string) {
     .where(eq(transactions.userId, userId))
     .groupBy(monthExpr(transactions.date), accounts.currency)
     .orderBy(monthExpr(transactions.date))
+    .all();
+}
+
+// ─── Net-worth / balance over time (plan/net-worth-over-time.md Part A) ──────
+//
+// Accurate merged series: cash/liability accounts computed live from
+// `transactions`, investment accounts read from stored `portfolio_snapshots`.
+// These two helpers feed the pure `buildNetWorthHistory` core; FX + the live
+// today-override happen in /api/net-worth-history.
+
+/**
+ * Per-day, per-currency cash delta for NON-investment accounts (optionally a
+ * single account). Investment accounts are excluded so their buy/sell legs
+ * (which net to ~0) never get summed as a "balance" — their value comes from
+ * snapshots instead. Returns deltas over ALL history (the cumulative on any
+ * grid day needs every delta before the window). Archived accounts are
+ * excluded to mirror the dashboard hero's account set.
+ */
+export async function getCashDailyDeltas(userId: string, accountId?: number) {
+  const conditions = [
+    eq(transactions.userId, userId),
+    eq(accounts.isInvestment, false),
+    eq(accounts.archived, false),
+  ];
+  if (accountId != null) conditions.push(eq(transactions.accountId, accountId));
+  return db
+    .select({
+      date: transactions.date,
+      currency: accounts.currency,
+      delta: sql<number>`COALESCE(SUM(${transactions.amount}), 0)`,
+    })
+    .from(transactions)
+    .innerJoin(accounts, eq(transactions.accountId, accounts.id))
+    .where(and(...conditions))
+    .groupBy(transactions.date, accounts.currency)
+    .orderBy(asc(transactions.date))
+    .all();
+}
+
+/**
+ * Per-account portfolio snapshot rows in [from, to]. Pass `from="1900-01-01"`
+ * so the first grid day always has a nearest-at-or-before value to carry
+ * forward. NEVER returns the whole-portfolio NULL aggregate row (that would
+ * double-count against the per-account sum the chart builds).
+ */
+export async function getInvestmentSnapshotsInRange(
+  userId: string,
+  from: string,
+  to: string,
+  accountId?: number,
+) {
+  const conditions = [
+    eq(schema.portfolioSnapshots.userId, userId),
+    gte(schema.portfolioSnapshots.snapDate, from),
+    lte(schema.portfolioSnapshots.snapDate, to),
+  ];
+  if (accountId != null) {
+    conditions.push(eq(schema.portfolioSnapshots.accountId, accountId));
+  } else {
+    conditions.push(isNotNull(schema.portfolioSnapshots.accountId));
+  }
+  return db
+    .select({
+      accountId: schema.portfolioSnapshots.accountId,
+      snapDate: schema.portfolioSnapshots.snapDate,
+      marketValue: schema.portfolioSnapshots.marketValue,
+      currency: schema.portfolioSnapshots.currency,
+    })
+    .from(schema.portfolioSnapshots)
+    .where(and(...conditions))
+    .orderBy(asc(schema.portfolioSnapshots.snapDate))
     .all();
 }

@@ -4,6 +4,7 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { recordInKindTransfer } from "@/lib/portfolio/operations";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
+import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
 import { mapOperationError, cascadeDeleteForReplace } from "../_helpers";
 
 const schema = z.object({
@@ -36,6 +37,8 @@ export async function POST(request: NextRequest) {
       source: "manual",
     });
     invalidateUserTxCache(auth.userId);
+    // Snapshot history is stale from this trade date forward — auto-rebuild.
+    await markSnapshotsDirty(auth.userId, input.date);
     return NextResponse.json(
       editId != null ? { ...result, replaced: editId } : result,
       { status: 201 },
