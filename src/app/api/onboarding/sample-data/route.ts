@@ -56,11 +56,15 @@ const SAMPLE_ACCOUNTS: Array<{
   currency: string;
   isInvestment: boolean;
 }> = [
-  { name: "Chequing", type: "A", group: "Chequing", currency: "CAD", isInvestment: false },
-  { name: "Savings", type: "A", group: "Savings", currency: "CAD", isInvestment: false },
-  { name: "Visa Rewards", type: "L", group: "Credit Card", currency: "CAD", isInvestment: false },
-  { name: "Brokerage", type: "A", group: "Investments", currency: "CAD", isInvestment: true },
-  { name: "TFSA", type: "A", group: "Investments", currency: "CAD", isInvestment: true },
+  { name: "Chequing", type: "A", group: "Chequing", currency: "USD", isInvestment: false },
+  { name: "Savings", type: "A", group: "Savings", currency: "USD", isInvestment: false },
+  { name: "Visa Rewards", type: "L", group: "Credit Card", currency: "USD", isInvestment: false },
+  { name: "Brokerage", type: "A", group: "Investments", currency: "USD", isInvestment: true },
+  { name: "TFSA", type: "A", group: "Investments", currency: "USD", isInvestment: true },
+  // Side foreign-currency cash accounts so the seed exercises multi-currency
+  // display + net-worth FX conversion (display currency defaults to USD).
+  { name: "EUR Wallet", type: "A", group: "Chequing", currency: "EUR", isInvestment: false },
+  { name: "CAD Account", type: "A", group: "Chequing", currency: "CAD", isInvestment: false },
 ];
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -108,7 +112,8 @@ type RegularTx = {
   note: string;
 };
 
-/** Six months of believable cash-flow on Chequing / Savings / Visa Rewards.
+/** Six months of believable cash-flow on Chequing / Savings / Visa Rewards,
+ *  plus a handful of recent rows on the side EUR Wallet / CAD Account.
  *  Investment accounts are funded + traded separately (operations.ts). */
 function generateRegularTransactions(today: Date): RegularTx[] {
   const txs: RegularTx[] = [];
@@ -126,6 +131,13 @@ function generateRegularTransactions(today: Date): RegularTx[] {
   };
   const day = (monthOffset: number, dayOfMonth: number) =>
     new Date(start.getFullYear(), start.getMonth() + monthOffset, dayOfMonth);
+  // Recent past date (today - n days) — used for the foreign-currency rows so
+  // they never trip the `date > today` guard regardless of today's day-of-month.
+  const recent = (n: number) => {
+    const d = new Date(today);
+    d.setDate(d.getDate() - n);
+    return d;
+  };
 
   for (let m = 0; m < 6; m++) {
     // Income — salary 1st + 15th, monthly interest on Savings.
@@ -181,6 +193,20 @@ function generateRegularTransactions(today: Date): RegularTx[] {
     push(day(m, 25), "Visa Rewards", "Transfers", 1100, "Visa payment");
   }
 
+  // Side foreign-currency activity. Currency is stamped per-account at insert
+  // time (the EUR Wallet / CAD Account carry EUR / CAD), so these are clean
+  // same-currency rows. Fixed amounts → stable import hashes → idempotent.
+  // EUR Wallet (net positive balance).
+  push(recent(24), "EUR Wallet", "Salary", 1500, "EU Client", "Freelance invoice");
+  push(recent(21), "EUR Wallet", "Groceries", -48.5, "Carrefour");
+  push(recent(16), "EUR Wallet", "Dining", -32.0, "Café de Flore");
+  push(recent(10), "EUR Wallet", "Subscriptions", -12.99, "Spotify EU");
+  // CAD Account (net positive balance).
+  push(recent(27), "CAD Account", "Salary", 1200, "Contract CAD", "Contract payment");
+  push(recent(22), "CAD Account", "Groceries", -82.4, "Loblaws");
+  push(recent(14), "CAD Account", "Fuel", -64.0, "Petro-Canada");
+  push(recent(8), "CAD Account", "Dining", -28.5, "Tim Hortons");
+
   return txs;
 }
 
@@ -219,9 +245,13 @@ export async function POST(request: NextRequest) {
     // 2. Accounts — reuse by decrypted name, create what's missing.
     const existingAccounts = await getAccounts(userId, { includeArchived: true });
     const acctMap = new Map<string, number>();
+    // accountId → currency, so the regular-tx insert can stamp each row in its
+    // account's native currency (USD primary + the side EUR / CAD accounts).
+    const acctCurrencyById = new Map<number, string>();
     for (const a of existingAccounts) {
       const name = decryptName(a.nameCt, dek, null);
       if (name) acctMap.set(name, a.id);
+      acctCurrencyById.set(a.id, a.currency);
     }
     for (const a of SAMPLE_ACCOUNTS) {
       if (!acctMap.has(a.name)) {
@@ -234,6 +264,7 @@ export async function POST(request: NextRequest) {
           ...enc,
         });
         acctMap.set(a.name, created.id);
+        acctCurrencyById.set(created.id, a.currency);
       }
     }
 
@@ -263,7 +294,7 @@ export async function POST(request: NextRequest) {
         date: tx.date,
         accountId,
         categoryId,
-        currency: "CAD",
+        currency: acctCurrencyById.get(accountId) ?? "USD",
         amount: tx.amount,
         payee: encryptField(dek, tx.payee),
         note: encryptField(dek, tx.note),
@@ -408,9 +439,9 @@ const STOCKS: StockSeed[] = [
   { key: "VXUS", name: "Vanguard International ex-US", symbol: "VXUS", isCrypto: 0, account: "Brokerage", qty: 15, totalCost: 1100, buyDaysAgo: 130, note: "International equity" },
   { key: "AAPL", name: "Apple Inc.", symbol: "AAPL", isCrypto: 0, account: "Brokerage", qty: 8, totalCost: 1800, buyDaysAgo: 110, note: "Single stock" },
   { key: "BTC", name: "Bitcoin", symbol: "BTC", isCrypto: 1, account: "Brokerage", qty: 0.05, totalCost: 2400, buyDaysAgo: 90, note: "Crypto" },
-  { key: "VFV.TO", name: "Vanguard S&P 500 (CAD)", symbol: "VFV.TO", isCrypto: 0, account: "TFSA", qty: 25, totalCost: 3000, buyDaysAgo: 160, note: "S&P 500 in CAD" },
-  { key: "XEQT.TO", name: "iShares All-Equity ETF", symbol: "XEQT.TO", isCrypto: 0, account: "TFSA", qty: 60, totalCost: 2000, buyDaysAgo: 120, note: "All-equity one-ticket" },
-  { key: "VAB.TO", name: "Vanguard Canadian Bond", symbol: "VAB.TO", isCrypto: 0, account: "TFSA", qty: 40, totalCost: 1000, buyDaysAgo: 100, note: "Canadian bonds" },
+  { key: "SPY", name: "SPDR S&P 500 ETF", symbol: "SPY", isCrypto: 0, account: "TFSA", qty: 6, totalCost: 3300, buyDaysAgo: 160, note: "S&P 500 (US-listed)" },
+  { key: "QQQ", name: "Invesco QQQ Trust", symbol: "QQQ", isCrypto: 0, account: "TFSA", qty: 5, totalCost: 2300, buyDaysAgo: 120, note: "Nasdaq-100" },
+  { key: "BND", name: "Vanguard Total Bond Market", symbol: "BND", isCrypto: 0, account: "TFSA", qty: 28, totalCost: 2050, buyDaysAgo: 100, note: "US aggregate bonds" },
 ];
 
 // Cash dividends, attributed directly to the paying holding (qty=0, the
@@ -424,11 +455,11 @@ const DIVIDENDS: Array<{ holdingKey: string; daysAgo: number; amount: number }> 
   { holdingKey: "VXUS", daysAgo: 125, amount: 9.4 },
   { holdingKey: "VXUS", daysAgo: 35, amount: 9.9 },
   { holdingKey: "AAPL", daysAgo: 80, amount: 4.6 },
-  { holdingKey: "VFV.TO", daysAgo: 140, amount: 8.1 },
-  { holdingKey: "VFV.TO", daysAgo: 50, amount: 8.4 },
-  { holdingKey: "XEQT.TO", daysAgo: 60, amount: 6.2 },
-  { holdingKey: "VAB.TO", daysAgo: 95, amount: 5.5 },
-  { holdingKey: "VAB.TO", daysAgo: 20, amount: 5.7 },
+  { holdingKey: "SPY", daysAgo: 140, amount: 8.1 },
+  { holdingKey: "SPY", daysAgo: 50, amount: 8.4 },
+  { holdingKey: "QQQ", daysAgo: 60, amount: 6.2 },
+  { holdingKey: "BND", daysAgo: 95, amount: 5.5 },
+  { holdingKey: "BND", daysAgo: 20, amount: 5.7 },
 ];
 
 async function seedPortfolio(opts: {
@@ -450,11 +481,11 @@ async function seedPortfolio(opts: {
 
   let transactions = 0;
 
-  // Cash sleeves (one CAD sleeve per investment account) + funding deposits
+  // Cash sleeves (one USD sleeve per investment account) + funding deposits
   // from Chequing so the buys debit real cash.
   const sleeveByAccount = new Map<number, number>();
   for (const accountId of [brokerageId, tfsaId]) {
-    const sleeveId = await createCashSleeve(userId, dek, accountId, "CAD");
+    const sleeveId = await createCashSleeve(userId, dek, accountId, "USD");
     sleeveByAccount.set(accountId, sleeveId);
   }
   // Fund each sleeve before the earliest buy on that account.
@@ -526,17 +557,17 @@ async function seedPortfolio(opts: {
     });
     transactions += 2;
   }
-  const sellXeqt = holdingIdByKey.get("XEQT.TO");
-  if (sellXeqt) {
+  const sellSpy = holdingIdByKey.get("SPY");
+  if (sellSpy) {
     await recordSell({
       userId,
       dek,
       accountId: tfsaId,
-      holdingId: sellXeqt,
-      qty: 10,
-      totalProceeds: 380,
+      holdingId: sellSpy,
+      qty: 2,
+      totalProceeds: 1180,
       date: daysAgo(25),
-      payee: "Sell XEQT.TO (trim)",
+      payee: "Sell SPY (trim)",
       source: "sample_data",
       cashSleeveHoldingId: sleeveByAccount.get(tfsaId),
     });
@@ -558,7 +589,7 @@ async function seedPortfolio(opts: {
         date: daysAgo(d.daysAgo),
         accountId,
         categoryId: dividendsCategoryId,
-        currency: "CAD",
+        currency: "USD",
         amount: d.amount,
         quantity: 0,
         portfolioHoldingId: holdingId,
@@ -592,7 +623,7 @@ async function createHolding(
     .values({
       userId,
       accountId,
-      currency: "CAD",
+      currency: "USD",
       isCrypto: h.isCrypto,
       isCash: false,
       note: h.note,
@@ -666,7 +697,7 @@ async function seedGoals(
         userId,
         type: g.type,
         targetAmount: g.targetAmount,
-        currency: "CAD",
+        currency: "USD",
         deadline: g.deadline,
         accountId: g.accountId,
         priority: g.priority,
@@ -713,7 +744,7 @@ async function seedLoans(
       userId,
       type: l.type,
       accountId: acctMap.get("Chequing") ?? null,
-      currency: "CAD",
+      currency: "USD",
       principal: l.principal,
       annualRate: l.annualRate,
       termMonths: l.termMonths,
@@ -751,7 +782,7 @@ async function seedSubscriptions(
     await db.insert(schema.subscriptions).values({
       userId,
       amount: s.amount,
-      currency: "CAD",
+      currency: "USD",
       frequency: "monthly",
       categoryId,
       accountId,
@@ -794,7 +825,7 @@ async function seedBudgets(
       categoryId,
       month,
       amount: b.amount,
-      currency: "CAD",
+      currency: "USD",
     });
     created++;
   }
