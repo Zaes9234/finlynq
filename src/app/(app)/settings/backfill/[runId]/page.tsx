@@ -1664,24 +1664,19 @@ const OVERRIDE_KIND_OPTIONS: readonly OverrideKindOption[] = [
     label: "FX to-leg",
     explanation: "The currency you bought. Link the matching from-leg: a cash row in a different currency, same account.",
   },
+  // Only the investment-side (cash-sleeve) brokerage legs are offered — a
+  // backfill orphan is always on an investment account, so it can never BE the
+  // external bank-side leg. The external legs (brokerage_deposit_out /
+  // brokerage_withdrawal_in) are intentionally omitted from the picker; they
+  // remain valid kinds for real brokerage ops, just not selectable here.
   {
     kind: "brokerage_deposit_in",
-    label: "Brokerage deposit (cash sleeve leg)",
+    label: "Brokerage deposit",
     explanation: "Cash arriving on the brokerage cash sleeve. Link the matching debit on the funding (non-investment) account.",
   },
   {
-    kind: "brokerage_deposit_out",
-    label: "Brokerage deposit (external leg)",
-    explanation: "The funding-account side — can't be an investment-account row, so it never appears here.",
-  },
-  {
-    kind: "brokerage_withdrawal_in",
-    label: "Brokerage withdrawal (external leg)",
-    explanation: "The receiving-account side — can't be an investment-account row, so it never appears here.",
-  },
-  {
     kind: "brokerage_withdrawal_out",
-    label: "Brokerage withdrawal (cash sleeve leg)",
+    label: "Brokerage withdrawal",
     explanation: "Cash leaving the brokerage cash sleeve. Link the matching credit on the receiving (non-investment) account.",
   },
 ];
