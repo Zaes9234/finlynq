@@ -8,6 +8,15 @@ import { getServerUrl } from "../api/client";
 
 jest.mock("../api/client", () => ({
   getServerUrl: jest.fn(() => "http://localhost:3000"),
+  endpoints: {
+    // SettingsScreen now loads the display currency on mount.
+    getDisplayCurrency: jest.fn(() =>
+      Promise.resolve({ success: true, data: { displayCurrency: "CAD" } })
+    ),
+    setDisplayCurrency: jest.fn(() =>
+      Promise.resolve({ success: true, data: { displayCurrency: "CAD" } })
+    ),
+  },
 }));
 
 const mockSignOut = jest.fn();
@@ -71,7 +80,7 @@ describe("SettingsScreen", () => {
     const { getByText } = renderWithTheme(<SettingsScreen />);
     expect(getByText("ABOUT")).toBeTruthy();
     expect(getByText("Finlynq")).toBeTruthy();
-    expect(getByText("1.0.0")).toBeTruthy();
+    expect(getByText("1.0.1")).toBeTruthy();
     expect(getByText("React Native + Expo")).toBeTruthy();
   });
 

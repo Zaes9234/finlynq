@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -9,12 +9,30 @@ import {
   Alert,
   Switch,
   Linking,
+  Modal,
+  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useNavigation } from "@react-navigation/native";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
+import Constants from "expo-constants";
 import { useTheme, type ThemePreference } from "../theme";
 import { useAuth } from "../hooks/useAuth";
-import { getServerUrl } from "../api/client";
+import { getServerUrl, endpoints } from "../api/client";
+import { logger } from "../lib/logger";
 import { getLogs, clearLogs, type LogEntry, type LogLevel } from "../lib/logger";
+import { PickerSheet, type PickerOption } from "../components/picker-sheet";
+import { DISPLAY_CURRENCIES } from "../lib/constants";
+import type { MoreStackParamList } from "../navigation/MoreStack";
+
+type Nav = NativeStackNavigationProp<MoreStackParamList, "Settings">;
+
+// The PickerSheet keys on a numeric `id`, so each currency's id is its index in
+// DISPLAY_CURRENCIES; onSelect maps the index back to the 3-letter code.
+const CURRENCY_OPTIONS: PickerOption[] = DISPLAY_CURRENCIES.map((c, i) => ({
+  id: i,
+  label: `${c.code} — ${c.label}`,
+}));
 
 const AUTO_LOCK_OPTIONS = [
   { label: "Disabled", value: 0 },
@@ -32,6 +50,7 @@ const THEME_OPTIONS: Array<{ label: string; value: ThemePreference }> = [
 
 export default function SettingsScreen() {
   const theme = useTheme();
+  const navigation = useNavigation<Nav>();
   const {
     signOut,
     saveServerUrl,
@@ -46,6 +65,45 @@ export default function SettingsScreen() {
   const [saved, setSaved] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [showLogs, setShowLogs] = useState(false);
+
+  // 4a — display currency. `null` while loading; the row shows a dash until the
+  // GET resolves. Picking a code PUTs it and flips `currencySaved` briefly.
+  const [displayCurrency, setDisplayCurrency] = useState<string | null>(null);
+  const [currencyPickerOpen, setCurrencyPickerOpen] = useState(false);
+  const [currencySaved, setCurrencySaved] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const res = await endpoints.getDisplayCurrency();
+      if (res.success) setDisplayCurrency(res.data?.displayCurrency ?? "CAD");
+      else logger.warn("settings", "display-currency fetch failed", { error: res.error });
+    })();
+  }, []);
+
+  const onPickCurrency = async (id: number) => {
+    const code = DISPLAY_CURRENCIES[id]?.code;
+    if (!code || code === displayCurrency) return;
+    const prev = displayCurrency;
+    setDisplayCurrency(code); // optimistic
+    setCurrencySaved(false);
+    const res = await endpoints.setDisplayCurrency(code);
+    if (res.success) {
+      setDisplayCurrency(res.data?.displayCurrency ?? code);
+      setCurrencySaved(true);
+      setTimeout(() => setCurrencySaved(false), 2000);
+      logger.info("settings", "display currency changed", { code });
+    } else {
+      setDisplayCurrency(prev); // revert
+      logger.warn("settings", "display-currency save failed", { error: res.error });
+      Alert.alert("Couldn't change currency", res.error || "Please try again.");
+    }
+  };
+
+  // Destructive-data flow: which confirm is open ("wipe" = keep login, "delete"
+  // = remove account), the typed password, and an in-flight guard.
+  const [dataAction, setDataAction] = useState<null | "wipe" | "delete">(null);
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const colors = theme.colors;
 
@@ -85,6 +143,47 @@ export default function SettingsScreen() {
     ]);
   };
 
+  const closeDataModal = () => {
+    setDataAction(null);
+    setPassword("");
+  };
+
+  const runDataAction = async () => {
+    if (!password) {
+      Alert.alert("Password required", "Enter your password to continue.");
+      return;
+    }
+    const isDelete = dataAction === "delete";
+    setBusy(true);
+    try {
+      const res = isDelete
+        ? await endpoints.deleteAccount(password)
+        : await endpoints.wipeData(password);
+      if (res.success) {
+        logger.info("settings", isDelete ? "account deleted" : "data wiped");
+        closeDataModal();
+        // The server evicts the session DEK (and drops the user on delete), so
+        // the only valid next state is signed-out.
+        Alert.alert(
+          isDelete ? "Account deleted" : "Data deleted",
+          isDelete
+            ? "Your account and all data have been permanently deleted."
+            : "All your data has been permanently deleted.",
+          [{ text: "OK", onPress: signOut }]
+        );
+      } else {
+        logger.warn("settings", "data action rejected", { error: res.error });
+        Alert.alert("Couldn't complete", res.error || "Please try again.");
+      }
+    } catch (e) {
+      const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      logger.error("settings", "data action threw", { detail });
+      Alert.alert("Error", "Cannot connect to server");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: colors.background }]} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.scroll}>
@@ -117,6 +216,32 @@ export default function SettingsScreen() {
           >
             <Text style={[styles.buttonText, { color: colors.primaryForeground }]}>
               {saved ? "✓ Saved!" : "Save"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* General — display currency. Converted screens (Dashboard / Accounts /
+            Portfolio / Reports) refetch on focus, so the change is reflected on
+            return without an explicit broadcast. */}
+        <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>GENERAL</Text>
+        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <TouchableOpacity
+            style={styles.navRow}
+            onPress={() => setCurrencyPickerOpen(true)}
+            activeOpacity={0.7}
+          >
+            <View style={styles.settingLeft}>
+              <Text style={[styles.settingLabel, { color: colors.foreground }]}>
+                Display currency
+              </Text>
+              <Text style={[styles.settingDesc, { color: colors.mutedForeground }]}>
+                {currencySaved
+                  ? "✓ Saved"
+                  : "Totals are converted into this currency for display."}
+              </Text>
+            </View>
+            <Text style={[styles.navValue, { color: colors.mutedForeground }]}>
+              {displayCurrency ?? "—"} ›
             </Text>
           </TouchableOpacity>
         </View>
@@ -158,6 +283,26 @@ export default function SettingsScreen() {
               </TouchableOpacity>
             ))}
           </View>
+        </View>
+
+        {/* Reconciliation — link to the fuzzy-match threshold editor. */}
+        <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>RECONCILIATION</Text>
+        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <TouchableOpacity
+            style={styles.navRow}
+            onPress={() => navigation.navigate("ReconcileThresholds")}
+            activeOpacity={0.7}
+          >
+            <View style={styles.settingLeft}>
+              <Text style={[styles.settingLabel, { color: colors.foreground }]}>
+                Match thresholds
+              </Text>
+              <Text style={[styles.settingDesc, { color: colors.mutedForeground }]}>
+                Tune how the reconcile screen suggests matches.
+              </Text>
+            </View>
+            <Text style={[styles.navValue, { color: colors.mutedForeground }]}>›</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Security */}
@@ -236,6 +381,42 @@ export default function SettingsScreen() {
           </TouchableOpacity>
         </View>
 
+        {/* Data — destructive. Mirrors web Settings → Data (password-gated). */}
+        <Text style={[styles.sectionTitle, { color: colors.mutedForeground }]}>DATA</Text>
+        <View style={[styles.card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <Text style={[styles.settingDesc, { color: colors.mutedForeground, marginBottom: 12 }]}>
+            Deleting is permanent and cannot be undone.
+          </Text>
+          <TouchableOpacity
+            style={[styles.dangerOutlineBtn, { borderColor: colors.destructive }]}
+            onPress={() => {
+              setPassword("");
+              setDataAction("wipe");
+            }}
+          >
+            <Text style={[styles.dangerOutlineText, { color: colors.destructive }]}>
+              Delete all data
+            </Text>
+          </TouchableOpacity>
+          <Text style={[styles.settingDesc, { color: colors.mutedForeground, marginTop: 6 }]}>
+            Removes every record but keeps your login.
+          </Text>
+          <TouchableOpacity
+            style={[styles.button, { backgroundColor: colors.destructive, marginTop: 14 }]}
+            onPress={() => {
+              setPassword("");
+              setDataAction("delete");
+            }}
+          >
+            <Text style={[styles.buttonText, { color: colors.destructiveForeground }]}>
+              Delete account
+            </Text>
+          </TouchableOpacity>
+          <Text style={[styles.settingDesc, { color: colors.mutedForeground, marginTop: 6 }]}>
+            Deletes your account and all data.
+          </Text>
+        </View>
+
         {/* Diagnostics — on-device view of the app log (no adb needed).
             Admin-only: hidden for regular accounts (incl. the public demo). */}
         {isAdmin && (
@@ -301,7 +482,9 @@ export default function SettingsScreen() {
           </View>
           <View style={[styles.aboutRow, { borderBottomColor: colors.border }]}>
             <Text style={[styles.aboutLabel, { color: colors.mutedForeground }]}>Version</Text>
-            <Text style={[styles.aboutValue, { color: colors.foreground }]}>1.0.0</Text>
+            <Text style={[styles.aboutValue, { color: colors.foreground }]}>
+              {Constants.expoConfig?.version ?? "—"}
+            </Text>
           </View>
           <View style={[styles.aboutRow, { borderBottomColor: colors.border }]}>
             <Text style={[styles.aboutLabel, { color: colors.mutedForeground }]}>Platform</Text>
@@ -342,6 +525,79 @@ export default function SettingsScreen() {
           </Text>
         </View>
       </ScrollView>
+
+      {/* Password-gated confirmation for delete-data / delete-account. */}
+      <Modal
+        visible={dataAction !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={closeDataModal}
+      >
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.modalTitle, { color: colors.foreground }]}>
+              {dataAction === "delete" ? "Delete account?" : "Delete all data?"}
+            </Text>
+            <Text style={[styles.modalDesc, { color: colors.mutedForeground }]}>
+              {dataAction === "delete"
+                ? "This permanently deletes your account and every record. This cannot be undone."
+                : "This permanently deletes all your data but keeps your login. This cannot be undone."}
+            </Text>
+            <TextInput
+              style={[
+                styles.input,
+                { backgroundColor: colors.secondary, color: colors.foreground, borderColor: colors.border, marginTop: 4 },
+              ]}
+              value={password}
+              onChangeText={setPassword}
+              placeholder="Enter your password"
+              placeholderTextColor={colors.mutedForeground}
+              secureTextEntry
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <Text style={[styles.modalNote, { color: colors.mutedForeground }]}>
+              If you have two-factor enabled, delete from the web app instead.
+            </Text>
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: colors.secondary }]}
+                onPress={closeDataModal}
+                disabled={busy}
+              >
+                <Text style={[styles.modalBtnText, { color: colors.foreground }]}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, { backgroundColor: colors.destructive }]}
+                onPress={runDataAction}
+                disabled={busy}
+              >
+                {busy ? (
+                  <ActivityIndicator size="small" color={colors.destructiveForeground} />
+                ) : (
+                  <Text style={[styles.modalBtnText, { color: colors.destructiveForeground }]}>
+                    {dataAction === "delete" ? "Delete account" : "Delete data"}
+                  </Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Display-currency picker (4a). */}
+      <PickerSheet
+        visible={currencyPickerOpen}
+        title="Display currency"
+        options={CURRENCY_OPTIONS}
+        selectedId={
+          displayCurrency
+            ? DISPLAY_CURRENCIES.findIndex((c) => c.code === displayCurrency)
+            : null
+        }
+        onSelect={onPickCurrency}
+        onClose={() => setCurrencyPickerOpen(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -379,6 +635,39 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   buttonText: { fontSize: 15, fontWeight: "600" },
+  dangerOutlineBtn: {
+    height: 44,
+    borderRadius: 10,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dangerOutlineText: { fontSize: 15, fontWeight: "600" },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  modalCard: {
+    width: "100%",
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: 20,
+  },
+  modalTitle: { fontSize: 18, fontWeight: "700", marginBottom: 8 },
+  modalDesc: { fontSize: 14, lineHeight: 20, marginBottom: 12 },
+  modalNote: { fontSize: 12, marginTop: 8, marginBottom: 4 },
+  modalBtnRow: { flexDirection: "row", gap: 10, marginTop: 12 },
+  modalBtn: {
+    flex: 1,
+    height: 44,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalBtnText: { fontSize: 15, fontWeight: "700" },
   settingRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -389,6 +678,12 @@ const styles = StyleSheet.create({
   settingLeft: { flex: 1, marginRight: 12 },
   settingLabel: { fontSize: 15, fontWeight: "500" },
   settingDesc: { fontSize: 12, marginTop: 2 },
+  navRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  navValue: { fontSize: 15, fontWeight: "600" },
   settingSection: { paddingVertical: 12 },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 10 },
   chip: {

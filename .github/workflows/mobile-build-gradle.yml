@@ -26,6 +26,28 @@ name: Mobile Build (Gradle, no EAS)
 #     ANDROID_KEY_ALIAS               key alias
 #     ANDROID_KEY_PASSWORD            key password
 #   under Settings → Secrets and variables → Actions.
+#
+# PUBLISH TO GOOGLE PLAY (optional — off unless explicitly requested)
+#   After a Play-signed build, the workflow can push the .aab straight to the
+#   Play Developer API (no manual Play Console upload). Two ways to trigger it:
+#     * tag push:  push `mobile-release-v<N>` (instead of `mobile-gradle-v<N>`)
+#                  → builds versionCode N AND publishes. Track comes from the
+#                  repo variable PLAY_TRACK (default `internal`). The plain
+#                  `mobile-gradle-v<N>` tag still builds ONLY (never publishes).
+#     * manual:    Actions tab → Run workflow → set `playTrack` (only selectable
+#                  once this file is on the default branch — see note above).
+#   Requires, in addition to the 4 signing secrets:
+#     PLAY_SERVICE_ACCOUNT_JSON   full JSON key of a Google Cloud service account
+#                                 linked under Play Console → Setup → API access,
+#                                 granted "Release apps to testing tracks" (and
+#                                 "Release to production" if publishing prod).
+#   Optional repo variable (Settings → Secrets and variables → Actions → Variables):
+#     PLAY_TRACK                  track for the mobile-release-v* tag path.
+#                                 internal | alpha (closed) | beta (open) |
+#                                 production. Defaults to `internal`.
+#   The app must have had >=1 manual upload already (it has — versionCode 2).
+#   A personal Play account must finish closed testing before `production` is
+#   accepted; the API will reject a premature production publish.
 
 on:
   workflow_dispatch:
@@ -34,8 +56,19 @@ on:
         description: Android versionCode (must be greater than the last uploaded build)
         type: string
         required: true
+      playTrack:
+        description: Publish to this Play track after build (none = build only)
+        type: choice
+        options: [none, internal, alpha, beta, production]
+        default: none
+      releaseStatus:
+        description: Play release status (completed = live to that track; draft = staged)
+        type: choice
+        options: [completed, draft]
+        default: completed
   push:
-    tags: ['mobile-gradle-v*']
+    # mobile-gradle-v*  → build only.   mobile-release-v* → build AND publish.
+    tags: ['mobile-gradle-v*', 'mobile-release-v*']
 
 concurrency:
   group: mobile-build-gradle-${{ github.ref }}
@@ -52,7 +85,7 @@ jobs:
       run:
         working-directory: mobile
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Resolve versionCode
         id: ver
@@ -85,13 +118,13 @@ jobs:
           fi
 
       - name: Setup Java (Temurin 17)
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
 
       - name: Setup Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: '20'
           cache: 'npm'
@@ -148,7 +181,7 @@ jobs:
           fi
 
       - name: Upload .aab artifact (Play upload)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: finlynq-vc${{ steps.ver.outputs.versionCode }}-${{ steps.signing.outputs.available == 'true' && 'release' || 'DEBUGSIGNED' }}-aab
           path: mobile/android/app/build/outputs/bundle/release/app-release.aab
@@ -156,9 +189,55 @@ jobs:
           retention-days: 30
 
       - name: Upload .apk artifact (sideload)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: finlynq-vc${{ steps.ver.outputs.versionCode }}-${{ steps.signing.outputs.available == 'true' && 'release' || 'DEBUGSIGNED' }}-apk
           path: mobile/android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
           retention-days: 30
+
+      - name: Decide whether to publish to Play
+        id: publish
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TRACK_INPUT: ${{ github.event.inputs.playTrack }}
+          STATUS_INPUT: ${{ github.event.inputs.releaseStatus }}
+          TRACK_VAR: ${{ vars.PLAY_TRACK }}
+          SIGNED: ${{ steps.signing.outputs.available }}
+          SA_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          TRACK="none"
+          STATUS="${STATUS_INPUT:-completed}"
+          # Manual dispatch with an explicit track wins.
+          if [ -n "$TRACK_INPUT" ] && [ "$TRACK_INPUT" != "none" ]; then
+            TRACK="$TRACK_INPUT"
+          # A `mobile-release-v*` tag publishes; track from PLAY_TRACK var (default internal).
+          elif printf '%s' "$REF_NAME" | grep -q '^mobile-release-v'; then
+            TRACK="${TRACK_VAR:-internal}"
+          fi
+          SHOULD="false"
+          if [ "$TRACK" = "none" ]; then
+            echo "Build only — not publishing. (Use a 'mobile-release-v<N>' tag or the playTrack input to publish.)"
+          elif [ "$SIGNED" != "true" ]; then
+            echo "::error::Publish to '$TRACK' requested but the build is NOT Play-signed (missing ANDROID_UPLOAD_KEYSTORE_BASE64)."
+            exit 1
+          elif [ -z "$SA_JSON" ]; then
+            echo "::error::Publish to '$TRACK' requested but PLAY_SERVICE_ACCOUNT_JSON secret is missing."
+            exit 1
+          else
+            SHOULD="true"
+            echo "Will publish to Play track '$TRACK' (status '$STATUS')."
+          fi
+          echo "should_publish=$SHOULD" >> "$GITHUB_OUTPUT"
+          echo "track=$TRACK" >> "$GITHUB_OUTPUT"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+      - name: Publish .aab to Google Play
+        if: steps.publish.outputs.should_publish == 'true'
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.finlynq.mobile
+          releaseFiles: mobile/android/app/build/outputs/bundle/release/app-release.aab
+          track: ${{ steps.publish.outputs.track }}
+          status: ${{ steps.publish.outputs.status }}

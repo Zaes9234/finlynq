@@ -26,6 +26,8 @@ const BIOMETRIC_KEY = "pf_biometric_enabled";
 const AUTO_LOCK_KEY = "pf_auto_lock_minutes";
 const SESSION_TOKEN_KEY = "pf_session_token";
 const SERVER_URL_KEY = "pf_server_url";
+// Set once the user has seen the first-run sample-data prompt, so it never nags.
+const ONBOARDING_PROMPT_KEY = "pf_onboarding_prompt_shown";
 
 interface AuthState {
   /** UI gate the navigator reads — true means show the main app. */
@@ -40,6 +42,9 @@ interface AuthState {
   autoLockMinutes: number; // 0 = disabled
   /** Admin flag from GET /api/auth/session — gates the Diagnostics panel. */
   isAdmin: boolean;
+  /** True after a fresh register / first sign-in of an un-onboarded account —
+   *  the navigator shows the sample-data prompt. Never set during bootstrap. */
+  pendingOnboarding: boolean;
 }
 
 export type { RegisterPayload };
@@ -54,6 +59,7 @@ function useAuthEngine() {
     biometricEnabled: false,
     autoLockMinutes: 5,
     isAdmin: false,
+    pendingOnboarding: false,
   });
 
   const backgroundedAt = useRef<number | null>(null);
@@ -163,6 +169,30 @@ function useAuthEngine() {
     await AsyncStorage.setItem(SERVER_URL_KEY, cleaned);
   }, []);
 
+  /** Refresh session-derived state after a fresh login/register: admin flag +
+   *  whether to show the first-run sample-data prompt. Only fires on explicit
+   *  sign-in/register (NOT bootstrap), so a returning user is never re-prompted.
+   *  Non-blocking; rides the cookie jar. */
+  const refreshSessionMeta = useCallback(() => {
+    getSession()
+      .then(async (sess) => {
+        const isAdmin = sess.authenticated ? !!sess.isAdmin : false;
+        let pendingOnboarding = false;
+        if (sess.authenticated && sess.onboardingComplete !== true) {
+          const shown = await AsyncStorage.getItem(ONBOARDING_PROMPT_KEY);
+          pendingOnboarding = shown !== "true";
+        }
+        setState((s) => ({ ...s, isAdmin, pendingOnboarding }));
+      })
+      .catch(() => {});
+  }, []);
+
+  /** Dismiss the first-run prompt and remember it so it never shows again. */
+  const dismissOnboarding = useCallback(async () => {
+    await AsyncStorage.setItem(ONBOARDING_PROMPT_KEY, "true");
+    setState((s) => ({ ...s, pendingOnboarding: false }));
+  }, []);
+
   /** Account login — `identifier` is a username OR email. */
   const signIn = useCallback(async (identifier: string, password: string) => {
     setState((s) => ({ ...s, isLoading: true, error: null }));
@@ -184,13 +214,10 @@ function useAuthEngine() {
           hasSession: true,
           isLoading: false,
         }));
-        // The login response doesn't carry admin status; refresh it from the
-        // session (rides the cookie jar). Non-blocking so login stays instant.
-        getSession()
-          .then((sess) =>
-            setState((s) => ({ ...s, isAdmin: sess.authenticated ? !!sess.isAdmin : false }))
-          )
-          .catch(() => {});
+        // The login response doesn't carry admin/onboarding status; refresh it
+        // from the session (rides the cookie jar). Non-blocking so login stays
+        // instant. Also decides whether to show the first-run sample-data prompt.
+        refreshSessionMeta();
         return true;
       }
       if (res.data?.mfaRequired) {
@@ -244,12 +271,9 @@ function useAuthEngine() {
           hasSession: true,
           isLoading: false,
         }));
-        // Pull admin status from the session (non-blocking; cookie-jar backed).
-        getSession()
-          .then((sess) =>
-            setState((s) => ({ ...s, isAdmin: sess.authenticated ? !!sess.isAdmin : false }))
-          )
-          .catch(() => {});
+        // A brand-new account is un-onboarded → this also flags the first-run
+        // sample-data prompt (non-blocking; cookie-jar backed).
+        refreshSessionMeta();
         return true;
       }
       const errorMsg = (res.data?.error as string) || "Registration failed";
@@ -282,6 +306,7 @@ function useAuthEngine() {
       isUnlocked: false,
       hasSession: false,
       isAdmin: false,
+      pendingOnboarding: false,
       error: null,
     }));
   }, []);
@@ -335,6 +360,7 @@ function useAuthEngine() {
     setBiometricEnabled,
     setAutoLockMinutes,
     clearError,
+    dismissOnboarding,
   };
 }
 

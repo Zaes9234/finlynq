@@ -5,6 +5,7 @@ import { useTheme } from "../theme";
 import TabNavigator from "./TabNavigator";
 import LockScreen from "../screens/LockScreen";
 import LoginScreen from "../screens/LoginScreen";
+import { OnboardingPrompt } from "../components/onboarding-prompt";
 import { useAuth } from "../hooks/useAuth";
 
 export default function RootNavigator() {
@@ -74,8 +75,17 @@ export default function RootNavigator() {
       );
     }
 
-    // Authenticated + unlocked — show the main app.
-    return <TabNavigator />;
+    // Authenticated + unlocked — show the main app, with the first-run
+    // sample-data prompt overlaid when this is a fresh register / first sign-in.
+    return (
+      <>
+        <TabNavigator />
+        <OnboardingPrompt
+          visible={auth.pendingOnboarding}
+          onDismiss={auth.dismissOnboarding}
+        />
+      </>
+    );
   };
 
   return (

@@ -50,6 +50,14 @@ jest.mock("expo-status-bar", () => ({
   StatusBar: "StatusBar",
 }));
 
+// Mock expo-constants — SettingsScreen reads the app version off expoConfig.
+// The value here is a fixed test fixture; the real version lives in app.json
+// and is read at runtime, so bumping app.json never breaks this test.
+jest.mock("expo-constants", () => ({
+  __esModule: true,
+  default: { expoConfig: { version: "1.0.1" } },
+}));
+
 // Mock expo-local-authentication
 jest.mock("expo-local-authentication", () => ({
   hasHardwareAsync: jest.fn().mockResolvedValue(false),

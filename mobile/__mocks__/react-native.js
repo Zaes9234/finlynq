@@ -63,6 +63,16 @@ const AppState = {
 const useColorScheme = jest.fn(() => "light");
 const RefreshControl = (props) => React.createElement("RefreshControl", props);
 const KeyboardAvoidingView = createComponent("KeyboardAvoidingView");
+// Modal renders its children only when visible (mirrors RN), so hidden sheets
+// stay out of the rendered tree the way the real component behaves.
+const Modal = ({ children, visible, ...props }) =>
+  visible ? React.createElement("Modal", props, children) : null;
+const Pressable = ({ children, onPress, onLongPress, ...props }) =>
+  React.createElement("Pressable", { ...props, onClick: onPress, onPress, onLongPress }, children);
+const Linking = {
+  openURL: jest.fn(() => Promise.resolve()),
+  canOpenURL: jest.fn(() => Promise.resolve(true)),
+};
 
 module.exports = {
   View,
@@ -82,4 +92,7 @@ module.exports = {
   useColorScheme,
   RefreshControl,
   KeyboardAvoidingView,
+  Modal,
+  Pressable,
+  Linking,
 };

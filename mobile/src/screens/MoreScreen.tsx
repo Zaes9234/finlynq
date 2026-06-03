@@ -116,6 +116,8 @@ export default function MoreScreen() {
       rows: [
         { icon: "budgets", label: "Budgets", onPress: () => navigation.navigate("Budgets") },
         { icon: "goals", label: "Goals", onPress: () => navigation.navigate("Goals") },
+        { icon: "reports", label: "Reports", onPress: () => navigation.navigate("Reports") },
+        { icon: "inbox", label: "Reconcile", onPress: () => navigation.navigate("Inbox") },
         { icon: "categories", label: "Categories", onPress: () => navigation.navigate("Categories") },
         { icon: "import", label: "Import", onPress: () => navigation.navigate("Import") },
       ],
@@ -180,7 +182,7 @@ export default function MoreScreen() {
         ))}
 
         <Text style={[styles.webNote, { color: colors.mutedForeground }]}>
-          Subscriptions, loans, reports & portfolio trades — manage on the web app.
+          Subscriptions & loans — manage on the web app.
         </Text>
       </ScrollView>
     </SafeAreaView>

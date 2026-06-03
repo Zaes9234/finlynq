@@ -35,6 +35,20 @@ import {
   Sparkles,
   Megaphone,
   MessageCircle,
+  Minus,
+  Repeat,
+  DollarSign,
+  ArrowRightLeft,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  LineChart,
+  Coins,
+  Scissors,
+  Zap,
+  ShieldCheck,
+  Eye,
+  Inbox,
+  Link2,
   type LucideIcon,
 } from "lucide-react-native";
 
@@ -71,6 +85,22 @@ export const Icons = {
   sampleData: Sparkles,
   whatsNew: Megaphone,
   feedback: MessageCircle,
+  split: Scissors,
+  // Portfolio operations
+  minus: Minus,
+  swap: Repeat,
+  dollar: DollarSign,
+  fx: ArrowRightLeft,
+  depositDown: ArrowDownToLine,
+  withdrawUp: ArrowUpFromLine,
+  performance: LineChart,
+  coins: Coins,
+  // Reconcile inbox
+  inbox: Inbox,
+  zap: Zap,
+  shield: ShieldCheck,
+  eye: Eye,
+  link: Link2,
 } satisfies Record<string, LucideIcon>;
 
 export type IconName = keyof typeof Icons;

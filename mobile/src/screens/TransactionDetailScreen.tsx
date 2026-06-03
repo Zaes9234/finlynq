@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -15,18 +15,16 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useTheme } from "../theme";
 import { endpoints } from "../api/client";
 import { logger } from "../lib/logger";
+import { formatCurrency as formatCurrencyBase } from "../lib/format";
+import { Icon } from "../components/icon";
 import type { Transaction, Account, Category } from "../../../shared/types";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { TransactionsStackParamList } from "../navigation/TransactionsStack";
 
 type Props = NativeStackScreenProps<TransactionsStackParamList, "TransactionDetail">;
 
-function formatCurrency(amount: number, currency = "CAD"): string {
-  return new Intl.NumberFormat("en-CA", {
-    style: "currency",
-    currency,
-    minimumFractionDigits: 2,
-  }).format(amount);
+function formatCurrency(amount: number, currency = "USD"): string {
+  return formatCurrencyBase(amount, currency);
 }
 
 export default function TransactionDetailScreen({ route, navigation }: Props) {
@@ -38,6 +36,7 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
   const [saving, setSaving] = useState(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [splitCount, setSplitCount] = useState(0);
 
   // Editable fields
   const [date, setDate] = useState(transaction.date);
@@ -61,6 +60,31 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
         logger.error("tx-detail", "load threw", { detail });
       });
   }, []);
+
+  // Lazy-fetch the split count for the "Split · N" chip. Refresh on focus so
+  // it reflects edits made in the SplitsEditor screen after returning here.
+  const refreshSplitCount = useCallback(() => {
+    endpoints
+      .getSplits(transaction.id)
+      .then((res) => {
+        if (res.success && Array.isArray(res.data)) setSplitCount(res.data.length);
+      })
+      .catch(() => {});
+  }, [transaction.id]);
+
+  useEffect(() => {
+    refreshSplitCount();
+    const unsub = navigation.addListener("focus", refreshSplitCount);
+    return unsub;
+  }, [navigation, refreshSplitCount]);
+
+  const handleSplit = () => {
+    navigation.navigate("SplitsEditor", {
+      transactionId: transaction.id,
+      totalAmount: transaction.amount,
+      currency: transaction.currency,
+    });
+  };
 
   const accountName =
     accounts.find((a) => a.id === selectedAccountId)?.name ??
@@ -101,6 +125,42 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
       Alert.alert("Error", "Cannot connect to server");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Portfolio-op rows (buys/sells/transfers/swaps/income/etc.) carry a quantity
+  // or a holding link. Editing them through the generic transactions PUT would
+  // corrupt the leg pair — route them to the dedicated Portfolio OperationForm
+  // instead (the load endpoint resolves the op kind + primary leg id).
+  const isPortfolioRow =
+    (transaction.quantity != null && transaction.quantity !== 0) ||
+    transaction.portfolioHolding != null;
+
+  const handleEditInPortfolio = async () => {
+    try {
+      const res = await endpoints.loadPortfolioOperation(transaction.id);
+      if (res.success && res.data?.op) {
+        // getParent() is the tab navigator; navigate into the Portfolio tab's
+        // nested OperationForm. Cast to a permissive navigate (cross-navigator
+        // params aren't expressible through the typed parent prop).
+        const parent = navigation.getParent() as
+          | { navigate: (name: string, params?: object) => void }
+          | undefined;
+        parent?.navigate("Portfolio", {
+          screen: "OperationForm",
+          params: { op: res.data.op, editId: res.data.primaryTxId },
+        });
+      } else {
+        Alert.alert(
+          "Edit on the web",
+          "error" in res
+            ? res.error
+            : "This investment transaction can’t be edited on mobile yet."
+        );
+      }
+    } catch (e) {
+      logger.error("tx-detail", "portfolio-load threw", { detail: String(e) });
+      Alert.alert("Error", "Cannot connect to server");
     }
   };
 
@@ -242,9 +302,20 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
               </>
             ) : (
               <>
-                <TouchableOpacity onPress={() => setEditing(true)}>
-                  <Text style={[styles.actionBtn, { color: colors.primary }]}>Edit</Text>
-                </TouchableOpacity>
+                {isPortfolioRow ? (
+                  <TouchableOpacity onPress={handleEditInPortfolio}>
+                    <Text style={[styles.actionBtn, { color: colors.primary }]}>In Portfolio</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <>
+                    <TouchableOpacity onPress={handleSplit}>
+                      <Text style={[styles.actionBtn, { color: colors.primary }]}>Split</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => setEditing(true)}>
+                      <Text style={[styles.actionBtn, { color: colors.primary }]}>Edit</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
                 <TouchableOpacity onPress={handleDelete}>
                   <Text style={[styles.actionBtn, { color: colors.destructive }]}>Delete</Text>
                 </TouchableOpacity>
@@ -278,6 +349,19 @@ export default function TransactionDetailScreen({ route, navigation }: Props) {
               {transaction.currency}
             </Text>
           </View>
+
+          {/* Split summary chip — tap to open the editor (non-portfolio rows). */}
+          {splitCount > 0 && !isPortfolioRow && !editing && (
+            <TouchableOpacity
+              onPress={handleSplit}
+              style={[styles.splitChip, { backgroundColor: colors.secondary, borderColor: colors.border }]}
+            >
+              <Icon name="split" size={14} color={colors.primary} />
+              <Text style={[styles.splitChipText, { color: colors.foreground }]}>
+                Split · {splitCount}
+              </Text>
+            </TouchableOpacity>
+          )}
 
           {/* Fields */}
           <View
@@ -331,6 +415,18 @@ const styles = StyleSheet.create({
   amountText: { fontSize: 36, fontWeight: "800" },
   amountInput: { fontSize: 36, fontWeight: "800", textAlign: "center", minWidth: 200 },
   currencyLabel: { fontSize: 13, marginTop: 4 },
+  splitChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    marginBottom: 12,
+  },
+  splitChipText: { fontSize: 13, fontWeight: "600" },
   card: {
     borderRadius: 12,
     borderWidth: StyleSheet.hairlineWidth,

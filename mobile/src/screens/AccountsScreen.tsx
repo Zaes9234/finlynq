@@ -129,9 +129,15 @@ export default function AccountsScreen({ navigation }: Props) {
             </Text>
           )}
           renderItem={({ item }) => {
-            const value = item.convertedBalance ?? item.balance;
+            // Big number = the account's NATIVE balance (sign drives the color).
             const valueColor =
-              value > 0 ? colors.pos : value < 0 ? colors.neg : colors.foreground;
+              item.balance > 0 ? colors.pos : item.balance < 0 ? colors.neg : colors.foreground;
+            // Grayed sub-line = the display-currency translation. Hide it when
+            // there's nothing to convert (no rate) or the account is already in
+            // the display currency (the two lines would be identical).
+            const subCurrency = item.displayCurrency ?? displayCurrency;
+            const showSub =
+              item.convertedBalance != null && item.currency !== subCurrency;
             return (
               <TouchableOpacity
                 activeOpacity={0.7}
@@ -157,9 +163,16 @@ export default function AccountsScreen({ navigation }: Props) {
                   </View>
                 </View>
                 <View style={styles.rowRight}>
-                  <Text style={[styles.amount, { color: valueColor }]}>
-                    {formatCurrency(value, item.displayCurrency ?? displayCurrency, { decimals: 0 })}
-                  </Text>
+                  <View style={styles.amountStack}>
+                    <Text style={[styles.amount, { color: valueColor }]}>
+                      {formatCurrency(item.balance, item.currency, { decimals: 0 })}
+                    </Text>
+                    {showSub && (
+                      <Text style={[styles.amountSub, { color: colors.mutedForeground }]}>
+                        {formatCurrency(item.convertedBalance!, subCurrency, { decimals: 0 })}
+                      </Text>
+                    )}
+                  </View>
                   <Icon name="chevronRight" size={16} color={colors.mutedForeground} />
                 </View>
               </TouchableOpacity>
@@ -228,6 +241,8 @@ const styles = StyleSheet.create({
   accountName: { fontSize: 15, fontWeight: "600" },
   accountMeta: { fontSize: 12, marginTop: 2 },
   rowRight: { flexDirection: "row", alignItems: "center", gap: 4 },
+  amountStack: { alignItems: "flex-end" },
   amount: { fontSize: 16, fontWeight: "700", fontVariant: ["tabular-nums"] },
+  amountSub: { fontSize: 12, fontWeight: "600", marginTop: 2, fontVariant: ["tabular-nums"] },
   empty: { textAlign: "center", paddingVertical: 32, fontSize: 14 },
 });

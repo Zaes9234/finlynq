@@ -3,12 +3,16 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import TransactionsScreen from "../screens/TransactionsScreen";
 import TransactionDetailScreen from "../screens/TransactionDetailScreen";
 import AddTransactionScreen from "../screens/AddTransactionScreen";
+import SplitsEditorScreen from "../screens/SplitsEditorScreen";
 import type { Transaction } from "../../../shared/types";
 
 export type TransactionsStackParamList = {
   TransactionsList: undefined;
   TransactionDetail: { transaction: Transaction };
   AddTransaction: { mode?: "expense" | "income" | "transfer" } | undefined;
+  // Edit splits for an already-saved transaction. totalAmount carries the
+  // parent's sign; the editor works in magnitudes and re-applies it on save.
+  SplitsEditor: { transactionId: number; totalAmount: number; currency: string };
 };
 
 const Stack = createNativeStackNavigator<TransactionsStackParamList>();
@@ -21,6 +25,11 @@ export default function TransactionsStack() {
       <Stack.Screen
         name="AddTransaction"
         component={AddTransactionScreen}
+        options={{ presentation: "modal" }}
+      />
+      <Stack.Screen
+        name="SplitsEditor"
+        component={SplitsEditorScreen}
         options={{ presentation: "modal" }}
       />
     </Stack.Navigator>
