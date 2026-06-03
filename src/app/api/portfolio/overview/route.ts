@@ -145,6 +145,7 @@ export async function GET(request: NextRequest) {
     totalBuyAmount: number;       // in HOLDING'S currency, after FX normalization
     totalSellQty: number;
     totalSellAmount: number;      // in HOLDING'S currency
+    netQty: number;               // UNSKIPPED Σ(quantity) — position qty (see below)
     dividendsReceived: number;    // in HOLDING'S currency
     firstPurchaseDate: string | null;
   };
@@ -158,6 +159,7 @@ export async function GET(request: NextRequest) {
     totalBuyAmountInEntered: number;
     totalSellQty: number;
     totalSellAmountInEntered: number;
+    delta: number;                // UNSKIPPED Σ(quantity) in this bucket
     dividendsInEntered: number;
     firstPurchaseDate: string | null;
   };
@@ -241,6 +243,13 @@ export async function GET(request: NextRequest) {
       totalBuyAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 AND NOT ${skipCashLeg} THEN ${effectiveBuyAmount} ELSE 0 END), 0)::float8`,
       totalSellQty: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT ${skipCashLeg} THEN ABS(${schema.transactions.quantity}) ELSE 0 END), 0)::float8`,
       totalSellAmountInEntered: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) < 0 AND NOT ${skipCashLeg} THEN ABS(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})) ELSE 0 END), 0)::float8`,
+      // Position quantity is the UNSKIPPED net Σ(quantity). The #128/FINLYNQ-106
+      // cash-leg skip above applies to the buy/sell (realized-gain) tallies
+      // ONLY — NOT to position qty. A buy_cash_leg/sell_cash_leg lands on the
+      // cash SLEEVE holding, so deriving qty from `buyQty - sellQty` (skip-aware)
+      // drops the sleeve's own cash flows from its balance (showed Cash USD at
+      // $700k when the true balance was $0). Mirrors holdings-value.ts `delta`.
+      delta: sql<number>`COALESCE(SUM(${schema.transactions.quantity}), 0)::float8`,
       dividendsInEntered: dividendsCategoryId !== null
         ? sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.categoryId} = ${dividendsCategoryId} THEN COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}) ELSE 0 END), 0)::float8`
         : sql<number>`0::float8`,
@@ -285,6 +294,7 @@ export async function GET(request: NextRequest) {
       totalBuyAmountInEntered: Number(r.totalBuyAmountInEntered),
       totalSellQty: Number(r.totalSellQty),
       totalSellAmountInEntered: Number(r.totalSellAmountInEntered),
+      delta: Number(r.delta),
       dividendsInEntered: Number(r.dividendsInEntered),
       firstPurchaseDate: r.firstPurchaseDate,
     });
@@ -303,6 +313,7 @@ export async function GET(request: NextRequest) {
       totalBuyAmount: 0,
       totalSellQty: 0,
       totalSellAmount: 0,
+      netQty: 0,
       dividendsReceived: 0,
       firstPurchaseDate: null,
     };
@@ -312,6 +323,9 @@ export async function GET(request: NextRequest) {
       out.totalBuyAmount += b.totalBuyAmountInEntered * fx;
       out.totalSellQty += b.totalSellQty;
       out.totalSellAmount += b.totalSellAmountInEntered * fx;
+      // Position qty is currency-agnostic (a share/unit count) — sum the raw
+      // net deltas across buckets with NO FX conversion.
+      out.netQty += b.delta;
       out.dividendsReceived += b.dividendsInEntered * fx;
       if (b.firstPurchaseDate) {
         if (!out.firstPurchaseDate || b.firstPurchaseDate < out.firstPurchaseDate) {
@@ -346,7 +360,12 @@ export async function GET(request: NextRequest) {
     const sellAmt = a.totalSellAmount;
     const divs = a.dividendsReceived;
     const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
-    const remainingQty = buyQty - sellQty;
+    // Position qty = UNSKIPPED net Σ(quantity), NOT buyQty - sellQty (which is
+    // skip-aware and drops a cash sleeve's own buy_cash_leg/sell_cash_leg). For
+    // any non-cash-sleeve holding netQty == buyQty - sellQty, so this is a
+    // strict no-op for stocks; it only corrects cash sleeves with trade legs.
+    // avgCost / realizedGain stay on the skip-aware buy/sell tallies.
+    const remainingQty = a.netQty;
     const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
     const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
     const fpDate = a.firstPurchaseDate ?? null;

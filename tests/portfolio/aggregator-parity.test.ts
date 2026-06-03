@@ -30,11 +30,12 @@
  * and asserting the parity assertion fails.
  *
  * Fixture currency = USD throughout so every FX hop is 1 (the harness mocks all
- * FX getters to 1); parity is asserted on the STOCK holdings, where all three
- * aggregators must agree to the cent. The cash SLEEVE holding is where the
- * three legitimately model differently (live cash balance) and is not part of
- * the parity assertion — the #128 skip exists precisely so a cash leg never
- * leaks into a STOCK holding's qty/cost.
+ * FX getters to 1); STOCK-holding parity (qty/cost/marketValue) is asserted to
+ * the cent across all three aggregators (tc-1). The cash SLEEVE's COST tallies
+ * legitimately model differently, but its POSITION QUANTITY must also agree:
+ * tc-1b pins that overview + MCP report the sleeve's UNSKIPPED net Σ(quantity)
+ * (the dev-reported "$700k phantom cash" bug — the #128 skip was wrongly applied
+ * to the sleeve's own position qty, not just its realized-gain tally).
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -432,6 +433,36 @@ describe("FINLYNQ-106 cross-aggregator parity (issue #128 cash-leg skip)", () =>
     expect(r.holdingsValue.marketValue!).toBeCloseTo(r.overview.marketValue, 2);
     expect(r.mcp.marketValue).toBeCloseTo(r.overview.marketValue, 2);
     expect(r.mcp.qty).toBeCloseTo(r.overview.qty, 6);
+  });
+
+  // tc-1b (cash-sleeve position qty — the dev-reported bug): a cash SLEEVE's
+  // own position quantity is the UNSKIPPED net Σ(quantity). The #128 cash-leg
+  // skip applies to the buy/sell (realized-gain) tallies ONLY; deriving sleeve
+  // qty from `buyQty - sellQty` (skip-aware) drops the sleeve's own
+  // buy_cash_leg/sell_cash_leg and reports a phantom balance — on dev a Cash USD
+  // sleeve showed $700,000 when the true balance was $0 (deposit +700k then a
+  // -700k buy_cash_leg). Fixture sleeve nets buy_cash_leg(-2000) +
+  // sell_cash_leg(+1000) = -1000, whereas the skip-aware tally is 0.
+  it("tc-1b: overview + MCP report the cash sleeve's UNSKIPPED net qty, not the skip-aware buyQty-sellQty", async () => {
+    const res = await overviewGET(overviewRequest());
+    const body = (await res.json()) as { holdings: Array<Record<string, number | string | null>> };
+    const ovSleeve = body.holdings.find((h) => h.id === CASH_SLEEVE)!;
+
+    const mcp = await aggregateHoldings(mockedDb as never, "parity-user", TEST_DEK, {
+      dividendsCategoryId: DIVIDENDS_CATEGORY_ID,
+    });
+    const mcpSleeve = mcp.find((m) => m.holding_id === CASH_SLEEVE)!;
+
+    // True net = -2000 + 1000 = -1000. The OLD bug reported skip-aware 0.
+    expect(Number(ovSleeve.quantity)).toBeCloseTo(-1000, 6);
+    expect(mcpSleeve.net_quantity).toBeCloseTo(-1000, 6);
+    expect(Number(ovSleeve.quantity)).not.toBe(0);
+    // The skip-aware buy/sell tally on the sleeve IS 0 (both cash legs skipped)
+    // — proving the fix sources position qty from net_quantity, NOT that tally.
+    expect(mcpSleeve.buy_qty - mcpSleeve.sell_qty).toBe(0);
+    expect(mcpSleeve.net_quantity).not.toBe(mcpSleeve.buy_qty - mcpSleeve.sell_qty);
+    // overview + MCP agree on the sleeve's net position quantity.
+    expect(Number(ovSleeve.quantity)).toBeCloseTo(mcpSleeve.net_quantity, 6);
   });
 
   // tc-2 (synthetic divergence): removing the #128 skip from exactly one

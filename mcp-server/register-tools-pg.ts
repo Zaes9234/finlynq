@@ -5976,7 +5976,15 @@ export function registerPgTools(
         const sellQty = Number(m.sell_qty ?? 0);
         const sellAmt = Number(m.sell_amount ?? 0);
         const divs = Number(m.dividends ?? 0);
-        const remainingQty = buyQty - sellQty;
+        // Position qty = UNSKIPPED net Σ(quantity) (aggregateHoldings'
+        // `net_quantity`, accumulated for every row BEFORE the #128 cash-leg
+        // skip). Using buyQty - sellQty here is skip-aware and drops a cash
+        // sleeve's own buy_cash_leg/sell_cash_leg from its balance (showed Cash
+        // USD at 700k when the true balance was 0). For non-cash-sleeve holdings
+        // net_quantity == buyQty - sellQty (no-op). Mirrors
+        // get_portfolio_performance_v2 + holdings-value.ts. avgCost/realizedGain
+        // stay on the skip-aware buy/sell tallies.
+        const remainingQty = Number(m.net_quantity ?? (buyQty - sellQty));
         const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
         const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
         const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
@@ -6575,6 +6583,12 @@ export function registerPgTools(
       };
 
       let buyQty = 0, buyAmt = 0, sellQty = 0, sellAmt = 0, divAmt = 0;
+      // Position qty = UNSKIPPED net Σ(quantity), accumulated for EVERY row
+      // (incl. paired cash legs). The #128 cash-leg skip below applies to the
+      // buy/sell (realized-gain) tallies ONLY — using buyQty - sellQty for
+      // position qty drops a cash sleeve's own buy_cash_leg/sell_cash_leg from
+      // its balance. For non-cash-sleeve holdings netQty == buyQty - sellQty.
+      let netQty = 0;
       const purchases: typeof txns = [];
       const sales: typeof txns = [];
       const dividends: typeof txns = [];
@@ -6607,6 +6621,7 @@ export function registerPgTools(
         // rationale.
         const tradeLinkId = t.trade_link_id ?? null;
         const kind = (t.kind ?? null) as string | null;
+        netQty += qty;
         const isPairedCashLeg =
           kind === "buy_cash_leg" || kind === "sell_cash_leg" ||
           (tradeLinkId != null && amt === 0);
@@ -6649,7 +6664,9 @@ export function registerPgTools(
       }
 
       const avgCost = buyQty > 0 ? buyAmt / buyQty : null;
-      const remainingQty = buyQty - sellQty;
+      // Position qty = UNSKIPPED net Σ(quantity) — see netQty declaration above.
+      // avgCost / realizedGain stay on the skip-aware buy/sell tallies.
+      const remainingQty = netQty;
       const costBasis = avgCost !== null && remainingQty > 0 ? remainingQty * avgCost : null;
       const realizedGain = avgCost !== null ? sellAmt - (sellQty * avgCost) : 0;
       const totalReturn = realizedGain + divAmt; // no live price = no unrealized
