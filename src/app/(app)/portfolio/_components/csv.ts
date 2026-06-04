@@ -1,0 +1,71 @@
+/**
+ * Portfolio CSV export helpers (FINLYNQ-118 Phase 3).
+ *
+ * Extracted verbatim from portfolio/page.tsx. `exportHoldingsToCSV` was
+ * removed 2026-05-01 (issue #25): the All Holdings table now renders
+ * canonical-holding rows from `byHolding`, not per-(account, holding) rows
+ * from `holdings`. The CSV button uses `exportByHoldingToCSV` below; users
+ * who want a per-account dump can use the Holdings-by-Account panel's
+ * per-row drill-down or the /api/portfolio endpoint.
+ */
+
+import type { AggregatedStock, ByHoldingRow } from "../_types";
+
+function downloadCSV(csv: string, filename: string) {
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+export function exportStocksToCSV(stocks: AggregatedStock[], etfTotalValueDisplay: number, displayCurrency: string) {
+  const header = ["#", "Stock", "Ticker", "Sector", "Country", "Weight %", `Value ${displayCurrency}`, "Contributing ETFs", "ETF Weights"];
+  const rows = stocks.map((s, i) => [
+    i + 1,
+    `"${s.name}"`,
+    s.ticker,
+    s.sector,
+    s.country,
+    s.effectiveWeight.toFixed(2),
+    s.effectiveValueDisplay.toFixed(2),
+    `"${s.contributingEtfs.map(e => e.symbol).join(", ")}"`,
+    `"${s.contributingEtfs.map(e => `${e.symbol}: ${e.weight}%`).join(", ")}"`,
+  ]);
+  const totalWeight = stocks.reduce((s, x) => s + x.effectiveWeight, 0);
+  const totalValue = stocks.reduce((s, x) => s + x.effectiveValueDisplay, 0);
+  rows.push(["", "", "", "", "TOTAL", totalWeight.toFixed(2), totalValue.toFixed(2), "", ""] as unknown as string[]);
+  rows.push(["", "", "", "", "ETF Portfolio Value", "", etfTotalValueDisplay.toFixed(2), "", ""] as unknown as string[]);
+
+  const csv = [header.join(","), ...rows.map(r => (r as (string | number)[]).join(","))].join("\n");
+  downloadCSV(csv, `etf-stock-exposure-${new Date().toISOString().slice(0, 10)}.csv`);
+}
+
+export function exportByHoldingToCSV(rows: ByHoldingRow[], displayCurrency: string) {
+  const header = ["#", "Holding", "Symbol", "Type", "Total Qty", `Avg Cost ${displayCurrency}`, `Cost Basis ${displayCurrency}`, `Mkt Value ${displayCurrency}`, "Unrealized G/L", "Unrealized %", "Realized G/L", "Dividends", "Total Return", "Total Return %", "Accounts", "Weight %"];
+  const out = rows.map((r, i) => [
+    i + 1,
+    `"${r.name}"`,
+    r.symbol ?? "",
+    r.assetType,
+    r.totalQty,
+    r.avgCostDisplay?.toFixed(4) ?? "",
+    r.costBasisDisplay.toFixed(2),
+    r.marketValueDisplay.toFixed(2),
+    r.unrealizedGainDisplay.toFixed(2),
+    r.unrealizedGainPct?.toFixed(2) ?? "",
+    r.realizedGainDisplay.toFixed(2),
+    r.dividendsDisplay.toFixed(2),
+    r.totalReturnDisplay.toFixed(2),
+    r.totalReturnPct?.toFixed(2) ?? "",
+    r.accountCount,
+    r.pctOfPortfolio?.toFixed(2) ?? "",
+  ]);
+  const totalMV = rows.reduce((s, r) => s + r.marketValueDisplay, 0);
+  const totalUnreal = rows.reduce((s, r) => s + r.unrealizedGainDisplay, 0);
+  out.push(["", "TOTAL", "", "", "", "", "", totalMV.toFixed(2), totalUnreal.toFixed(2), "", "", "", "", "", "", "100.00"] as unknown as string[]);
+  const csv = [header.join(","), ...out.map(r => (r as (string | number | null)[]).join(","))].join("\n");
+  downloadCSV(csv, `portfolio-by-holding-${new Date().toISOString().slice(0, 10)}.csv`);
+}
