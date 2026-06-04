@@ -1,21 +1,35 @@
 "use client";
 
 /**
- * useTransactions (FINLYNQ-111 Phase 2).
+ * useTransactions (FINLYNQ-111 Phase 2; SWR adoption FINLYNQ-115).
  *
  * Owns the main list state (`txns` / `total` / `loading` / `page`) + `loadTxns`.
- * Mechanical extraction of the inline `loadTxns` useCallback + its driving
- * effect — same deps, same fetch URL (built by the pure buildTransactionQuery),
- * same `{data,total}` unwrap (issue #59), same setLoading bracketing.
+ * The PUBLIC SIGNATURE is unchanged from the FINLYNQ-111 extraction —
+ * `{ txns, total, loading, limit, loadTxns }` — so the consuming page is
+ * untouched. The INTERNALS now run on `useSWR`:
+ *
+ *   - Cache key = the request URL string, built by the pure, unit-tested
+ *     `buildTransactionQuery(...)` (same `{data,total}` shape, issue #59). The
+ *     key changes exactly when the effective request changes — which is exactly
+ *     when the pre-115 `loadTxns` `useCallback` was re-created and re-fired.
+ *   - `loadTxns()` is a bound `mutate()` (imperative "refetch now") — same call
+ *     sites in the page (after create / edit / delete / dialog save).
+ *   - `swrListOptions` keeps the request pattern no noisier than before
+ *     (no focus/reconnect revalidation; dedup; background revalidate on
+ *     nav-back; keepPreviousData so paging/filtering doesn't blank the table).
  */
 
-import { useState, useCallback, useEffect } from "react";
+import { useCallback } from "react";
+import useSWR from "swr";
 import { buildTransactionQuery } from "@/lib/transactions/build-query";
+import { jsonFetcher, swrListOptions } from "@/lib/swr";
 import type { Account, ColFilterShape, SortPref, Transaction } from "../_types";
 
 const limit = 50;
 
 export const TX_PAGE_LIMIT = limit;
+
+type TxListResponse = { data?: Transaction[]; total?: number };
 
 export function useTransactions(
   filters: {
@@ -32,28 +46,37 @@ export function useTransactions(
   accounts: Account[],
   page: number,
 ) {
-  const [txns, setTxns] = useState<Transaction[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
+  // Issue #59 — the top-bar quick filters are URL-driven (deep links from
+  // /portfolio etc. must keep working); per-column filters + sort are persisted
+  // server-side. Both sets narrow the result. The param assembly is the pure,
+  // unit-tested buildTransactionQuery (FINLYNQ-111 Phase 1), and its string is
+  // the SWR cache key (FINLYNQ-115) — deterministic per filter/sort/page combo.
+  const params = buildTransactionQuery(filters, sortPref, colFilters, accounts, { page, limit });
+  const key = `/api/transactions?${params}`;
 
+  const { data, isLoading, isValidating, mutate } = useSWR<TxListResponse>(
+    key,
+    jsonFetcher,
+    swrListOptions,
+  );
+
+  // `loading` matches the pre-115 contract: it was set true at the start of
+  // EVERY fetch (mount, dep change, manual loadTxns) and cleared in `finally`.
+  // SWR's isLoading is the first-load-with-no-data signal; isValidating covers
+  // the in-flight refetches (dep change with cached data, manual mutate).
+  const loading = isLoading || isValidating;
+
+  // Same imperative-refetch surface the page calls after create/edit/delete and
+  // from the split dialog's onSaved. Backed by SWR's bound mutate (revalidate).
   const loadTxns = useCallback(() => {
-    setLoading(true);
-    // Issue #59 — the top-bar quick filters are URL-driven (deep links from
-    // /portfolio etc. must keep working); per-column filters + sort are
-    // persisted server-side. Both sets narrow the result. The param assembly
-    // is the pure, unit-tested buildTransactionQuery (FINLYNQ-111 Phase 1).
-    const params = buildTransactionQuery(filters, sortPref, colFilters, accounts, { page, limit });
+    void mutate();
+  }, [mutate]);
 
-    fetch(`/api/transactions?${params}`)
-      .then((r) => r.json())
-      .then((d) => {
-        setTxns(d.data ?? []);
-        setTotal(d.total ?? 0);
-      })
-      .finally(() => setLoading(false));
-  }, [filters, page, sortPref, colFilters, accounts]);
-
-  useEffect(() => { loadTxns(); }, [loadTxns]);
-
-  return { txns, total, loading, limit, loadTxns };
+  return {
+    txns: data?.data ?? [],
+    total: data?.total ?? 0,
+    loading,
+    limit,
+    loadTxns,
+  };
 }
