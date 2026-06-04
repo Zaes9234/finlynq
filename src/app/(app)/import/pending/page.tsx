@@ -31,14 +31,16 @@ import {
 import { useSearchParams } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Info, AlertTriangle } from "lucide-react";
-import { formatCurrency } from "@/lib/currency";
+import { Info } from "lucide-react";
 import { ReconciliationCallout } from "@/components/staging/reconciliation-callout";
 import {
   type StagedEditableRow,
 } from "@/components/staging/staged-row-editor";
 import { UnresolvedCategoriesBanner } from "@/components/staging/unresolved-categories-banner";
-import { BalanceWarningBanner } from "@/components/staging/balance-warning-banner";
+import {
+  BalanceWarningBanner,
+  type BalanceWarning,
+} from "@/components/staging/balance-warning-banner";
 import { AccountSelector, type AccountOption } from "@/components/import/reconcile/account-selector";
 import { TwoPaneLayout } from "@/components/import/reconcile/two-pane-layout";
 import { safeName } from "@/lib/safe-name";
@@ -292,35 +294,48 @@ function PendingImportsPageInner() {
     return map;
   }, [detail]);
 
-  // 2026-06-04 — existing bank-ledger drift summary. The bank pane shows the
-  // per-row Calculated (runningBalance) vs Loaded (anchorBalance) mismatch,
-  // but only inline; this rolls it up into a top banner so a multi-day drift
-  // (a missing/duplicated bank-ledger row) isn't easy to miss. Deduped by
-  // date (the server stamps the same balances on every row of a day) and
-  // rounded to cents so float noise doesn't register as drift.
-  const bankLedgerDrift = useMemo(() => {
-    const byDate = new Map<string, { calculated: number; loaded: number }>();
+  // 2026-06-04 — existing bank-ledger drift, surfaced through the SAME rich
+  // BalanceWarningBanner the staged-file check uses (collapsible Date / Prior
+  // anchor / Expected / Bank says / Δ table) so the experience matches the
+  // pre-consolidation view. Built from dbRows' per-day Calculated
+  // (runningBalance = Expected) vs Loaded (anchorBalance = Bank says) — the
+  // same numbers the bank pane shows — with the prior anchored day as the
+  // "Prior anchor". Deduped by date (the server stamps the same balances on
+  // every row of a day) and cent-rounded so float noise isn't flagged.
+  const bankLedgerWarnings = useMemo<BalanceWarning[]>(() => {
+    const byDate = new Map<string, { anchor: number; running: number | null }>();
     for (const r of dbRows) {
-      if (r.runningBalance == null || r.anchorBalance == null) continue;
+      if (r.anchorBalance == null) continue;
       if (!byDate.has(r.date)) {
         byDate.set(r.date, {
-          calculated: r.runningBalance,
-          loaded: r.anchorBalance,
+          anchor: r.anchorBalance,
+          running: r.runningBalance ?? null,
         });
       }
     }
-    const drifts: {
-      date: string;
-      calculated: number;
-      loaded: number;
-      diff: number;
-    }[] = [];
-    for (const [date, v] of byDate) {
-      const diff = Math.round((v.calculated - v.loaded) * 100) / 100;
-      if (Math.abs(diff) > 0.01) drifts.push({ date, ...v, diff });
+    const anchors = Array.from(byDate.entries())
+      .map(([date, v]) => ({ date, anchor: v.anchor, running: v.running }))
+      .sort((a, z) => a.date.localeCompare(z.date));
+    const out: BalanceWarning[] = [];
+    for (let i = 1; i < anchors.length; i++) {
+      const cur = anchors[i];
+      const prev = anchors[i - 1];
+      if (cur.running == null) continue;
+      const expected = cur.running;
+      const actual = cur.anchor;
+      const delta = Math.round((actual - expected) * 100) / 100;
+      if (Math.abs(delta) <= 0.01) continue;
+      out.push({
+        date: cur.date,
+        expected,
+        actual,
+        delta,
+        priorAnchorDate: prev.date,
+        priorAnchorBalance: prev.anchor,
+        intervalSum: Math.round((expected - prev.anchor) * 100) / 100,
+      });
     }
-    drifts.sort((a, z) => Math.abs(z.diff) - Math.abs(a.diff));
-    return drifts;
+    return out;
   }, [dbRows]);
   const driftCurrency = dbRows[0]?.currency ?? "USD";
 
@@ -1072,35 +1087,19 @@ function PendingImportsPageInner() {
         />
       )}
 
-      {detail && bankLedgerDrift.length > 0 && (
-        <Card className="border-amber-300 bg-amber-50/50">
-          <CardContent className="py-2.5 px-3 text-sm flex items-start gap-3">
-            <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-amber-600" />
-            <div className="flex-1">
-              <p className="font-medium text-amber-900">
-                Bank ledger balance drift on {bankLedgerDrift.length}{" "}
-                {bankLedgerDrift.length === 1 ? "day" : "days"}
-              </p>
-              <p className="text-amber-800/90 text-xs mt-0.5">
-                The calculated running balance doesn&apos;t match the loaded
-                statement anchor — usually a missing or duplicated bank-ledger
-                row. Largest gap:{" "}
-                <span className="font-medium">
-                  {formatCurrency(
-                    Math.abs(bankLedgerDrift[0].diff),
-                    driftCurrency,
-                  )}
-                </span>{" "}
-                on {bankLedgerDrift[0].date} (calculated{" "}
-                {formatCurrency(bankLedgerDrift[0].calculated, driftCurrency)} vs
-                loaded {formatCurrency(bankLedgerDrift[0].loaded, driftCurrency)}
-                ). Review the Calculated vs Loaded columns in the bank ledger
-                below.
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      {/* Existing bank-ledger drift — the SAME rich banner as the staged-file
+          check, shown only when the staged file itself produced no balance
+          warnings (so an active import with its own anchors doesn't render a
+          duplicate banner). Restores the pre-consolidation rich balance view
+          for files that carry no Balance column of their own. */}
+      {detail &&
+        (detail.balanceWarnings?.length ?? 0) === 0 &&
+        bankLedgerWarnings.length > 0 && (
+          <BalanceWarningBanner
+            warnings={bankLedgerWarnings}
+            currency={driftCurrency}
+          />
+        )}
 
       {anchorsOnlyHint && (
         <Card className="border-sky-300 bg-sky-50/50">
