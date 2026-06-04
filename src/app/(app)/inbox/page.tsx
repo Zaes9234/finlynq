@@ -87,6 +87,10 @@ function InboxPageInner() {
   const [accountId, setAccountId] = useState<number | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Bumped after a successful in-drawer upload (Phase 2). Threaded into each
+   *  tab body's `key` so a bump remounts the active tab → it refetches and the
+   *  freshly-uploaded rows appear without leaving /inbox. */
+  const [reloadKey, setReloadKey] = useState(0);
   /** Reconcile snapshot is fetched by InboxReconcileTab and bubbled up
    *  so InboxReconciledTab can re-render the same data filtered to the
    *  linked rows — avoids fetching the same endpoint twice. */
@@ -380,13 +384,14 @@ function InboxPageInner() {
 
         {visibleTabs.includes("staging") && (
           <TabsContent value="staging">
-            <InboxStagingTab accountId={account.id} />
+            <InboxStagingTab key={`staging-${reloadKey}`} accountId={account.id} />
           </TabsContent>
         )}
 
         {visibleTabs.includes("reconcile") && (
           <TabsContent value="reconcile">
             <InboxReconcileTab
+              key={`reconcile-${reloadKey}`}
               accountId={account.id}
               accounts={accounts}
               onReconcileDataChange={setReconcileData}
@@ -397,6 +402,7 @@ function InboxPageInner() {
         {visibleTabs.includes("to-approve") && (
           <TabsContent value="to-approve">
             <InboxToApproveTab
+              key={`to-approve-${reloadKey}`}
               accountId={account.id}
               accounts={accounts}
             />
@@ -406,6 +412,7 @@ function InboxPageInner() {
         {visibleTabs.includes("to-categorize") && (
           <TabsContent value="to-categorize">
             <InboxToCategorizeTab
+              key={`to-categorize-${reloadKey}`}
               accountId={account.id}
               accounts={accounts}
             />
@@ -419,12 +426,13 @@ function InboxPageInner() {
             // Approve-each lens self-fetches the snapshot — the Reconcile
             // tab isn't rendered alongside, so there's no parent-level
             // snapshot to share.
-            <InboxReconciledTab accountId={account.id} />
+            <InboxReconciledTab key={`reconciled-${reloadKey}`} accountId={account.id} />
           ) : (
             // Auto-pilot lens: same snapshot fetch as Approve-each, plus
             // the "X rows auto-applied by rules" banner so the user can
             // audit what the upload-time rule firing did.
             <InboxReconciledTab
+              key={`reconciled-${reloadKey}`}
               accountId={account.id}
               showAutoRuleBanner
             />
@@ -437,7 +445,17 @@ function InboxPageInner() {
         onOpenChange={setUploadOpen}
         accountId={account.id}
         accountLabel={safeAccountName(account)}
+        accountCurrency={account.currency}
         policy={policy}
+        onUploaded={() => {
+          // Stay on /inbox; refresh the policy-appropriate tab so the
+          // freshly-uploaded rows appear. setReconcileData(null) clears the
+          // shared manual-lens snapshot; the reloadKey bump remounts each
+          // tab body so it refetches.
+          setReconcileData(null);
+          setTab(defaultTabFor(activeLens));
+          setReloadKey((k) => k + 1);
+        }}
       />
 
       {showLensToast && (
