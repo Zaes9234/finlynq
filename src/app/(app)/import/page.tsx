@@ -1,10 +1,29 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+/**
+ * /import — the single account-anchored money-in surface (consolidation
+ * Phase 3, 2026-06-04). Formerly /inbox; the legacy /import upload hub now
+ * lives at /import/classic (a temporary backup), and import MANAGEMENT
+ * (templates / connectors / email-import address / investment statements)
+ * lives at /settings/import.
+ *
+ * One page per account with a policy-driven tab set. The three policies —
+ * Auto-pilot / Approve-each / Manual — are baked into `accounts.mode`. This
+ * page surfaces them as tabs and lets the user temporarily flip to a
+ * different lens via the chip (no persisted state) or save the lens as the
+ * account's new policy via the toast.
+ *
+ * The Manual lens embeds the same panes shipped under /import/pending and
+ * /reconcile (both still reachable, redirected to here in a later phase).
+ *
+ * URL state: ?account=<id> and ?tab=<tab>. The tab is persisted so deep
+ * links + the legacy-route redirects can target a specific tab; on lens
+ * change we re-snap to a valid tab for the new lens.
+ */
+
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
-import { OnboardingTips } from "@/components/onboarding-tips";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Select,
   SelectContent,
@@ -13,763 +32,439 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Upload,
-  CheckCircle2,
-  AlertCircle,
-  Mail,
-  Copy,
-  RefreshCw,
-  BookTemplate,
-  Link as LinkIcon,
-  ListChecks,
-  ArrowLeftRight,
-} from "lucide-react";
-import Link from "next/link";
-import { FileDropZone } from "./components/file-drop-zone";
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@/components/ui/tabs";
+import { Upload } from "lucide-react";
+import { safeAccountName } from "@/lib/safe-name";
+import { LensChip } from "@/components/inbox/lens-chip";
+import { LensToast } from "@/components/inbox/lens-toast";
+import { ModeBanner } from "@/components/inbox/mode-banner";
+import { UploadDrawer } from "@/components/inbox/upload-drawer";
+import { isMode, type Mode } from "@/components/inbox/modes";
+import { InboxStagingTab } from "@/components/inbox/inbox-staging-tab";
 import {
-  ImportPreviewDialog,
-  type ProbableDuplicateMatch,
-  type ExactDuplicateMatch,
-} from "./components/import-preview-dialog";
-import { OfxPreview } from "./components/ofx-preview";
-import {
-  InvestmentStatementPreview,
-  type InvestmentExternalAccount,
-} from "./components/investment-statement-preview";
-import { TemplateManager } from "./components/template-manager";
-import { ColumnMappingDialog } from "./components/column-mapping-dialog";
-import { ConnectorTab } from "./components/connector-tab";
-import {
-  TemplatePickerDialog,
-  extractCsvHeadersFromFile,
-} from "./components/template-picker-dialog";
-import type { RawTransaction } from "@/lib/import-pipeline";
-import type { OfxTransaction, OfxAccountInfo } from "@/lib/ofx-parser";
-import type { ColumnMapping, ImportTemplate } from "@/lib/import-templates";
+  InboxReconcileTab,
+  type ReconcileData,
+} from "@/components/inbox/inbox-reconcile-tab";
+import { InboxReconciledTab } from "@/components/inbox/inbox-reconciled-tab";
+import { InboxToApproveTab } from "@/components/inbox/inbox-to-approve-tab";
+import { InboxToCategorizeTab } from "@/components/inbox/inbox-to-categorize-tab";
 
-interface PreviewRow extends RawTransaction {
-  hash: string;
-  rowIndex: number;
+interface Account {
+  id: number;
+  name: string | null;
+  alias?: string | null;
+  currency: string;
+  archived?: boolean;
+  isInvestment?: boolean;
+  mode: Mode;
+}
+
+function defaultTabFor(m: Mode) {
+  if (m === "manual") return "staging";
+  if (m === "approve") return "to-approve";
+  return "to-categorize";
 }
 
 export default function ImportPage() {
-  // File upload state
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [validRows, setValidRows] = useState<PreviewRow[]>([]);
-  const [duplicateRows, setDuplicateRows] = useState<PreviewRow[]>([]);
-  const [duplicateMatches, setDuplicateMatches] = useState<ExactDuplicateMatch[]>([]);
-  const [probableDuplicates, setProbableDuplicates] = useState<ProbableDuplicateMatch[]>([]);
-  const [errorRows, setErrorRows] = useState<Array<{ rowIndex: number; message: string }>>([]);
-  const [isImporting, setIsImporting] = useState(false);
-  const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
-
-  // CSV template state
-  const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
-  const [appliedTemplateId, setAppliedTemplateId] = useState<number | null>(null);
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
-  const [templates, setTemplates] = useState<ImportTemplate[]>([]);
-  const [lastUploadedFile, setLastUploadedFile] = useState<File | null>(null);
-
-  // Template picker (shown for CSV uploads when the user has saved templates).
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerHeaders, setPickerHeaders] = useState<string[]>([]);
-  const [pickerFile, setPickerFile] = useState<File | null>(null);
-
-  const [accountNames, setAccountNames] = useState<string[]>([]);
-
-  // Column mapping dialog state (shown when auto-detect fails)
-  const [mappingDialogOpen, setMappingDialogOpen] = useState(false);
-  const [mappingHeaders, setMappingHeaders] = useState<string[]>([]);
-  const [mappingSampleRows, setMappingSampleRows] = useState<Record<string, string>[]>([]);
-  const [mappingSuggested, setMappingSuggested] = useState<ColumnMapping | null>(null);
-  const [mappingFileName, setMappingFileName] = useState<string>("");
-  const [mappingSubmitting, setMappingSubmitting] = useState(false);
-
-  // OFX preview state
-  const [ofxPreviewOpen, setOfxPreviewOpen] = useState(false);
-  const [ofxTransactions, setOfxTransactions] = useState<OfxTransaction[]>([]);
-  const [ofxAccountInfo, setOfxAccountInfo] = useState<OfxAccountInfo>({ bankId: "", accountId: "", accountType: "" });
-  const [ofxBalanceAmount, setOfxBalanceAmount] = useState<number | null>(null);
-  const [ofxBalanceDate, setOfxBalanceDate] = useState<string | null>(null);
-  const [ofxDateRange, setOfxDateRange] = useState<{ start: string; end: string } | null>(null);
-  const [ofxCurrency, setOfxCurrency] = useState("CAD");
-  // Issue #62: track which OFX flavor (ofx vs qfx) so /api/import/execute can
-  // be stamped with the right `source:<format>` tag at handleOfxConfirm time.
-  const [ofxFormat, setOfxFormat] = useState<"ofx" | "qfx">("ofx");
-
-  // Issue #64: investment-statement preview state. The investment path
-  // (OFX with INVSTMTRS, QFX, IBKR FlexQuery XML) routes through a separate
-  // dialog because the file may contain multiple brokerage sub-accounts the
-  // user must individually bind to Finlynq accounts.
-  const [investmentPreviewOpen, setInvestmentPreviewOpen] = useState(false);
-  const [investmentFormat, setInvestmentFormat] =
-    useState<"ofx" | "qfx" | "ibkr-xml">("ofx");
-  const [investmentExternalAccounts, setInvestmentExternalAccounts] =
-    useState<InvestmentExternalAccount[]>([]);
-  const [investmentRows, setInvestmentRows] = useState<RawTransaction[]>([]);
-  const [investmentDateRange, setInvestmentDateRange] =
-    useState<{ start: string; end: string } | null>(null);
-
-  // Email state
-  const [importEmail, setImportEmail] = useState<string | null>(null);
-  const [emailLoading, setEmailLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  // Fetch accounts, templates, and email config on mount
-  useEffect(() => {
-    fetch("/api/accounts")
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data)) setAccountNames(data.map((a: { name: string }) => a.name));
-      })
-      .catch(() => {});
-
-    fetch("/api/import/templates")
-      .then((r) => r.json())
-      .then((data) => { if (Array.isArray(data)) setTemplates(data); })
-      .catch(() => {});
-
-    fetch("/api/import/email-config")
-      .then((r) => r.json())
-      .then((data) => setImportEmail(data.email))
-      .catch(() => {});
-  }, []);
-
-  // Core file preview function — called with optional templateId override.
-  // `noTemplate=true` is set when the user picked "Auto-detect" in the
-  // template-picker dialog so the server also skips its auto-match fallback.
-  const previewFile = useCallback(async (file: File, templateId?: number, noTemplate?: boolean) => {
-    setUploadStatus(null);
-
-    const formData = new FormData();
-    formData.append("file", file);
-    if (templateId !== undefined) formData.append("templateId", String(templateId));
-    if (noTemplate) formData.append("noTemplate", "1");
-
-    try {
-      const res = await fetch("/api/import/preview", { method: "POST", body: formData });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-
-      if (data.type === "ofx") {
-        setOfxTransactions(data.transactions ?? []);
-        setOfxAccountInfo(data.account ?? { bankId: "", accountId: "", accountType: "" });
-        setOfxBalanceAmount(data.balanceAmount ?? null);
-        setOfxBalanceDate(data.balanceDate ?? null);
-        setOfxDateRange(data.dateRange ?? null);
-        setOfxCurrency(data.currency ?? "CAD");
-        setOfxFormat(data.format === "qfx" ? "qfx" : "ofx");
-        setOfxPreviewOpen(true);
-      } else if (data.type === "investment-statement") {
-        // Issue #64: OFX/QFX investment statement OR IBKR FlexQuery XML.
-        // Rows arrive with synthetic external-id `account` values + a
-        // matching externalAccounts inventory; the dialog asks the user to
-        // bind each one to a Finlynq account before /api/import/execute.
-        const fmt: "ofx" | "qfx" | "ibkr-xml" =
-          data.format === "qfx"
-            ? "qfx"
-            : data.format === "ibkr-xml"
-              ? "ibkr-xml"
-              : "ofx";
-        setInvestmentFormat(fmt);
-        setInvestmentExternalAccounts(data.externalAccounts ?? []);
-        setInvestmentRows(data.rows ?? []);
-        setInvestmentDateRange(data.dateRange ?? null);
-        setInvestmentPreviewOpen(true);
-      } else if (data.type === "csv-needs-mapping") {
-        // Auto-detect failed — open the column mapping dialog.
-        setMappingHeaders(data.headers ?? []);
-        setMappingSampleRows(data.sampleRows ?? []);
-        setMappingSuggested(data.suggestedMapping ?? null);
-        setMappingFileName(data.fileName ?? file.name);
-        setMappingDialogOpen(true);
-      } else if (data.type === "csv" || data.valid !== undefined) {
-        setCsvHeaders(data.headers ?? []);
-        setAppliedTemplateId(data.appliedTemplateId ?? null);
-        setValidRows(data.valid ?? []);
-        setDuplicateRows(data.duplicates ?? []);
-        setDuplicateMatches(data.duplicateMatches ?? []);
-        setProbableDuplicates(data.probableDuplicates ?? []);
-        setErrorRows(data.errors ?? []);
-        setPreviewOpen(true);
-      } else {
-        setUploadStatus({ type: "error", message: "Unsupported file format. Please upload a CSV, Excel, PDF, OFX, QFX, or IBKR FlexQuery XML file." });
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Failed to process file";
-      setUploadStatus({ type: "error", message });
-    }
-  }, []);
-
-  // Universal file upload handler.
-  //
-  // For CSV uploads with saved templates, intercept and show the template
-  // picker first so the user can pick which mapping to use before we run
-  // the preview. The picker is skipped when:
-  //   - The dropdown already has a template selected (user already chose).
-  //   - The file isn't a `.csv` (OFX / QFX / Excel / PDF / XML don't use templates).
-  //   - The user has no saved templates yet.
-  //   - We can't read CSV headers from the file (empty / unreadable).
-  const handleFileUpload = useCallback(async (file: File) => {
-    setLastUploadedFile(file);
-    const tid = selectedTemplateId ? parseInt(selectedTemplateId, 10) : undefined;
-
-    const isCsv = file.name.toLowerCase().endsWith(".csv");
-    if (!isCsv || tid !== undefined || templates.length === 0) {
-      await previewFile(file, tid);
-      return;
-    }
-
-    const headers = await extractCsvHeadersFromFile(file).catch(() => []);
-    if (headers.length === 0) {
-      await previewFile(file, tid);
-      return;
-    }
-
-    setPickerHeaders(headers);
-    setPickerFile(file);
-    setPickerOpen(true);
-  }, [previewFile, selectedTemplateId, templates.length]);
-
-  // Picker "Continue" — null = auto-detect (no templateId forced).
-  // Also pass noTemplate so the server skips its auto-match fallback —
-  // otherwise step 3 of the CSV pipeline would silently apply a template
-  // the user just declined.
-  const handlePickerContinue = useCallback(
-    async (templateId: number | null) => {
-      setPickerOpen(false);
-      const file = pickerFile;
-      if (!file) return;
-      if (templateId === null) {
-        await previewFile(file, undefined, true);
-      } else {
-        await previewFile(file, templateId);
-      }
-    },
-    [pickerFile, previewFile],
-  );
-
-  // "Change template" from the preview dialog — reopen the picker for
-  // the last uploaded file. Falls back to a no-op if headers / file went
-  // out of scope (e.g. the user reloaded the page).
-  const handleReopenPicker = useCallback(() => {
-    if (!lastUploadedFile || pickerHeaders.length === 0) return;
-    setPreviewOpen(false);
-    setPickerFile(lastUploadedFile);
-    setPickerOpen(true);
-  }, [lastUploadedFile, pickerHeaders.length]);
-
-  // Column mapping dialog confirm — parse with the user-supplied mapping,
-  // open the regular preview, and auto-save the mapping as a template.
-  const handleMappingConfirm = useCallback(
-    async (params: {
-      mapping: ColumnMapping;
-      defaultAccount: string | null;
-      templateName: string;
-    }) => {
-      if (!lastUploadedFile) return;
-      setMappingSubmitting(true);
-      try {
-        // 1. Parse rows using the user's mapping.
-        const formData = new FormData();
-        formData.append("file", lastUploadedFile);
-        formData.append("columnMapping", JSON.stringify(params.mapping));
-        if (params.defaultAccount) formData.append("defaultAccount", params.defaultAccount);
-
-        const res = await fetch("/api/import/csv-map", { method: "POST", body: formData });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
-
-        // 2. Save the mapping as a template (best-effort — don't block import).
-        fetch("/api/import/templates", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: params.templateName,
-            fileHeaders: data.headers ?? mappingHeaders,
-            columnMapping: params.mapping,
-            defaultAccount: params.defaultAccount ?? undefined,
-          }),
-        })
-          .then((r) => r.json())
-          .then((saved) => {
-            if (saved && saved.id) {
-              setTemplates((prev) => {
-                if (prev.find((t) => t.id === saved.id)) return prev;
-                return [...prev, saved];
-              });
-              setAppliedTemplateId(saved.id);
-            }
-          })
-          .catch(() => {});
-
-        // 3. Open the regular preview dialog with the parsed rows.
-        setCsvHeaders(data.headers ?? []);
-        setValidRows(data.valid ?? []);
-        setDuplicateRows(data.duplicates ?? []);
-        setDuplicateMatches(data.duplicateMatches ?? []);
-        setProbableDuplicates(data.probableDuplicates ?? []);
-        setErrorRows(data.errors ?? []);
-        setMappingDialogOpen(false);
-        setPreviewOpen(true);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : "Failed to parse with mapping";
-        setUploadStatus({ type: "error", message });
-        setMappingDialogOpen(false);
-      } finally {
-        setMappingSubmitting(false);
-      }
-    },
-    [lastUploadedFile, mappingHeaders],
-  );
-
-  // Issue #64: investment-statement confirm callback. Rows arrive with
-  // their `account` already rebound to a real Finlynq account name by the
-  // dialog. /api/import/execute reuses the same path as every other import.
-  const handleInvestmentConfirm = useCallback(
-    async (rows: RawTransaction[]) => {
-      setInvestmentPreviewOpen(false);
-      try {
-        const res = await fetch("/api/import/execute", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rows, forceImportIndices: [] }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
-        const errCount = Array.isArray(data.errors) ? data.errors.length : 0;
-        const errSuffix = errCount > 0 ? `, ${errCount} errors` : "";
-        setUploadStatus({
-          type: errCount > 0 && data.imported === 0 ? "error" : "success",
-          message: `Imported ${data.imported} rows (${data.skippedDuplicates ?? 0} duplicates skipped${errSuffix})`,
-        });
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : "Import failed";
-        setUploadStatus({ type: "error", message });
-      }
-    },
-    [],
-  );
-
-  // OFX confirm callback
-  const handleOfxConfirm = useCallback(async (rows: RawTransaction[]) => {
-    setOfxPreviewOpen(false);
-    try {
-      // Issue #62: stamp source:ofx or source:qfx based on the file format
-      // detected at preview time.
-      const sourceTag = `source:${ofxFormat}`;
-      const taggedRows: RawTransaction[] = rows.map((r) => {
-        const existing = (r.tags ?? "").split(",").map((t) => t.trim()).filter((t) => t);
-        if (existing.some((t) => t.toLowerCase() === sourceTag.toLowerCase())) return r;
-        return { ...r, tags: existing.length ? `${existing.join(",")},${sourceTag}` : sourceTag };
-      });
-      const res = await fetch("/api/import/execute", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows: taggedRows, forceImportIndices: [] }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      setUploadStatus({
-        type: "success",
-        message: `Imported ${data.imported} transactions (${data.skippedDuplicates ?? 0} duplicates skipped)`,
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Import failed";
-      setUploadStatus({ type: "error", message });
-    }
-  }, [ofxFormat]);
-
-  // Import confirm callback
-  const handleImportConfirm = useCallback(async (
-    rows: RawTransaction[],
-    forceImportIndices: number[],
-    skipIndices: number[] = [],
-  ) => {
-    setIsImporting(true);
-    try {
-      // Issue #65: when the user marks any probable duplicates as "skip", we
-      // filter them out client-side before /execute. The server-side
-      // detector is a warning surface — it never blocks; the user's explicit
-      // choice is what removes the row.
-      const skipSet = new Set(skipIndices);
-      const filtered = skipSet.size > 0
-        ? rows.filter((_, idx) => !skipSet.has((rows[idx] as RawTransaction & { rowIndex?: number }).rowIndex ?? idx))
-        : rows;
-      const res = await fetch("/api/import/execute", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows: filtered, forceImportIndices }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
-      setPreviewOpen(false);
-      const skippedProbable = skipSet.size;
-      setUploadStatus({
-        type: "success",
-        message: `Imported ${data.imported} transactions (${data.skippedDuplicates ?? 0} exact duplicates skipped${skippedProbable > 0 ? `, ${skippedProbable} probable duplicates skipped` : ""})`,
-      });
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Import failed";
-      setUploadStatus({ type: "error", message });
-    } finally {
-      setIsImporting(false);
-    }
-  }, []);
-
-  // Email config handlers
-  const generateEmail = async () => {
-    setEmailLoading(true);
-    try {
-      const res = await fetch("/api/import/email-config", { method: "POST" });
-      const data = await res.json();
-      if (data.email) setImportEmail(data.email);
-    } catch {
-      // ignore
-    } finally {
-      setEmailLoading(false);
-    }
-  };
-
-  const copyEmail = () => {
-    if (importEmail) {
-      navigator.clipboard.writeText(importEmail);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    }
-  };
-
   return (
-    <div className="max-w-3xl space-y-6">
-      <OnboardingTips page="import" />
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Import Data</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          Upload files or send them via email to import your financial data.
+    <Suspense fallback={null}>
+      <ImportPageInner />
+    </Suspense>
+  );
+}
+
+function ImportPageInner() {
+  const searchParams = useSearchParams();
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(true);
+  const [accountId, setAccountId] = useState<number | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  /** Bumped after a successful in-drawer upload (Phase 2). Threaded into each
+   *  tab body's `key` so a bump remounts the active tab → it refetches and the
+   *  freshly-uploaded rows appear without leaving /inbox. */
+  const [reloadKey, setReloadKey] = useState(0);
+  /** Reconcile snapshot is fetched by InboxReconcileTab and bubbled up
+   *  so InboxReconciledTab can re-render the same data filtered to the
+   *  linked rows — avoids fetching the same endpoint twice. */
+  const [reconcileData, setReconcileData] = useState<ReconcileData | null>(
+    null,
+  );
+
+  // Per-render lens override. Reset to the account's stored policy when
+  // the account changes; the toast nudges the user to persist if they
+  // want this lens to become the new policy.
+  const [lens, setLens] = useState<Mode | null>(null);
+  const [tab, setTab] = useState<string>("staging");
+  const [savingPolicy, setSavingPolicy] = useState(false);
+
+  // ─── Load accounts ──────────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/accounts");
+        if (!res.ok) throw new Error(`accounts: ${res.status}`);
+        const rows: Account[] = await res.json();
+        if (cancelled) return;
+        // Defensive default — older accounts created before the Phase 1
+        // migration ran would have NULL mode; the migration backfills
+        // 'manual', but a stale fetch could still land here.
+        const normalized = rows.map((a) => ({
+          ...a,
+          mode: isMode(a.mode) ? a.mode : ("manual" as Mode),
+        }));
+        setAccounts(normalized);
+        const visible = normalized.filter((a) => !a.archived);
+        const urlAccount = searchParams?.get("account");
+        const urlId = urlAccount ? parseInt(urlAccount, 10) : NaN;
+        const pick =
+          Number.isFinite(urlId) && visible.some((a) => a.id === urlId)
+            ? urlId
+            : (visible[0]?.id ?? null);
+        setAccountId(pick);
+        // Initial lens matches the policy of the picked account; an explicit
+        // ?tab= (from a deep link or a legacy-route redirect) wins over the
+        // lens default. The snap-to-valid effect corrects an out-of-set tab.
+        if (pick != null) {
+          const a = visible.find((x) => x.id === pick);
+          const initialPolicy: Mode = a ? a.mode : "manual";
+          setLens(initialPolicy);
+          const urlTab = searchParams?.get("tab");
+          setTab(urlTab || defaultTabFor(initialPolicy));
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
+      } finally {
+        if (!cancelled) setAccountsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // searchParams is referentially stable per Next.js docs but the lint
+    // rule still flags it; we intentionally only read it on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist ?account= and ?tab= so deep links + legacy-route redirects land
+  // on the right account + tab, and a refresh keeps the user in place.
+  useEffect(() => {
+    if (accountId == null) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("account", String(accountId));
+    url.searchParams.set("tab", tab);
+    window.history.replaceState({}, "", url.toString());
+  }, [accountId, tab]);
+
+  const account = useMemo(
+    () => accounts.find((a) => a.id === accountId) ?? null,
+    [accounts, accountId],
+  );
+  const visibleAccounts = useMemo(
+    () => accounts.filter((a) => !a.archived),
+    [accounts],
+  );
+  const policy: Mode = account?.mode ?? "manual";
+  const activeLens: Mode = lens ?? policy;
+  const isLensActive = activeLens !== policy;
+
+  const switchAccount = (id: number) => {
+    setAccountId(id);
+    setReconcileData(null);
+    const next = accounts.find((a) => a.id === id);
+    const nextPolicy: Mode = next?.mode ?? "manual";
+    setLens(nextPolicy);
+    setTab(defaultTabFor(nextPolicy));
+  };
+
+  const onLensChange = (m: Mode) => {
+    setLens(m);
+    setTab(defaultTabFor(m));
+  };
+
+  // visibleTabs encodes the per-lens tab set per the v4 preview spec.
+  const visibleTabs = useMemo<string[]>(() => {
+    if (activeLens === "manual") return ["staging", "reconcile", "reconciled"];
+    if (activeLens === "approve") return ["to-approve", "reconciled"];
+    return ["to-categorize", "reconciled"];
+  }, [activeLens]);
+
+  // Keep `tab` valid for the visible set. If the user picks a lens whose
+  // tab set doesn't include the current tab, snap to the lens default.
+  useEffect(() => {
+    if (!visibleTabs.includes(tab)) {
+      setTab(defaultTabFor(activeLens));
+    }
+  }, [visibleTabs, tab, activeLens]);
+
+  const onSavePolicy = useCallback(async () => {
+    if (account == null || lens == null || lens === policy) return;
+    setSavingPolicy(true);
+    try {
+      const res = await fetch(`/api/accounts/${account.id}/mode`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: lens }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      // Mirror the server's new policy locally so the chip + banner
+      // stabilize without re-fetching the entire accounts list.
+      setAccounts((prev) =>
+        prev.map((a) => (a.id === account.id ? { ...a, mode: lens } : a)),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingPolicy(false);
+    }
+  }, [account, lens, policy]);
+
+  const onRevertLens = () => {
+    if (account == null) return;
+    setLens(policy);
+    setTab(defaultTabFor(policy));
+  };
+
+  const onKeepLens = () => {
+    // Lens stays as-is — the toast just disappears. The chip's active
+    // ring is the only persisted UI cue that the lens is still flipped.
+    // We don't store anything beyond the in-memory `lens` state.
+  };
+
+  if (accountsLoading) {
+    return (
+      <div className="container mx-auto p-4">
+        <p className="text-sm text-muted-foreground">Loading accounts…</p>
+      </div>
+    );
+  }
+
+  if (visibleAccounts.length === 0) {
+    return (
+      <div className="container mx-auto p-4 space-y-3">
+        <h1 className="text-2xl font-semibold">Import</h1>
+        <p className="text-sm text-muted-foreground">
+          No accounts found. Create an account first to start importing.
         </p>
       </div>
+    );
+  }
 
-      <Tabs defaultValue="upload">
-        <TabsList>
-          <TabsTrigger value="upload">
-            <Upload className="h-4 w-4 mr-1.5" />
-            Upload Files
-          </TabsTrigger>
-          <TabsTrigger value="email">
-            <Mail className="h-4 w-4 mr-1.5" />
-            Email Import
-          </TabsTrigger>
-          <TabsTrigger value="connect">
-            <LinkIcon className="h-4 w-4 mr-1.5" />
-            Connect a Service
-          </TabsTrigger>
-          <TabsTrigger value="templates">
-            <BookTemplate className="h-4 w-4 mr-1.5" />
-            Templates
-            {templates.length > 0 && (
-              <span className="ml-1.5 text-[10px] bg-muted rounded-full px-1.5 py-0.5 font-mono">
-                {templates.length}
-              </span>
-            )}
-          </TabsTrigger>
+  if (account == null) {
+    return (
+      <div className="container mx-auto p-4 space-y-3">
+        <h1 className="text-2xl font-semibold">Import</h1>
+        <p className="text-sm text-muted-foreground">
+          Pick an account to start importing.
+        </p>
+      </div>
+    );
+  }
+
+  // Toast is visible whenever the lens differs from the account's policy.
+  // Save-as-default in the toast is what flips the policy server-side.
+  const showLensToast = isLensActive && !savingPolicy;
+
+  return (
+    <div className="container mx-auto p-4 space-y-4">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold">Import</h1>
+          <p className="text-sm text-muted-foreground">
+            One surface per account. Upload a statement, then review it the way
+            this account is set up — pick a lens to flip the view, or change
+            the account&apos;s policy via the gear in the chip.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            className="gap-1.5"
+            onClick={() => setUploadOpen(true)}
+          >
+            <Upload className="h-4 w-4" /> Upload
+          </Button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+          {error}
+        </div>
+      )}
+
+      <div className="rounded-xl border bg-card p-4">
+        <div className="flex items-center gap-4 flex-wrap">
+          <div className="flex items-center gap-2">
+            <span className="text-xs uppercase tracking-wider text-muted-foreground">
+              Account
+            </span>
+            <Select
+              value={accountId != null ? String(accountId) : ""}
+              onValueChange={(v) => {
+                const n = parseInt(v ?? "", 10);
+                if (Number.isFinite(n)) switchAccount(n);
+              }}
+            >
+              <SelectTrigger className="w-[260px]">
+                {/* Base UI SelectValue otherwise renders the raw `value`
+                 *  (the account id as string, e.g. "768") on first render
+                 *  before items register their text. Pass an explicit
+                 *  render prop that pulls the decrypted label out of the
+                 *  accounts array so the trigger always shows the
+                 *  account name. (Inbox v4 Phase 5, 2026-05-27.) */}
+                <SelectValue placeholder="Select an account">
+                  {accountId != null
+                    ? (() => {
+                        const a = visibleAccounts.find(
+                          (x) => x.id === accountId,
+                        );
+                        return a
+                          ? `${safeAccountName(a)} · ${a.currency}`
+                          : "Select an account";
+                      })()
+                    : "Select an account"}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {visibleAccounts.map((a) => (
+                  <SelectItem key={a.id} value={String(a.id)}>
+                    {safeAccountName(a)} · {a.currency}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <LensChip
+            lens={activeLens}
+            policy={policy}
+            onLensChange={onLensChange}
+            accountId={account.id}
+            isInvestment={account.isInvestment ?? false}
+          />
+        </div>
+        <div className="mt-3">
+          <ModeBanner lens={activeLens} policy={policy} />
+        </div>
+      </div>
+
+      <Tabs
+        value={tab}
+        onValueChange={(v) => setTab(v ?? defaultTabFor(activeLens))}
+        className="gap-4"
+      >
+        <TabsList className="h-9">
+          {visibleTabs.includes("staging") && (
+            <TabsTrigger value="staging">Staging</TabsTrigger>
+          )}
+          {visibleTabs.includes("reconcile") && (
+            <TabsTrigger value="reconcile">Reconcile</TabsTrigger>
+          )}
+          {visibleTabs.includes("to-approve") && (
+            <TabsTrigger value="to-approve">To approve</TabsTrigger>
+          )}
+          {visibleTabs.includes("to-categorize") && (
+            <TabsTrigger value="to-categorize">To categorize</TabsTrigger>
+          )}
+          <TabsTrigger value="reconciled">Reconciled</TabsTrigger>
         </TabsList>
 
-        {/* Tab 1: Upload Files */}
-        <TabsContent value="upload">
-          <div className="space-y-4 mt-4">
-            {/* Template selector */}
-            {templates.length > 0 && (
-              <div className="flex items-center gap-2">
-                <BookTemplate className="h-4 w-4 text-muted-foreground shrink-0" />
-                <Select value={selectedTemplateId} onValueChange={(v) => setSelectedTemplateId(v ?? "")}>
-                  <SelectTrigger className="flex-1 h-8 text-sm">
-                    <SelectValue placeholder="Use a saved template (optional)" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">Auto-detect</SelectItem>
-                    {templates.map((t) => (
-                      <SelectItem key={t.id} value={String(t.id)}>
-                        {t.name}
-                        {t.defaultAccount && ` · ${t.defaultAccount}`}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {selectedTemplateId && (
-                  <Button size="sm" variant="ghost" className="h-8 px-2 text-xs" onClick={() => setSelectedTemplateId("")}>
-                    Clear
-                  </Button>
-                )}
-              </div>
-            )}
+        {visibleTabs.includes("staging") && (
+          <TabsContent value="staging">
+            <InboxStagingTab key={`staging-${reloadKey}`} accountId={account.id} />
+          </TabsContent>
+        )}
 
-            <FileDropZone onFileSelected={handleFileUpload} />
-
-            {/* Reconciliation Mode entry — issue #36. Statement-aware
-                preview/diff/approve flow that classifies each row as
-                NEW / EXISTING / PROBABLE_DUPLICATE before any write. */}
-            <Card className="border-dashed border-indigo-200 bg-indigo-50/30 dark:bg-indigo-950/10">
-              <CardContent className="py-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <ListChecks className="h-4 w-4 text-indigo-600 shrink-0" />
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium">Reconciliation Mode</p>
-                      <p className="text-xs text-muted-foreground">
-                        Diff a statement row-by-row before committing. Flags
-                        probable duplicates and lets you fix routing inline.
-                      </p>
-                    </div>
-                  </div>
-                  <Link
-                    href="/import/reconcile"
-                    className="shrink-0 inline-flex h-8 items-center rounded-md border bg-background px-3 text-xs font-medium hover:bg-muted"
-                  >
-                    Open
-                  </Link>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Bank Reconciliation entry — FINLYNQ-98 (2026-05-22). The
-                standalone /reconcile surface matches imported transactions
-                to the bank-ledger tape, surfaces bank-only rows for
-                materialization, and lets the user link / unlink pairs. */}
-            <Card className="border-dashed border-sky-200 bg-sky-50/30 dark:bg-sky-950/10">
-              <CardContent className="py-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <ArrowLeftRight className="h-4 w-4 text-sky-600 shrink-0" />
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium">Bank Reconciliation</p>
-                      <p className="text-xs text-muted-foreground">
-                        Match imported transactions against the bank's tape.
-                        Materialize bank-only rows, link or unlink pairs, and
-                        spot balance drift.
-                      </p>
-                    </div>
-                  </div>
-                  <Link
-                    href="/reconcile"
-                    className="shrink-0 inline-flex h-8 items-center rounded-md border bg-background px-3 text-xs font-medium hover:bg-muted"
-                  >
-                    Open
-                  </Link>
-                </div>
-              </CardContent>
-            </Card>
-
-            {uploadStatus && (
-              <Card className={uploadStatus.type === "success" ? "border-emerald-200 bg-emerald-50/30" : "border-rose-200 bg-rose-50/30"}>
-                <CardContent className="py-3">
-                  <div className="flex items-center gap-2">
-                    {uploadStatus.type === "success" ? (
-                      <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                    ) : (
-                      <AlertCircle className="h-4 w-4 text-rose-600" />
-                    )}
-                    <p className={`text-sm ${uploadStatus.type === "success" ? "text-emerald-700" : "text-rose-700"}`}>
-                      {uploadStatus.message}
-                    </p>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-sm">Supported Formats</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-lg border p-3">
-                    <p className="text-sm font-medium">CSV</p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Standard CSV transaction files. Save a template to auto-map columns on future uploads.
-                    </p>
-                  </div>
-                  <div className="rounded-lg border p-3">
-                    <p className="text-sm font-medium">OFX / QFX</p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Bank transaction files with unique IDs for reliable deduplication. Supported by most Canadian banks.
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        </TabsContent>
-
-        {/* Tab 2: Email Import */}
-        <TabsContent value="email">
-          <div className="space-y-4 mt-4">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Mail className="h-5 w-5 text-blue-600" />
-                  Import via Email
-                </CardTitle>
-                <CardDescription>
-                  Forward bank statements and transaction files to your unique import email address.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {importEmail ? (
-                  <>
-                    <div className="flex items-center gap-2">
-                      <div className="flex-1 rounded-lg border bg-muted/50 px-4 py-2.5 font-mono text-sm">
-                        {importEmail}
-                      </div>
-                      <Button variant="outline" size="sm" onClick={copyEmail}>
-                        <Copy className="h-4 w-4 mr-1" />
-                        {copied ? "Copied!" : "Copy"}
-                      </Button>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={generateEmail}
-                      disabled={emailLoading}
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${emailLoading ? "animate-spin" : ""}`} />
-                      Regenerate Address
-                    </Button>
-                  </>
-                ) : (
-                  <Button onClick={generateEmail} disabled={emailLoading}>
-                    <Mail className="h-4 w-4 mr-2" />
-                    {emailLoading ? "Generating..." : "Generate Import Email Address"}
-                  </Button>
-                )}
-
-                <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
-                  <p className="text-sm font-medium">How it works</p>
-                  <ol className="text-xs text-muted-foreground space-y-1 list-decimal list-inside">
-                    <li>Forward your bank statement email (or attach a CSV file) to the address above.</li>
-                    <li>CSV attachments are matched against your saved import templates automatically.</li>
-                    <li>Parsed transactions wait for your review at <a href="/import/pending" className="underline hover:no-underline">/import/pending</a> — nothing is imported until you approve.</li>
-                    <li>Duplicate transactions are flagged and skipped on approve.</li>
-                    <li>Pending imports auto-expire after 14 days.</li>
-                  </ol>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        </TabsContent>
-
-        {/* Tab 3: Connect a Service */}
-        <TabsContent value="connect">
-          <ConnectorTab />
-        </TabsContent>
-
-        {/* Tab 4: Templates */}
-        <TabsContent value="templates">
-          <div className="space-y-4 mt-4">
-            <div>
-              <p className="text-sm text-muted-foreground">
-                Templates save your CSV column mappings so future uploads from the same bank are automatically recognized.
-                Upload a CSV and click <span className="font-medium">Save as Template</span> in the preview dialog to create one.
-              </p>
-            </div>
-            <TemplateManager
-              templates={templates}
-              accounts={accountNames}
-              onDeleted={(id) => setTemplates((prev) => prev.filter((t) => t.id !== id))}
-              onUpdated={(updated) => {
-                if (updated.isDefault) {
-                  // Server-side branch clears isDefault on every OTHER template when this
-                  // one is set true; the PUT response only returns the updated row, so we
-                  // refetch to keep the "default" badge in sync across rows.
-                  fetch("/api/import/templates")
-                    .then((r) => r.json())
-                    .then((data) => { if (Array.isArray(data)) setTemplates(data); })
-                    .catch(() => {});
-                } else {
-                  setTemplates((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
-                }
-              }}
+        {visibleTabs.includes("reconcile") && (
+          <TabsContent value="reconcile">
+            <InboxReconcileTab
+              key={`reconcile-${reloadKey}`}
+              accountId={account.id}
+              accounts={accounts}
+              onReconcileDataChange={setReconcileData}
             />
-          </div>
+          </TabsContent>
+        )}
+
+        {visibleTabs.includes("to-approve") && (
+          <TabsContent value="to-approve">
+            <InboxToApproveTab
+              key={`to-approve-${reloadKey}`}
+              accountId={account.id}
+              accounts={accounts}
+            />
+          </TabsContent>
+        )}
+
+        {visibleTabs.includes("to-categorize") && (
+          <TabsContent value="to-categorize">
+            <InboxToCategorizeTab
+              key={`to-categorize-${reloadKey}`}
+              accountId={account.id}
+              accounts={accounts}
+            />
+          </TabsContent>
+        )}
+
+        <TabsContent value="reconciled">
+          {activeLens === "manual" ? (
+            <InboxReconciledTab data={reconcileData} />
+          ) : activeLens === "approve" ? (
+            // Approve-each lens self-fetches the snapshot — the Reconcile
+            // tab isn't rendered alongside, so there's no parent-level
+            // snapshot to share.
+            <InboxReconciledTab key={`reconciled-${reloadKey}`} accountId={account.id} />
+          ) : (
+            // Auto-pilot lens: same snapshot fetch as Approve-each, plus
+            // the "X rows auto-applied by rules" banner so the user can
+            // audit what the upload-time rule firing did.
+            <InboxReconciledTab
+              key={`reconciled-${reloadKey}`}
+              accountId={account.id}
+              showAutoRuleBanner
+            />
+          )}
         </TabsContent>
       </Tabs>
 
-      {/* Dialogs */}
-      <TemplatePickerDialog
-        open={pickerOpen}
-        onOpenChange={setPickerOpen}
-        templates={templates}
-        fileHeaders={pickerHeaders}
-        fileName={pickerFile?.name ?? ""}
-        onContinue={handlePickerContinue}
-      />
-
-      <ImportPreviewDialog
-        open={previewOpen}
-        onOpenChange={setPreviewOpen}
-        validRows={validRows}
-        duplicateRows={duplicateRows}
-        duplicateMatches={duplicateMatches}
-        probableDuplicates={probableDuplicates}
-        errorRows={errorRows}
-        onConfirm={handleImportConfirm}
-        isImporting={isImporting}
-        csvHeaders={csvHeaders}
-        accounts={accountNames}
-        appliedTemplateId={appliedTemplateId}
-        onChangeTemplate={
-          pickerHeaders.length > 0 && templates.length > 0 ? handleReopenPicker : undefined
-        }
-        onTemplateSaved={(t) => {
-          setTemplates((prev) => {
-            if (prev.find((x) => x.id === t.id)) return prev;
-            // Refetch to get full template data
-            fetch("/api/import/templates")
-              .then((r) => r.json())
-              .then((data) => { if (Array.isArray(data)) setTemplates(data); })
-              .catch(() => {});
-            return prev;
-          });
+      <UploadDrawer
+        open={uploadOpen}
+        onOpenChange={setUploadOpen}
+        accountId={account.id}
+        accountLabel={safeAccountName(account)}
+        accountCurrency={account.currency}
+        policy={policy}
+        onUploaded={() => {
+          // Stay on /inbox; refresh the policy-appropriate tab so the
+          // freshly-uploaded rows appear. setReconcileData(null) clears the
+          // shared manual-lens snapshot; the reloadKey bump remounts each
+          // tab body so it refetches.
+          setReconcileData(null);
+          setTab(defaultTabFor(activeLens));
+          setReloadKey((k) => k + 1);
         }}
       />
 
-      <OfxPreview
-        open={ofxPreviewOpen}
-        onOpenChange={setOfxPreviewOpen}
-        transactions={ofxTransactions}
-        accountInfo={ofxAccountInfo}
-        balanceAmount={ofxBalanceAmount}
-        balanceDate={ofxBalanceDate}
-        dateRange={ofxDateRange}
-        currency={ofxCurrency}
-        accounts={accountNames}
-        onConfirm={handleOfxConfirm}
-      />
-
-      {/* Issue #64: investment-statement preview (OFX INVSTMTRS / QFX
-          investment / IBKR FlexQuery XML). Multi-account file → user binds
-          each external account to a Finlynq account before import. */}
-      <InvestmentStatementPreview
-        open={investmentPreviewOpen}
-        onOpenChange={setInvestmentPreviewOpen}
-        format={investmentFormat}
-        externalAccounts={investmentExternalAccounts}
-        rows={investmentRows}
-        dateRange={investmentDateRange}
-        finlynqAccounts={accountNames}
-        onConfirm={handleInvestmentConfirm}
-      />
-
-      <ColumnMappingDialog
-        open={mappingDialogOpen}
-        onOpenChange={setMappingDialogOpen}
-        fileName={mappingFileName}
-        headers={mappingHeaders}
-        sampleRows={mappingSampleRows}
-        suggestedMapping={mappingSuggested}
-        accounts={accountNames}
-        onConfirm={handleMappingConfirm}
-        submitting={mappingSubmitting}
-      />
+      {showLensToast && (
+        <LensToast
+          lens={activeLens}
+          accountLabel={safeAccountName(account)}
+          onSave={onSavePolicy}
+          onKeep={onKeepLens}
+          onRevert={onRevertLens}
+          saving={savingPolicy}
+        />
+      )}
     </div>
   );
 }

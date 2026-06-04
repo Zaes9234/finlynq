@@ -23,6 +23,7 @@ export function StagedListView({
   toast,
   loadList,
   openDetail,
+  embedded = false,
 }: {
   list: StagedRow[] | null;
   loading: boolean;
@@ -30,32 +31,61 @@ export function StagedListView({
   toast: { type: "success" | "error"; msg: string } | null;
   loadList: () => void;
   openDetail: (id: string) => void;
+  /** When embedded inside the /import Staging tab, drop the standalone-page
+   *  chrome (Back-to-Import link + big "Pending Imports" h1) and show a
+   *  lighter inline strip instead — the surrounding tab already provides the
+   *  page header + account context. */
+  embedded?: boolean;
 }) {
   return (
-    <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <Link
-          href="/import"
-          className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Back to Import
-        </Link>
-      </div>
-
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Pending Imports</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Transactions from email forwards or file uploads (CSV / OFX /
-            QFX), waiting for your review. Rows auto-expire after 60 days.
-          </p>
+    <div className={embedded ? "space-y-3" : "space-y-6"}>
+      {!embedded && (
+        <div className="flex items-center gap-3">
+          <Link
+            href="/import"
+            className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to Import
+          </Link>
         </div>
-        <Button variant="outline" size="sm" onClick={loadList} disabled={loading}>
-          <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? "animate-spin" : ""}`} />
-          Refresh
-        </Button>
-      </div>
+      )}
+
+      {embedded ? (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs flex items-center justify-between gap-2">
+          <span>
+            Staged imports for this account waiting for parse review. Click a
+            batch to open the two-pane staging surface for approve / discard /
+            re-apply rules.
+          </span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={loadList}
+            disabled={loading}
+            className="h-7"
+          >
+            <RefreshCw
+              className={`h-3.5 w-3.5 mr-1.5 ${loading ? "animate-spin" : ""}`}
+            />
+            Refresh
+          </Button>
+        </div>
+      ) : (
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">Pending Imports</h1>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Transactions from email forwards or file uploads (CSV / OFX /
+              QFX), waiting for your review. Rows auto-expire after 60 days.
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={loadList} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 mr-1.5 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+        </div>
+      )}
 
       {toast && (
         <Card
@@ -90,11 +120,11 @@ export function StagedListView({
             <div>
               <p className="text-sm font-medium">Nothing pending</p>
               <p className="text-xs text-muted-foreground mt-1">
-                Upload a CSV/OFX/QFX statement at{" "}
-                <Link href="/import/reconcile" className="underline">
-                  Import → Reconciliation
-                </Link>
-                , or forward a bank statement to your import address — both
+                Upload a CSV/OFX/QFX statement from the{" "}
+                <Link href="/import" className="underline">
+                  Import
+                </Link>{" "}
+                page, or forward a bank statement to your import address — both
                 land here for review.
               </p>
             </div>

@@ -61,6 +61,10 @@ export async function GET(request: NextRequest) {
       // "(no subject)" + "from (unknown)".
       originalFilename: schema.stagedImports.originalFilename,
       fileFormat: schema.stagedImports.fileFormat,
+      // 2026-06-04 — surfaced so the account-anchored /import Staging tab can
+      // filter the list to the selected account without an N+1 detail fetch
+      // per batch (the old inbox-staging-tab binding-resolution hack).
+      boundAccountId: schema.stagedImports.boundAccountId,
     })
     .from(schema.stagedImports)
     .where(and(

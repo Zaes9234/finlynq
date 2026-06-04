@@ -65,6 +65,19 @@ const nextConfig: NextConfig = {
     return [
       { source: "/mcp", destination: "/api/mcp", permanent: true },
       { source: "/mcp/:path*", destination: "/api/mcp/:path*", permanent: true },
+      // Money-in consolidation (2026-06-04): /import is the single
+      // account-anchored surface. The legacy standalone routes fold into it
+      // and their page files are deleted (Phase 6), so these redirects are now
+      // the only thing serving those paths. Query strings (?account=, ?id=)
+      // are preserved automatically. Not permanent yet — still soaking on dev;
+      // flip to permanent at prod promotion. /import/pending is NOT matched
+      // (it's a live route — the standalone staged-review surface).
+      { source: "/inbox", destination: "/import", permanent: false },
+      { source: "/reconcile", destination: "/import", permanent: false },
+      { source: "/import/reconcile", destination: "/import", permanent: false },
+      // /import/classic was the temporary legacy-hub backup (Phase 3b → 6);
+      // deleted after validation. Redirect so old bookmarks don't 404.
+      { source: "/import/classic", destination: "/import", permanent: false },
     ];
   },
   async headers() {

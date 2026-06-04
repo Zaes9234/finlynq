@@ -26,6 +26,7 @@ import {
   Wrench,
   Zap,
   Link2,
+  Upload,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -40,6 +41,7 @@ const NAV_ITEMS: NavItem[] = [
   // FINLYNQ-84 — rules moved out of /settings/categorization into their own
   // sub-page with a multi-condition + multi-action editor.
   { href: "/settings/rules", label: "Rules", icon: Zap },
+  { href: "/settings/import", label: "Import", icon: Upload },
   { href: "/settings/reconciliation", label: "Reconciliation", icon: Link2 },
   { href: "/settings/investments", label: "Investments", icon: Briefcase },
   { href: "/settings/display", label: "Display & Ordering", icon: Sliders },

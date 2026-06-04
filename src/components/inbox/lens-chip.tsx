@@ -27,11 +27,17 @@ export function LensChip({
   policy,
   onLensChange,
   accountId,
+  isInvestment = false,
 }: {
   lens: Mode;
   policy: Mode;
   onLensChange: (m: Mode) => void;
   accountId: number;
+  /** Investment accounts can only use the Manual lens — the Auto-pilot /
+   *  Approve-each commit routes refuse them server-side (they need a holding,
+   *  via the portfolio-ops flow). Suppress those options so the user never
+   *  picks a dead lens. (Consolidation Phase 6, 2026-06-04.) */
+  isInvestment?: boolean;
 }) {
   const cfg = MODES[lens];
   const Icon = cfg.icon;
@@ -81,22 +87,39 @@ export function LensChip({
               const I = c.icon;
               const isLens = m === lens;
               const isPolicy = m === policy;
+              // Investment accounts: Auto-pilot + Approve-each are unavailable
+              // (the commit routes need a holding). Render them disabled.
+              const disabled = isInvestment && m !== "manual";
               return (
                 <button
                   key={m}
                   type="button"
+                  disabled={disabled}
                   onClick={() => {
+                    if (disabled) return;
                     onLensChange(m);
                     setOpen(false);
                   }}
                   className={`w-full text-left p-2.5 rounded-md transition-colors ${
-                    isLens ? "bg-muted" : "hover:bg-muted/50"
+                    disabled
+                      ? "opacity-40 cursor-not-allowed"
+                      : isLens
+                        ? "bg-muted"
+                        : "hover:bg-muted/50"
                   }`}
                 >
                   <div className="flex items-center gap-2">
                     <I className={`h-4 w-4 ${c.tone.split(" ")[0]}`} />
                     <span className="text-sm font-medium">{c.label}</span>
-                    {isPolicy && (
+                    {disabled && (
+                      <Badge
+                        variant="outline"
+                        className="ml-auto text-[10px] font-mono"
+                      >
+                        n/a
+                      </Badge>
+                    )}
+                    {!disabled && isPolicy && (
                       <Badge
                         variant="outline"
                         className="ml-auto text-[10px] font-mono"
@@ -104,7 +127,7 @@ export function LensChip({
                         policy
                       </Badge>
                     )}
-                    {isLens && !isPolicy && (
+                    {!disabled && isLens && !isPolicy && (
                       <Badge
                         variant="outline"
                         className="ml-auto text-[10px] font-mono"
@@ -114,7 +137,9 @@ export function LensChip({
                     )}
                   </div>
                   <p className="text-xs text-muted-foreground mt-1 ml-6">
-                    {c.subLabel}
+                    {disabled
+                      ? "Investment accounts review manually (commit holdings via the portfolio flow)."
+                      : c.subLabel}
                   </p>
                 </button>
               );

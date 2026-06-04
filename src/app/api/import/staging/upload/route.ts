@@ -111,6 +111,34 @@ interface ParseFailure {
   body: Record<string, unknown>;
 }
 
+/**
+ * Statement summary for the upload-success drawer panel (consolidation
+ * follow-up, 2026-06-04): restores the at-upload balance snapshot the old
+ * OFX preview surfaced before the drawer skipped straight to staging.
+ * Balance prefers the OFX <LEDGERBAL> / typed statement value, else the last
+ * parsed anchor; the date range is min/max over the parsed rows (dates are
+ * normalized to YYYY-MM-DD so a lexical sort is correct).
+ */
+function buildStatementSummary(pr: ParseSuccess) {
+  const dates = pr.rows
+    .map((r) => r.date)
+    .filter((d): d is string => typeof d === "string" && d.length > 0)
+    .sort();
+  const lastAnchor =
+    pr.anchors.length > 0 ? pr.anchors[pr.anchors.length - 1] : null;
+  return {
+    balance: pr.statementBalance ?? lastAnchor?.balance ?? null,
+    balanceDate: pr.statementBalanceDate ?? lastAnchor?.date ?? null,
+    currency: pr.statementCurrency ?? lastAnchor?.currency ?? null,
+    rowCount: pr.rows.length,
+    anchorCount: pr.anchors.length,
+    dateRange:
+      dates.length > 0
+        ? { start: dates[0], end: dates[dates.length - 1] }
+        : null,
+  };
+}
+
 export async function POST(request: NextRequest) {
   // Uploads write `encryption_tier='user'` rows directly, so a DEK is required.
   // 423s if the session isn't unlocked — caller re-logs in and retries.
@@ -637,6 +665,7 @@ export async function POST(request: NextRequest) {
             // say "5 of 12 rows auto-categorized."
             ...(autoRuleStats ? { autoRule: autoRuleStats } : {}),
           },
+          statement: buildStatementSummary(parseResult),
           rowErrors,
         });
       } catch (err) {
@@ -795,6 +824,7 @@ export async function POST(request: NextRequest) {
         skippedDuplicate: shaped.filter((r) => alreadyImportedHashes.has(r.hash)).length,
         errors: rowErrors.length + parseResult.errors.length,
       },
+      statement: buildStatementSummary(parseResult),
       tolerance,
     });
   } catch (error) {

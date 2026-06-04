@@ -41,6 +41,11 @@ interface Props {
   accounts: AccountOption[];
   templates?: TemplateOption[];
   loading: boolean;
+  /** When set, the account picker is hidden and EVERY upload is bound to
+   *  this account. Used by the account-anchored /import upload drawer, where
+   *  the destination account is already chosen by the surface. The standalone
+   *  /import/reconcile caller leaves this undefined and keeps the picker. */
+  lockedAccount?: AccountOption | null;
   onUpload: (params: {
     file: File;
     accountId: number | null;
@@ -64,6 +69,7 @@ export function ReconcileUploadCard({
   accounts,
   templates = [],
   loading,
+  lockedAccount,
   onUpload,
 }: Props) {
   const [selectedAccountId, setSelectedAccountId] = useState<string>("");
@@ -93,7 +99,9 @@ export function ReconcileUploadCard({
     setSkipFooterRows(String(tpl.skipFooterRows ?? 0));
     setDateFormatOverride(tpl.dateFormatOverride ?? "auto");
     setDefaultCurrency(tpl.defaultCurrency ?? "");
-    if (tpl.defaultAccount) {
+    // When the account is locked by the surface, a template's default account
+    // must NOT override it — the drawer's account always wins.
+    if (!lockedAccount && tpl.defaultAccount) {
       const match = accounts.find((a) => a.name === tpl.defaultAccount);
       if (match) setSelectedAccountId(String(match.id));
     }
@@ -114,17 +122,23 @@ export function ReconcileUploadCard({
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
           <label className="text-xs font-medium text-muted-foreground">
-            Default account (required for OFX/QFX)
+            {lockedAccount ? "Account" : "Default account (required for OFX/QFX)"}
           </label>
-          <Combobox
-            value={selectedAccountId}
-            onValueChange={(v) => setSelectedAccountId(v ?? "")}
-            items={accountItems}
-            placeholder="— Use account column from CSV —"
-            searchPlaceholder="Search…"
-            emptyMessage="No accounts"
-            className="w-full"
-          />
+          {lockedAccount ? (
+            <div className="flex h-9 items-center rounded-md border bg-muted/30 px-3 text-sm">
+              {lockedAccount.name} ({lockedAccount.currency})
+            </div>
+          ) : (
+            <Combobox
+              value={selectedAccountId}
+              onValueChange={(v) => setSelectedAccountId(v ?? "")}
+              items={accountItems}
+              placeholder="— Use account column from CSV —"
+              searchPlaceholder="Search…"
+              emptyMessage="No accounts"
+              className="w-full"
+            />
+          )}
         </div>
         <div className="space-y-1">
           <label className="text-xs font-medium text-muted-foreground">
@@ -183,7 +197,11 @@ export function ReconcileUploadCard({
         accept={ACCEPT}
         disabled={loading}
         onFileSelected={(file) => {
-          const accountId = selectedAccountId ? Number(selectedAccountId) : null;
+          const accountId = lockedAccount
+            ? lockedAccount.id
+            : selectedAccountId
+              ? Number(selectedAccountId)
+              : null;
           const templateId = selectedTemplateId
             ? Number(selectedTemplateId)
             : null;

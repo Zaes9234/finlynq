@@ -23,6 +23,10 @@ export interface StagedRow {
   expiresAt: string;
   originalFilename?: string | null;
   fileFormat?: string | null;
+  /** 2026-06-04 — the account this batch is bound to (NULL until an
+   *  email-import without a template is bound via the picker). Lets the
+   *  account-anchored /import Staging tab filter the list to one account. */
+  boundAccountId?: number | null;
 }
 
 export interface ParsedAnchorRow {
