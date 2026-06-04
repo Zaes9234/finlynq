@@ -31,7 +31,6 @@ import {
   ShieldCheck,
   LogOut,
   Inbox,
-  Link2,
   Megaphone,
   MessageCircle,
 } from "lucide-react";
@@ -90,8 +89,11 @@ const navGroups: { label: string; items: NavItem[] }[] = [
 ];
 
 const toolLinks: NavItem[] = [
+  // Consolidation Phase 3 (2026-06-04): /import is now the single
+  // account-anchored money-in surface (upload + staging + reconcile tabs).
+  // The standalone /reconcile link was folded in (it's the Reconcile tab);
+  // /reconcile + /inbox + /import/reconcile redirect here (next.config.ts).
   { href: "/import", label: "Import", icon: Upload, color: ACTIVE_ACCENT, mode: "prod" },
-  { href: "/reconcile", label: "Reconcile", icon: Link2, color: ACTIVE_ACCENT, mode: "dev" },
   { href: "/api-docs", label: "API Docs", icon: FileText, color: ACTIVE_ACCENT, mode: "dev" },
   { href: "/admin", label: "Admin", icon: ShieldCheck, color: ACTIVE_ACCENT, mode: "prod" },
   { href: "/admin/inbox", label: "Admin Inbox", icon: Inbox, color: ACTIVE_ACCENT, mode: "prod" },

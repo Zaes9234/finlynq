@@ -65,6 +65,15 @@ const nextConfig: NextConfig = {
     return [
       { source: "/mcp", destination: "/api/mcp", permanent: true },
       { source: "/mcp/:path*", destination: "/api/mcp/:path*", permanent: true },
+      // Money-in consolidation Phase 3 (2026-06-04): /import is now the single
+      // account-anchored surface. The legacy standalone routes fold into it.
+      // Query strings (?account=, ?id=) are preserved automatically. Not
+      // permanent yet — still soaking on dev; flip to permanent at prod.
+      // NOTE: /import/classic (legacy-hub backup) and /import/pending are NOT
+      // matched here — exact sources only.
+      { source: "/inbox", destination: "/import", permanent: false },
+      { source: "/reconcile", destination: "/import", permanent: false },
+      { source: "/import/reconcile", destination: "/import", permanent: false },
     ];
   },
   async headers() {

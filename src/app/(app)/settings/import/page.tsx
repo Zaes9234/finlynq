@@ -99,7 +99,21 @@ export default function ImportSettingsPage() {
         <h1 className="text-2xl font-bold tracking-tight">Import</h1>
         <p className="text-sm text-muted-foreground mt-0.5">
           Manage CSV templates, connected services, and your email-import
-          address. To upload a file, use the Import page.
+          address. To upload a file, use the{" "}
+          <a href="/import" className="underline hover:text-foreground">
+            Import page
+          </a>
+          .
+        </p>
+        <p className="text-xs text-muted-foreground mt-1">
+          Looking for the old upload page? It&apos;s temporarily preserved at{" "}
+          <a
+            href="/import/classic"
+            className="underline hover:text-foreground font-mono"
+          >
+            /import/classic
+          </a>{" "}
+          while the new flow is validated.
         </p>
       </div>
 
