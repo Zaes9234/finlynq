@@ -31,7 +31,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Check, Inbox } from "lucide-react";
-import { RowCard, type RowCardSuggestionAny } from "./row-card";
+import {
+  RowCard,
+  type RowCardSuggestionAny,
+  type RowCardDuplicate,
+} from "./row-card";
 import { ConfirmDeleteBankRow } from "@/components/reconcile/confirm-delete-bank-row";
 import {
   TransactionDialog,
@@ -215,24 +219,36 @@ export function InboxToApproveTab({
       .sort((a, b) => b.date.localeCompare(a.date));
   }, [snapshot]);
 
-  /** Build the per-bank-row suggestion shape the RowCard expects. */
-  const suggestionByBank = useMemo(() => {
-    const map = new Map<string, RowCardSuggestionAny>();
+  /** Possible ledger duplicates — bank rows the match engine paired with an
+   *  existing UNLINKED ledger transaction (exact-hash or fuzzy date/amount).
+   *  These are surfaced as a "Link to existing vs Keep separate" choice
+   *  instead of a one-click Approve that would mint a second ledger entry
+   *  (2026-06-04). Takes priority over the rule suggestion in the card. */
+  const duplicateByBank = useMemo(() => {
+    const map = new Map<string, RowCardDuplicate>();
     if (!snapshot) return map;
-    // 1) Match against an existing tx — preferred over Create.
     for (const s of snapshot.suggestions) {
       if (map.has(s.bankTransactionId)) continue;
       const tx = snapshot.transactions[s.transactionId];
       if (!tx) continue;
       map.set(s.bankTransactionId, {
-        kind: "match",
-        transactionId: s.transactionId,
+        transactionId: tx.id,
         txPayee: tx.payee,
-        txCategoryName: tx.categoryName,
+        txDate: tx.date,
+        txAmount: tx.amount,
+        txCurrency: tx.currency,
       });
     }
-    // 2) Fallback: match-engine's suggestedCategoryId on the bank row
-    //    (the same data /reconcile's materialize dialog reads).
+    return map;
+  }, [snapshot]);
+
+  /** Build the per-bank-row suggestion shape the RowCard expects. */
+  const suggestionByBank = useMemo(() => {
+    const map = new Map<string, RowCardSuggestionAny>();
+    if (!snapshot) return map;
+    // match-engine's suggestedCategoryId on the bank row (the same data
+    // /reconcile's materialize dialog reads). Rows that match an existing
+    // ledger tx are handled by `duplicateByBank` above, not here.
     const catName = (id: number) => {
       const c = categories.find((x) => x.id === id);
       return c?.name ?? `Category #${id}`;
@@ -276,8 +292,14 @@ export function InboxToApproveTab({
   }, [snapshot, categories, accounts]);
 
   const suggestedUnlinked = useMemo(
-    () => unlinkedRows.filter((b) => suggestionByBank.has(b.id)),
-    [unlinkedRows, suggestionByBank],
+    // Exclude possible ledger duplicates — "Accept all suggested" must not
+    // blindly create a second ledger entry for a row that matches an existing
+    // transaction. The user resolves those one-by-one (link vs keep separate).
+    () =>
+      unlinkedRows.filter(
+        (b) => suggestionByBank.has(b.id) && !duplicateByBank.has(b.id),
+      ),
+    [unlinkedRows, suggestionByBank, duplicateByBank],
   );
 
   const approveOne = useCallback(
@@ -317,6 +339,32 @@ export function InboxToApproveTab({
       }
     },
     [],
+  );
+
+  /** Resolve a possible duplicate by linking the bank row to the matched
+   *  existing ledger transaction (no new tx created). */
+  const linkExisting = useCallback(
+    async (bankId: string, transactionId: number) => {
+      setBusyBankId(bankId);
+      setError(null);
+      try {
+        const res = await fetch("/api/reconcile/links", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transactionId, bankTransactionId: bankId }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? `HTTP ${res.status}`);
+        }
+        await refresh();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusyBankId(null);
+      }
+    },
+    [refresh],
   );
 
   // Declared before onApprove so it can reference onEdit without a temporal
@@ -605,6 +653,11 @@ export function InboxToApproveTab({
               onApprove={() => void onApprove(b.id)}
               onEdit={() => onEdit(b.id)}
               onDelete={() => onDelete(b.id)}
+              duplicate={duplicateByBank.get(b.id) ?? null}
+              onLinkExisting={() => {
+                const dup = duplicateByBank.get(b.id);
+                if (dup) void linkExisting(b.id, dup.transactionId);
+              }}
             />
           ))}
         </div>

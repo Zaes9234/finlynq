@@ -29,8 +29,20 @@ import {
   Plus,
   Sparkles,
   Trash2,
+  AlertTriangle,
 } from "lucide-react";
 import { formatCurrency } from "@/lib/currency";
+
+/** A pre-existing unlinked ledger transaction this bank row appears to
+ *  duplicate (2026-06-04). When set, the card warns and offers a
+ *  "Link to existing" action instead of silently creating a second entry. */
+export interface RowCardDuplicate {
+  transactionId: number;
+  txPayee: string | null;
+  txDate: string;
+  txAmount: number;
+  txCurrency: string;
+}
 
 export interface RowCardSuggestion {
   /** Match against an existing tx in the user's ledger. */
@@ -79,6 +91,12 @@ export interface RowCardProps {
   /** Opens the per-row delete confirmation. Parent surfaces the
    *  ConfirmDeleteBankRow modal. */
   onDelete: () => void;
+  /** When set, this bank row looks like a duplicate of an existing ledger
+   *  transaction — the card warns and surfaces "Link to existing". */
+  duplicate?: RowCardDuplicate | null;
+  /** Link this bank row to the matched existing transaction instead of
+   *  creating a new one (resolves the possible duplicate). */
+  onLinkExisting?: () => void;
 }
 
 function SuggestionLine({ s }: { s: RowCardSuggestionAny | null }) {
@@ -135,10 +153,17 @@ export function RowCard({
   onApprove,
   onEdit,
   onDelete,
+  duplicate,
+  onLinkExisting,
 }: RowCardProps) {
   const hasSuggestion = suggestion != null;
+  const isDup = duplicate != null;
   return (
-    <div className="rounded-lg border bg-card hover:shadow-sm transition-shadow">
+    <div
+      className={`rounded-lg border bg-card hover:shadow-sm transition-shadow ${
+        isDup ? "border-amber-300 dark:border-amber-700" : ""
+      }`}
+    >
       <div className="flex items-center gap-3 px-4 py-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-baseline gap-3">
@@ -157,11 +182,47 @@ export function RowCard({
             </span>
           </div>
           <div className="mt-1.5">
-            <SuggestionLine s={suggestion} />
+            {isDup ? (
+              <span className="inline-flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  Possible duplicate of an existing transaction
+                  {duplicate.txPayee ? ` · ${duplicate.txPayee}` : ""} ·{" "}
+                  {duplicate.txDate} ·{" "}
+                  {formatCurrency(
+                    duplicate.txAmount,
+                    duplicate.txCurrency || bank.currency || "CAD",
+                  )}
+                </span>
+              </span>
+            ) : (
+              <SuggestionLine s={suggestion} />
+            )}
           </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          {hasSuggestion ? (
+          {isDup ? (
+            <>
+              <Button
+                size="sm"
+                className="h-7 gap-1"
+                onClick={onLinkExisting}
+                disabled={busy}
+              >
+                <Link2 className="h-3.5 w-3.5" /> Link to existing
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 gap-1"
+                onClick={hasSuggestion ? onApprove : onEdit}
+                disabled={busy}
+                title="Keep this as a separate transaction"
+              >
+                Keep separate
+              </Button>
+            </>
+          ) : hasSuggestion ? (
             <Button
               size="sm"
               className="h-7 gap-1"

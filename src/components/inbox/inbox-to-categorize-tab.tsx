@@ -30,7 +30,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Inbox } from "lucide-react";
-import { RowCard, type RowCardSuggestionAny } from "./row-card";
+import {
+  RowCard,
+  type RowCardSuggestionAny,
+  type RowCardDuplicate,
+} from "./row-card";
 import { ConfirmDeleteBankRow } from "@/components/reconcile/confirm-delete-bank-row";
 import {
   TransactionDialog,
@@ -57,6 +61,19 @@ interface ReconcileLink {
   createdAt: string;
 }
 
+interface ReconcileSuggestion {
+  transactionId: number;
+  bankTransactionId: string;
+}
+
+interface TxSnapshot {
+  id: number;
+  date: string;
+  amount: number;
+  currency: string;
+  payee: string | null;
+}
+
 interface BankSnapshot {
   id: string;
   date: string;
@@ -69,7 +86,8 @@ interface BankSnapshot {
 
 interface SnapshotShape {
   linked: ReconcileLink[];
-  transactions: Record<number, unknown>;
+  suggestions: ReconcileSuggestion[];
+  transactions: Record<number, TxSnapshot>;
   bankTransactions: Record<string, BankSnapshot>;
 }
 
@@ -175,6 +193,53 @@ export function InboxToCategorizeTab({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  /** Possible ledger duplicates — bank rows the match engine paired with an
+   *  existing unlinked ledger tx. In Auto-pilot these are the rows that were
+   *  NOT auto-materialized (skipReason='possible_ledger_duplicate') so they
+   *  don't become silent duplicates; the card offers link-vs-keep-separate. */
+  const duplicateByBank = useMemo(() => {
+    const map = new Map<string, RowCardDuplicate>();
+    if (!snapshot) return map;
+    for (const s of snapshot.suggestions ?? []) {
+      if (map.has(s.bankTransactionId)) continue;
+      const tx = snapshot.transactions[s.transactionId];
+      if (!tx) continue;
+      map.set(s.bankTransactionId, {
+        transactionId: tx.id,
+        txPayee: tx.payee,
+        txDate: tx.date,
+        txAmount: tx.amount,
+        txCurrency: tx.currency,
+      });
+    }
+    return map;
+  }, [snapshot]);
+
+  /** Link a possible duplicate to its matched existing transaction. */
+  const linkExisting = useCallback(
+    async (bankId: string, transactionId: number) => {
+      setBusyBankId(bankId);
+      setError(null);
+      try {
+        const res = await fetch("/api/reconcile/links", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transactionId, bankTransactionId: bankId }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error ?? `HTTP ${res.status}`);
+        }
+        await refresh();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusyBankId(null);
+      }
+    },
+    [refresh],
+  );
 
   const unlinkedRows = useMemo(() => {
     if (!snapshot) return [] as BankSnapshot[];
@@ -398,6 +463,11 @@ export function InboxToCategorizeTab({
               onApprove={() => void onPrimary(b.id)}
               onEdit={() => onEdit(b.id)}
               onDelete={() => onDelete(b.id)}
+              duplicate={duplicateByBank.get(b.id) ?? null}
+              onLinkExisting={() => {
+                const dup = duplicateByBank.get(b.id);
+                if (dup) void linkExisting(b.id, dup.transactionId);
+              }}
             />
           ))}
         </div>

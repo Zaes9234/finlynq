@@ -834,10 +834,14 @@ export interface ApplyRulesPerRowResult {
   transactionId?: number;
   /** Reason a matched row was skipped despite autoMaterialize=true
    *  (e.g. 'already_linked', 'investment_account', 'sign_category_mismatch',
-   *  'no_set_category_action'; or a transfer-rule code 'transfer_self' /
-   *  'transfer_inflow' / 'transfer_investment_dest' / 'transfer_dest_not_found'
-   *  / 'transfer_write_failed'). Absent on clean matches. */
+   *  'no_set_category_action', 'possible_ledger_duplicate'; or a transfer-rule
+   *  code 'transfer_self' / 'transfer_inflow' / 'transfer_investment_dest' /
+   *  'transfer_dest_not_found' / 'transfer_write_failed'). Absent on clean
+   *  matches. */
   skipReason?: string;
+  /** When skipReason='possible_ledger_duplicate', the id of the existing
+   *  unlinked ledger transaction this bank row appears to duplicate. */
+  duplicateOfTransactionId?: number;
 }
 
 export interface ApplyRulesToBankRowsResult {
@@ -846,6 +850,11 @@ export interface ApplyRulesToBankRowsResult {
   /** Number of bank rows whose payee/amount/etc matched at least one
    *  active rule (regardless of autoMaterialize). */
   rulesFired: number;
+  /** Number of bank rows NOT materialized because they match an existing
+   *  unlinked ledger transaction (date+amount within the reconcile
+   *  thresholds, or an import_hash hit). Left as bank rows so the user can
+   *  link-to-existing or keep-separate instead of getting a silent duplicate. */
+  possibleDuplicates: number;
   perRow: ApplyRulesPerRowResult[];
 }
 
@@ -880,7 +889,7 @@ export async function applyRulesToBankRows(
   const autoMaterialize = opts?.autoMaterialize === true;
   const perRow: ApplyRulesPerRowResult[] = [];
   if (bankRowIds.length === 0) {
-    return { materialized: 0, rulesFired: 0, perRow };
+    return { materialized: 0, rulesFired: 0, possibleDuplicates: 0, perRow };
   }
   if (autoMaterialize && !dek) {
     throw new Error(
@@ -962,6 +971,51 @@ export async function applyRulesToBankRows(
 
   let rulesFired = 0;
   let materialized = 0;
+  let possibleDuplicates = 0;
+
+  // ─── Possible-ledger-duplicate detection (2026-06-04) ────────────────────
+  // Bank-side + staging-side dedup (import_hash / fitId) does NOT catch a row
+  // that matches a transaction already in the LEDGER but with no bank lineage
+  // (e.g. a manually-entered tx, or one whose bank row was deleted). In
+  // Auto-pilot that produced a silent duplicate. We reuse the SAME match
+  // engine /reconcile uses (exact-hash + fuzzy date/amount within the user's
+  // thresholds) to find batch rows that match an existing UNLINKED ledger tx,
+  // and refuse to auto-materialize them — they stay as bank rows flagged
+  // 'possible_ledger_duplicate' so the To-categorize / To-approve cards can
+  // surface a "link to existing vs keep separate" choice. Only runs in the
+  // autoMaterialize path (the /reconcile preview path already shows matches).
+  const ledgerDupTxByBank = new Map<string, number>();
+  if (autoMaterialize) {
+    const batchBankIds = new Set(bankRows.map((b) => b.id));
+    const distinctAccountIds = Array.from(
+      new Set(bankRows.map((b) => b.accountId)),
+    );
+    for (const acctId of distinctAccountIds) {
+      try {
+        const recon = await computeReconcileForAccount({
+          userId,
+          dek,
+          accountId: acctId,
+        });
+        for (const s of recon.suggestions) {
+          // A suggestion pairs an UNLINKED bank row with an UNLINKED ledger
+          // tx. When that bank row is one of ours, the tx is a pre-existing
+          // ledger entry this import would duplicate.
+          if (batchBankIds.has(s.bankTransactionId)) {
+            ledgerDupTxByBank.set(s.bankTransactionId, s.transactionId);
+          }
+        }
+      } catch (err) {
+        // Defensive: a dup-scan failure must never block the upload. Worst
+        // case we fall back to today's behavior (no ledger-dup flag).
+        // eslint-disable-next-line no-console
+        console.error("[applyRulesToBankRows] ledger-dup scan failed", {
+          accountId: acctId,
+          err,
+        });
+      }
+    }
+  }
 
   // Diagnostic — single-line summary at INFO level, scoped to the
   // autoMaterialize path so /reconcile's per-snapshot calls don't spam
@@ -984,6 +1038,21 @@ export async function applyRulesToBankRows(
         bankRowId: bank.id,
         matched: false,
         skipReason: "already_linked",
+      });
+      continue;
+    }
+
+    // Possible ledger duplicate — refuse to auto-create a second ledger entry
+    // for a transaction the user already has. Leave the bank row unlinked so
+    // the inbox card surfaces a "link to existing / keep separate" choice.
+    const dupTxId = ledgerDupTxByBank.get(bank.id);
+    if (dupTxId != null) {
+      possibleDuplicates += 1;
+      perRow.push({
+        bankRowId: bank.id,
+        matched: false,
+        skipReason: "possible_ledger_duplicate",
+        duplicateOfTransactionId: dupTxId,
       });
       continue;
     }
@@ -1198,7 +1267,7 @@ export async function applyRulesToBankRows(
     invalidateUser(userId);
   }
 
-  return { materialized, rulesFired, perRow };
+  return { materialized, rulesFired, possibleDuplicates, perRow };
 }
 
 /**

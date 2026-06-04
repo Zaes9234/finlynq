@@ -702,7 +702,12 @@ export async function POST(request: NextRequest) {
         // inserted ids today and threading them out would couple the two
         // module surfaces unnecessarily. Bank-row ids are looked up by
         // `upload_batch_id` instead — cheap single-account-scoped SELECT.
-        let autoRuleStats: { matched: number; unmatched: number; total: number } | null = null;
+        let autoRuleStats: {
+          matched: number;
+          unmatched: number;
+          possibleDuplicates: number;
+          total: number;
+        } | null = null;
         if (boundAccountMode === "auto") {
           const insertedBankRows = await db
             .select({ id: schema.bankTransactions.id })
@@ -724,11 +729,20 @@ export async function POST(request: NextRequest) {
             );
             autoRuleStats = {
               matched: ruleResult.materialized,
-              unmatched: bankRowIds.length - ruleResult.materialized,
+              unmatched:
+                bankRowIds.length -
+                ruleResult.materialized -
+                ruleResult.possibleDuplicates,
+              possibleDuplicates: ruleResult.possibleDuplicates,
               total: bankRowIds.length,
             };
           } else {
-            autoRuleStats = { matched: 0, unmatched: 0, total: 0 };
+            autoRuleStats = {
+              matched: 0,
+              unmatched: 0,
+              possibleDuplicates: 0,
+              total: 0,
+            };
           }
         }
 
