@@ -138,6 +138,14 @@ export interface ReconcileBankSnapshot {
    *  Transfer mode with the destination pre-filled (the dialog still commits
    *  through `createTransferPair`, so the four-check link_id invariant holds). */
   suggestedTransferAccountId: number | null;
+  /** Possible-duplicate detection (2026-06-04). The id of an existing
+   *  UNLINKED ledger transaction this bank row STRICTLY matches — exact
+   *  `import_hash`, OR identical amount (±$0.01) within `dateToleranceDays`.
+   *  `null` when no strict match. Distinct from `suggestions` (the loose,
+   *  ±$50-floor, greedily-assigned reconcile fuzzy layer): a tight,
+   *  per-row-independent signal used to flag duplicates in Auto-pilot /
+   *  Approve-each (where bank-side dedup can't see the ledger). */
+  duplicateOfTransactionId: number | null;
 }
 
 export interface ReconcileResult {
@@ -366,6 +374,36 @@ export async function computeReconcileForAccount(
       swapLinkId: tx.swapLinkId,
     };
   }
+  // ─── Strict possible-duplicate index (2026-06-04) ──────────────────────
+  // For flagging duplicates against the LEDGER (Auto-pilot / Approve-each).
+  // Independent of the loose `suggestions` layer: exact import_hash OR
+  // identical amount (±$0.01) within dateToleranceDays. Per-row, no greedy
+  // consumption (two import rows can each flag the same tx — the user resolves
+  // each; linking one re-pairs on the next read).
+  const unlinkedTxList = txRows.filter((t) => !linkedTxIds.has(t.id));
+  const unlinkedTxByHash = new Map<string, number>();
+  for (const t of unlinkedTxList) {
+    if (t.importHash && !unlinkedTxByHash.has(t.importHash)) {
+      unlinkedTxByHash.set(t.importHash, t.id);
+    }
+  }
+  const strictDupFor = (b: BankCandidateRow): number | null => {
+    if (linkedBankIds.has(b.id)) return null;
+    if (b.importHash) {
+      const hit = unlinkedTxByHash.get(b.importHash);
+      if (hit != null) return hit;
+    }
+    for (const t of unlinkedTxList) {
+      if (
+        Math.abs(t.amount - b.amount) <= 0.01 &&
+        Math.abs(daysBetween(t.date, b.date)) <= thresholds.dateToleranceDays
+      ) {
+        return t.id;
+      }
+    }
+    return null;
+  };
+
   const bankTransactions: Record<string, ReconcileBankSnapshot> = {};
   for (const b of bankRows) {
     // Compute the rule-engine suggested category for this bank row's
@@ -407,6 +445,7 @@ export async function computeReconcileForAccount(
       lastSeenAt: null,
       suggestedCategoryId,
       suggestedTransferAccountId,
+      duplicateOfTransactionId: strictDupFor(b),
     };
   }
   // Pull the per-row freshness metadata in a single follow-up query.
@@ -997,13 +1036,13 @@ export async function applyRulesToBankRows(
           dek,
           accountId: acctId,
         });
-        for (const s of recon.suggestions) {
-          // A suggestion pairs an UNLINKED bank row with an UNLINKED ledger
-          // tx. When that bank row is one of ours, the tx is a pre-existing
-          // ledger entry this import would duplicate.
-          if (batchBankIds.has(s.bankTransactionId)) {
-            ledgerDupTxByBank.set(s.bankTransactionId, s.transactionId);
-          }
+        // Use the STRICT per-row duplicate signal (exact hash / exact amount +
+        // close date), NOT the loose ±$50 greedy `suggestions` layer — a true
+        // duplicate has the same amount, and we must not auto-block on a loose
+        // fuzzy near-match.
+        for (const bankId of batchBankIds) {
+          const dupTxId = recon.bankTransactions[bankId]?.duplicateOfTransactionId;
+          if (dupTxId != null) ledgerDupTxByBank.set(bankId, dupTxId);
         }
       } catch (err) {
         // Defensive: a dup-scan failure must never block the upload. Worst

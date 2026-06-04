@@ -61,11 +61,6 @@ interface ReconcileLink {
   createdAt: string;
 }
 
-interface ReconcileSuggestion {
-  transactionId: number;
-  bankTransactionId: string;
-}
-
 interface TxSnapshot {
   id: number;
   date: string;
@@ -82,11 +77,13 @@ interface BankSnapshot {
   payee: string | null;
   accountId: number;
   suggestedCategoryId: number | null;
+  /** Strict possible-duplicate: id of an existing unlinked ledger tx this
+   *  bank row matches (exact hash / exact amount + close date). null = none. */
+  duplicateOfTransactionId: number | null;
 }
 
 interface SnapshotShape {
   linked: ReconcileLink[];
-  suggestions: ReconcileSuggestion[];
   transactions: Record<number, TxSnapshot>;
   bankTransactions: Record<string, BankSnapshot>;
 }
@@ -201,11 +198,11 @@ export function InboxToCategorizeTab({
   const duplicateByBank = useMemo(() => {
     const map = new Map<string, RowCardDuplicate>();
     if (!snapshot) return map;
-    for (const s of snapshot.suggestions ?? []) {
-      if (map.has(s.bankTransactionId)) continue;
-      const tx = snapshot.transactions[s.transactionId];
+    for (const b of Object.values(snapshot.bankTransactions)) {
+      if (b.duplicateOfTransactionId == null) continue;
+      const tx = snapshot.transactions[b.duplicateOfTransactionId];
       if (!tx) continue;
-      map.set(s.bankTransactionId, {
+      map.set(b.id, {
         transactionId: tx.id,
         txPayee: tx.payee,
         txDate: tx.date,
