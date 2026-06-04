@@ -309,16 +309,12 @@ export function TransactionDialog({
 
   // ─── Seed state on open transition ──────────────────────────────────
   // Tracks the previous `open` value so we only seed on false→true edges.
+  // NOTE: the false→true seeding effect is declared *below* the
+  // seedFromInitialState/resetToCreateDefaults function declarations so the
+  // effect closure doesn't reference them before their lexical declaration
+  // (react-hooks/immutability, FINLYNQ-119). Hook call order is unchanged —
+  // no hooks sit between here and that effect.
   const wasOpen = useRef(false);
-  useEffect(() => {
-    if (open && !wasOpen.current) {
-      seedFromInitialState();
-    }
-    wasOpen.current = open;
-    // initialState changes are picked up at next open transition; we don't
-    // want a mid-edit re-seed to wipe user edits.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
 
   function seedFromInitialState() {
     setSubmitError(null);
@@ -448,6 +444,18 @@ export function TransactionDialog({
     setTransferFxPreview({ state: "idle" });
     setLinkedSiblings([]);
   }
+
+  // Seed on the false→true `open` edge. Declared after the two seed helpers
+  // above so the effect closure references them post-declaration (FINLYNQ-119).
+  useEffect(() => {
+    if (open && !wasOpen.current) {
+      seedFromInitialState();
+    }
+    wasOpen.current = open;
+    // initialState changes are picked up at next open transition; we don't
+    // want a mid-edit re-seed to wipe user edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   // Reset received-touched flag whenever the user types a new source amount in
   // cross-currency transfer mode (allows FX preview to refill the dest).

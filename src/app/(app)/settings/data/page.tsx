@@ -6,6 +6,7 @@
  */
 
 import { useState, useCallback } from "react";
+import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -466,7 +467,7 @@ export default function DataSettingsPage() {
             Open backfill wizard
           </Button>
           <p className="text-xs text-muted-foreground mt-2">
-            Reviews proposals before applying. Won&apos;t change account balances. <a href="/settings/backfill" className="underline">Learn more</a>.
+            Reviews proposals before applying. Won&apos;t change account balances. <Link href="/settings/backfill" className="underline">Learn more</Link>.
           </p>
         </CardContent>
       </Card>

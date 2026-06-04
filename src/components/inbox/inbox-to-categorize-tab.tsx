@@ -228,32 +228,8 @@ export function InboxToCategorizeTab({
     [],
   );
 
-  const onPrimary = useCallback(
-    async (bankId: string) => {
-      const sug = suggestionByBank.get(bankId);
-      // If we have a suggested category (a rule matched but did not
-      // materialize), accept it in one click.
-      if (sug?.kind === "create") {
-        setBusyBankId(bankId);
-        setError(null);
-        try {
-          await categorizeOne(bankId, sug.categoryId);
-          await refresh();
-        } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
-        } finally {
-          setBusyBankId(null);
-        }
-        return;
-      }
-      // No suggestion → open the dialog so user picks a category.
-      onEdit(bankId);
-    },
-    // onEdit is defined below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [categorizeOne, refresh, suggestionByBank],
-  );
-
+  // Declared before onPrimary so it can reference onEdit without a temporal
+  // dead-zone access (react-hooks/immutability, FINLYNQ-119).
   const onEdit = useCallback(
     (bankId: string) => {
       if (!snapshot) return;
@@ -284,6 +260,30 @@ export function InboxToCategorizeTab({
       setDialogOpen(true);
     },
     [snapshot, accounts],
+  );
+
+  const onPrimary = useCallback(
+    async (bankId: string) => {
+      const sug = suggestionByBank.get(bankId);
+      // If we have a suggested category (a rule matched but did not
+      // materialize), accept it in one click.
+      if (sug?.kind === "create") {
+        setBusyBankId(bankId);
+        setError(null);
+        try {
+          await categorizeOne(bankId, sug.categoryId);
+          await refresh();
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
+        } finally {
+          setBusyBankId(null);
+        }
+        return;
+      }
+      // No suggestion → open the dialog so user picks a category.
+      onEdit(bankId);
+    },
+    [categorizeOne, refresh, suggestionByBank, onEdit],
   );
 
   const deleteBankRow = useCallback(

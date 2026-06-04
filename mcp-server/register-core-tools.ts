@@ -1266,8 +1266,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         return sqliteErr("`fromAccount`/`toAccount` (names) are refused on stdio after Stream D Phase 4. Pass `from_account_id`/`to_account_id` instead.");
       }
 
-      let fromAccountId: number | undefined = from_account_id ?? undefined;
-      let toAccountId: number | undefined = to_account_id ?? undefined;
+      const fromAccountId: number | undefined = from_account_id ?? undefined;
+      const toAccountId: number | undefined = to_account_id ?? undefined;
       if (fromAccountId != null) {
         const acct = await sqlite.prepare(
           `SELECT id FROM accounts WHERE user_id = ? AND id = ?`

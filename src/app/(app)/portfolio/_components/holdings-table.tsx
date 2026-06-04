@@ -29,6 +29,26 @@ import {
 
 type SortField = "name" | "marketValueDisplay" | "unrealizedGainPct";
 
+// Hoisted to module scope so it isn't re-created on every HoldingsTable render
+// (react-hooks/static-components, FINLYNQ-119). The active sort state is passed
+// in rather than closed over.
+function SortIcon({
+  field,
+  sortField,
+  sortDir,
+}: {
+  field: SortField;
+  sortField: SortField;
+  sortDir: "asc" | "desc";
+}) {
+  if (sortField !== field) return null;
+  return sortDir === "asc" ? (
+    <ChevronUp className="h-3 w-3 inline ml-0.5" />
+  ) : (
+    <ChevronDown className="h-3 w-3 inline ml-0.5" />
+  );
+}
+
 export function HoldingsTable({
   data,
   displayCurrency,
@@ -61,11 +81,6 @@ export function HoldingsTable({
   setEditingHolding: (h: EnrichedHolding) => void;
 }) {
   const { summary, byType } = data;
-
-  const SortIcon = ({ field }: { field: SortField }) => {
-    if (sortField !== field) return null;
-    return sortDir === "asc" ? <ChevronUp className="h-3 w-3 inline ml-0.5" /> : <ChevronDown className="h-3 w-3 inline ml-0.5" />;
-  };
 
   return (
     <Card>
@@ -122,15 +137,15 @@ export function HoldingsTable({
               <TableRow>
                 <TableHead className="cursor-pointer select-none w-8" />
                 <TableHead className="cursor-pointer select-none" onClick={() => handleSort("name")}>
-                  Holding <SortIcon field="name" />
+                  Holding <SortIcon field="name" sortField={sortField} sortDir={sortDir} />
                 </TableHead>
                 <TableHead className="text-right">Total Qty</TableHead>
                 <TableHead className="text-right">Avg Cost</TableHead>
                 <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("marketValueDisplay")}>
-                  Mkt Value <SortIcon field="marketValueDisplay" />
+                  Mkt Value <SortIcon field="marketValueDisplay" sortField={sortField} sortDir={sortDir} />
                 </TableHead>
                 <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("unrealizedGainPct")}>
-                  Unrealized G/L <SortIcon field="unrealizedGainPct" />
+                  Unrealized G/L <SortIcon field="unrealizedGainPct" sortField={sortField} sortDir={sortDir} />
                 </TableHead>
                 <TableHead className="text-right">Realized G/L</TableHead>
                 <TableHead className="text-right">Accounts</TableHead>

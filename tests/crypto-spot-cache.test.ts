@@ -108,11 +108,11 @@ describe("bucketDailyCryptoPrices", () => {
     const out = bucketDailyCryptoPrices(
       [
         [at("2026-05-29", 12), 90],
-        // @ts-expect-error — exercise defensive guards against bad shapes
+        // @ts-expect-error -- exercise defensive guards against bad shapes
         [null, 5],
-        // @ts-expect-error
+        // @ts-expect-error -- exercise defensive guards against bad shapes
         ["x", "y"],
-        // @ts-expect-error
+        // @ts-expect-error -- exercise defensive guards against bad shapes
         undefined,
       ],
       TODAY,

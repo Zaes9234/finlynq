@@ -269,6 +269,40 @@ export function InboxToApproveTab({
     [],
   );
 
+  // Declared before onApprove so it can reference onEdit without a temporal
+  // dead-zone access (react-hooks/immutability, FINLYNQ-119).
+  const onEdit = useCallback(
+    (bankId: string) => {
+      if (!snapshot) return;
+      const snap = snapshot.bankTransactions[bankId];
+      if (!snap) return;
+      const acct = accounts.find((a) => a.id === snap.accountId);
+      if (acct?.isInvestment === true) {
+        setError(
+          "Investment accounts aren't supported by the Approve-each lens yet — use the Manual lens or the portfolio operations flow.",
+        );
+        return;
+      }
+      setDialogInitial({
+        kind: "transaction-prefill",
+        values: {
+          accountId: String(snap.accountId),
+          categoryId:
+            snap.suggestedCategoryId != null
+              ? String(snap.suggestedCategoryId)
+              : "",
+          date: snap.date,
+          currency: snap.currency,
+          amount: String(snap.amount),
+          payee: snap.payee ?? "",
+        },
+      });
+      setMaterializeBankId(snap.id);
+      setDialogOpen(true);
+    },
+    [snapshot, accounts],
+  );
+
   const onApprove = useCallback(
     async (bankId: string) => {
       const sug = suggestionByBank.get(bankId);
@@ -313,51 +347,7 @@ export function InboxToApproveTab({
         setBusyBankId(null);
       }
     },
-    // `onEdit` is defined below; it's referenced by closure so we add it
-    // after declaration via the explicit dep list at the bottom.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [approveOne, refresh, snapshot, suggestionByBank, categories],
-  );
-
-  const onEdit = useCallback(
-    (bankId: string) => {
-      if (!snapshot) return;
-      const snap = snapshot.bankTransactions[bankId];
-      if (!snap) return;
-      const acct = accounts.find((a) => a.id === snap.accountId);
-      if (acct?.isInvestment === true) {
-        setError(
-          "Investment accounts aren't supported by the Approve-each lens yet — use the Manual lens or the portfolio operations flow.",
-        );
-        return;
-      }
-      setDialogInitial({
-        kind: "transaction-prefill",
-        values: {
-          accountId: String(snap.accountId),
-          categoryId:
-            snap.suggestedCategoryId != null
-              ? String(snap.suggestedCategoryId)
-              : "",
-          date: snap.date,
-          currency: snap.currency,
-          amount: String(snap.amount),
-          payee: snap.payee ?? "",
-        },
-      });
-      setMaterializeBankId(snap.id);
-      setDialogOpen(true);
-    },
-    [snapshot, accounts],
-  );
-
-  const onDelete = useCallback(
-    (bankId: string) => {
-      void deleteBankRow(bankId, null);
-    },
-    // deleteBankRow is defined below; same closure trick as above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [],
+    [approveOne, refresh, snapshot, suggestionByBank, categories, onEdit],
   );
 
   const deleteBankRow = useCallback(
@@ -403,6 +393,15 @@ export function InboxToApproveTab({
       }
     },
     [snapshot, refresh],
+  );
+
+  // Declared after deleteBankRow so it can reference it without a temporal
+  // dead-zone access (react-hooks/immutability, FINLYNQ-119).
+  const onDelete = useCallback(
+    (bankId: string) => {
+      void deleteBankRow(bankId, null);
+    },
+    [deleteBankRow],
   );
 
   const onAcceptAllSuggested = useCallback(async () => {

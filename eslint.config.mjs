@@ -25,28 +25,30 @@ const eslintConfig = defineConfig([
   ]),
   {
     // ── FINLYNQ-112 ESLint baseline ──────────────────────────────────────
-    // These 12 rules each carry a pre-existing violation backlog (178 errors
-    // total on the dev HEAD this baseline was cut against). They are
-    // downgraded from `error` to `warn` so the new blocking ESLint CI step
-    // (ci.yml `Lint`) can land today gating only on errors — `npm run lint`
+    // These rules each carry a pre-existing violation backlog (178 errors
+    // total across 12 rules on the dev HEAD this baseline was originally cut
+    // against). They are downgraded from `error` to `warn` so the blocking
+    // ESLint CI step (ci.yml `Lint`) gates only on errors — `npm run lint`
     // exits 0 with warnings, non-zero on any error. Every rule NOT listed
     // here keeps its current severity, so the CI step still catches any
     // FUTURE new-rule error. Burn down each rule's backlog and re-promote it
     // to `error` here per the follow-up; the step's teeth grow as that
     // happens. Do NOT add new violations of these rules — fix them at source.
+    //
+    // FINLYNQ-119 (2026-06-04) burned down + RE-PROMOTED the 7 quick-win /
+    // small-count rules — they were removed from this block and now run at
+    // their default `error` severity (zero violations repo-wide):
+    //   prefer-const, react-hooks/rules-of-hooks, react-hooks/use-memo,
+    //   react-hooks/immutability, react-hooks/static-components,
+    //   @typescript-eslint/ban-ts-comment, @next/next/no-html-link-for-pages.
+    // The 5 large backlogs below + preserve-manual-memoization stay `warn`
+    // (each is its own follow-up PR).
     rules: {
       "@typescript-eslint/no-require-imports": "warn",
       "react-hooks/set-state-in-effect": "warn",
       "@typescript-eslint/no-explicit-any": "warn",
       "react/display-name": "warn",
       "react/no-unescaped-entities": "warn",
-      "prefer-const": "warn",
-      "react-hooks/static-components": "warn",
-      "react-hooks/use-memo": "warn",
-      "react-hooks/rules-of-hooks": "warn",
-      "@typescript-eslint/ban-ts-comment": "warn",
-      "@next/next/no-html-link-for-pages": "warn",
-      "react-hooks/immutability": "warn",
       // eslint-plugin-react-hooks 7.1.1 (lockfile) errors on this React
       // Compiler diagnostic ("Existing memoization could not be preserved") in
       // 3 web components (inbox-to-approve-tab, inbox-to-categorize-tab,

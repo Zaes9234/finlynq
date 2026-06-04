@@ -21,6 +21,16 @@ type HoverInfo = {
   percentage: number;
 } | null;
 
+type Flow = {
+  fromIdx: number;
+  toIdx: number;
+  value: number;
+  fromY: number;
+  fromH: number;
+  toY: number;
+  toH: number;
+};
+
 function truncateLabel(text: string, maxLen: number): string {
   return text.length > maxLen ? text.slice(0, maxLen - 1) + "\u2026" : text;
 }
@@ -54,6 +64,43 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
   const totalIncome = incomeData.reduce((s, d) => s + d.value, 0);
   const totalExpenses = expenseData.reduce((s, d) => s + d.value, 0);
 
+  // Hover handlers must be declared unconditionally (before the early return
+  // below) so hook order stays stable across empty/non-empty renders
+  // (react-hooks/rules-of-hooks, FINLYNQ-119). They read names off the source
+  // `incomeData`/`expenseData` rather than the post-layout nodes — the layout
+  // nodes preserve `name` verbatim (`{ ...d, x, y, h }`), so this is identical.
+  const handleFlowHover = useCallback(
+    (e: React.MouseEvent, flow: Flow) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setHover({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top - 10,
+        from: incomeData[flow.fromIdx].name,
+        to: expenseData[flow.toIdx].name,
+        amount: flow.value,
+        percentage: (flow.value / totalIncome) * 100,
+      });
+    },
+    [incomeData, expenseData, totalIncome]
+  );
+
+  const handleNodeHover = useCallback(
+    (e: React.MouseEvent, name: string, value: number) => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setHover({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top - 10,
+        from: name,
+        to: "",
+        amount: value,
+        percentage: (value / totalIncome) * 100,
+      });
+    },
+    [totalIncome]
+  );
+
   if (totalIncome === 0 && totalExpenses === 0) {
     return (
       <div className="flex items-center justify-center h-64 text-muted-foreground">
@@ -84,34 +131,32 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
   const expenseTotalGap = (expenseData.length - 1) * expenseGap;
   const expenseScale = (flowHeight - expenseTotalGap) / maxTotal;
 
-  // Income nodes (left side)
-  let incomeY = padding.top + (flowHeight - totalIncome * incomeScale - incomeTotalGap) / 2;
-  const incomeNodes = incomeData.map((d) => {
-    const h = d.value * incomeScale;
-    const node = { ...d, x: padding.left + leftLabelArea, y: incomeY, h };
-    incomeY += h + incomeGap;
-    return node;
-  });
+  // Income nodes (left side). Build with an explicit loop so the running Y
+  // offset stays a loop-local `let` rather than a render-scoped variable
+  // mutated inside a `.map` closure (react-hooks/immutability, FINLYNQ-119).
+  const incomeNodes: { name: string; value: number; x: number; y: number; h: number }[] = [];
+  {
+    let incomeY = padding.top + (flowHeight - totalIncome * incomeScale - incomeTotalGap) / 2;
+    for (const d of incomeData) {
+      const h = d.value * incomeScale;
+      incomeNodes.push({ ...d, x: padding.left + leftLabelArea, y: incomeY, h });
+      incomeY += h + incomeGap;
+    }
+  }
 
-  // Expense nodes (right side)
-  let expenseY = padding.top + (flowHeight - totalExpenses * expenseScale - expenseTotalGap) / 2;
-  const expenseNodes = expenseData.map((d, i) => {
-    const h = d.value * expenseScale;
-    const node = { ...d, x: flowAreaRight, y: expenseY, h, colorIndex: i % CHART_COLORS.categories.length };
-    expenseY += h + expenseGap;
-    return node;
-  });
+  // Expense nodes (right side). Same explicit-loop pattern as income.
+  const expenseNodes: { name: string; value: number; x: number; y: number; h: number; colorIndex: number }[] = [];
+  {
+    let expenseY = padding.top + (flowHeight - totalExpenses * expenseScale - expenseTotalGap) / 2;
+    for (let i = 0; i < expenseData.length; i++) {
+      const d = expenseData[i];
+      const h = d.value * expenseScale;
+      expenseNodes.push({ ...d, x: flowAreaRight, y: expenseY, h, colorIndex: i % CHART_COLORS.categories.length });
+      expenseY += h + expenseGap;
+    }
+  }
 
   // Generate flows: each income source distributes proportionally to expenses
-  type Flow = {
-    fromIdx: number;
-    toIdx: number;
-    value: number;
-    fromY: number;
-    fromH: number;
-    toY: number;
-    toH: number;
-  };
   const flows: Flow[] = [];
   const incomeOffsets = incomeNodes.map(() => 0);
   const expenseOffsets = expenseNodes.map(() => 0);
@@ -138,38 +183,6 @@ export function SankeyChart({ incomeData, expenseData, currency = "CAD" }: Sanke
 
   // Savings flow (if income > expenses)
   const savings = totalIncome - totalExpenses;
-
-  const handleFlowHover = useCallback(
-    (e: React.MouseEvent, flow: Flow) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      setHover({
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top - 10,
-        from: incomeNodes[flow.fromIdx].name,
-        to: expenseNodes[flow.toIdx].name,
-        amount: flow.value,
-        percentage: (flow.value / totalIncome) * 100,
-      });
-    },
-    [incomeNodes, expenseNodes, totalIncome]
-  );
-
-  const handleNodeHover = useCallback(
-    (e: React.MouseEvent, name: string, value: number) => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      setHover({
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top - 10,
-        from: name,
-        to: "",
-        amount: value,
-        percentage: (value / totalIncome) * 100,
-      });
-    },
-    [totalIncome]
-  );
 
   const maxLabelChars = Math.floor(maxLabelWidth / 7.5);
 

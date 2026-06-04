@@ -149,7 +149,7 @@ function AuthorizePageInner() {
         setError(data.error ?? "Authorization failed");
         return;
       }
-      window.location.href = data.redirectTo;
+      window.location.assign(data.redirectTo);
     } catch {
       setError("Something went wrong. Please try again.");
     } finally {
@@ -182,7 +182,7 @@ function AuthorizePageInner() {
         setError(data.error_description ?? data.error ?? "Could not deny — invalid request");
         return;
       }
-      window.location.href = data.redirectTo;
+      window.location.assign(data.redirectTo);
     } catch {
       setError("Something went wrong. Please try again.");
     } finally {

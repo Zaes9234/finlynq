@@ -92,6 +92,14 @@ interface Props {
   onUpdated: (updated: StagedEditableRow) => void;
 }
 
+// Hoisted to module scope so it isn't re-created on every StagedRowEditor
+// render (react-hooks/static-components, FINLYNQ-119). Depends only on `shown`.
+function Spinner({ shown }: { shown: boolean }) {
+  return shown ? (
+    <span className="text-[10px] text-muted-foreground ml-1">saving…</span>
+  ) : null;
+}
+
 export function StagedRowEditor({
   stagedImportId,
   row,
@@ -158,9 +166,6 @@ export function StagedRowEditor({
     },
     [stagedImportId, local.id, onUpdated],
   );
-
-  const Spinner = ({ shown }: { shown: boolean }) =>
-    shown ? <span className="text-[10px] text-muted-foreground ml-1">saving…</span> : null;
 
   return (
     <div className="space-y-3 p-3 border-t bg-muted/30">

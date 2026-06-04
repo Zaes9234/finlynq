@@ -138,7 +138,7 @@ export async function GET(request: NextRequest) {
   // back. Simpler than a third JOIN with row-multiplier concerns; one
   // round-trip difference at sub-100ms per pane render.
   const txIds = deduped.map((r) => r.id);
-  let flagsByTxId = new Map<
+  const flagsByTxId = new Map<
     number,
     { kind: string; note: string | null }
   >();
