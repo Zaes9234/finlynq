@@ -32,9 +32,11 @@ import {
   RefreshCw,
   BookTemplate,
   Link as LinkIcon,
+  Landmark,
 } from "lucide-react";
 import { TemplateManager } from "@/app/(app)/import/components/template-manager";
 import { ConnectorTab } from "@/app/(app)/import/components/connector-tab";
+import { InvestmentStatementImporter } from "@/app/(app)/import/components/investment-statement-importer";
 import type { ImportTemplate } from "@/lib/import-templates";
 
 export default function ImportSettingsPage() {
@@ -119,6 +121,10 @@ export default function ImportSettingsPage() {
           <TabsTrigger value="connect">
             <LinkIcon className="h-4 w-4 mr-1.5" />
             Connect a Service
+          </TabsTrigger>
+          <TabsTrigger value="statements">
+            <Landmark className="h-4 w-4 mr-1.5" />
+            Investment statements
           </TabsTrigger>
         </TabsList>
 
@@ -241,6 +247,13 @@ export default function ImportSettingsPage() {
         <TabsContent value="connect">
           <div className="mt-4" id="connect">
             <ConnectorTab />
+          </div>
+        </TabsContent>
+
+        {/* Investment statements (IBKR XML / multi-account OFX/QFX) */}
+        <TabsContent value="statements">
+          <div className="mt-4" id="statements">
+            <InvestmentStatementImporter />
           </div>
         </TabsContent>
       </Tabs>
