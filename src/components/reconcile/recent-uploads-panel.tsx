@@ -22,11 +22,18 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Trash2, RefreshCcw, ChevronDown, ChevronRight } from "lucide-react";
+import { Trash2, RefreshCcw, ChevronDown, ChevronRight, Eye } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
 import { formatCurrency } from "@/lib/currency";
 
 /** One bank_transactions row a batch loaded — fetched on demand when the user
- *  expands a batch to see what it brought in. */
+ *  opens a batch's detail dialog to see what it brought in. */
 interface LoadedRow {
   id: string;
   date: string;
@@ -80,9 +87,9 @@ export function RecentUploadsPanel({
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
-  // Click-to-view: which batch is expanded, its loaded rows (cached per
-  // batch), and per-batch load/error state.
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  // Click-to-view: which batch's read-only detail dialog is open, its loaded
+  // rows (cached per batch), and per-batch load/error state.
+  const [viewBatchId, setViewBatchId] = useState<string | null>(null);
   const [details, setDetails] = useState<Record<string, LoadedRow[]>>({});
   const [detailLoadingId, setDetailLoadingId] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<Record<string, string>>({});
@@ -99,9 +106,9 @@ export function RecentUploadsPanel({
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as BatchRow[];
       setBatches(data);
-      // Drop any cached expand/detail state — a refresh (or post-delete
-      // reload) may have changed row counts, so re-expanding refetches.
-      setExpandedId(null);
+      // Drop any cached detail state — a refresh (or post-delete reload) may
+      // have changed row counts, so re-opening refetches.
+      setViewBatchId(null);
       setDetails({});
       setDetailError({});
     } catch (e) {
@@ -138,19 +145,15 @@ export function RecentUploadsPanel({
     }
   }, []);
 
-  /** Toggle a batch open/closed; fetch its rows on first open. */
-  const toggleExpand = useCallback(
+  /** Open a batch's read-only detail dialog; fetch its rows on first open. */
+  const openView = useCallback(
     (batchId: string) => {
-      if (expandedId === batchId) {
-        setExpandedId(null);
-        return;
-      }
-      setExpandedId(batchId);
+      setViewBatchId(batchId);
       if (!details[batchId] && detailLoadingId !== batchId) {
         void loadDetail(batchId);
       }
     },
-    [expandedId, details, detailLoadingId, loadDetail],
+    [details, detailLoadingId, loadDetail],
   );
 
   useEffect(() => {
@@ -198,6 +201,17 @@ export function RecentUploadsPanel({
   );
 
   if (accountId == null) return null;
+
+  // Derived state for the read-only detail dialog.
+  const viewBatch = viewBatchId ? (batches.find((b) => b.id === viewBatchId) ?? null) : null;
+  const viewRows = viewBatchId ? details[viewBatchId] : undefined;
+  const viewLoading = viewBatchId != null && detailLoadingId === viewBatchId;
+  const viewErr = viewBatchId ? detailError[viewBatchId] : undefined;
+  const viewInLedger = viewRows ? viewRows.filter((r) => r.linkedTransactionId != null).length : 0;
+  const viewDt = viewBatch ? new Date(viewBatch.uploadedAt) : null;
+  const viewDateLabel = viewDt
+    ? `${viewDt.getFullYear()}-${String(viewDt.getMonth() + 1).padStart(2, "0")}-${String(viewDt.getDate()).padStart(2, "0")} ${String(viewDt.getHours()).padStart(2, "0")}:${String(viewDt.getMinutes()).padStart(2, "0")}`
+    : "";
 
   return (
     <div className="rounded-md border bg-card text-card-foreground">
@@ -251,23 +265,16 @@ export function RecentUploadsPanel({
               {batches.map((b) => {
                 const dt = new Date(b.uploadedAt);
                 const dateLabel = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
-                const isOpen = expandedId === b.id;
-                const rowsForBatch = details[b.id];
                 return (
                   <li key={b.id} className="text-sm">
                     <div className="flex items-center justify-between gap-4 px-4 py-3">
                       <button
                         type="button"
-                        onClick={() => toggleExpand(b.id)}
-                        aria-expanded={isOpen}
+                        onClick={() => openView(b.id)}
                         className="min-w-0 flex-1 flex items-start gap-2 text-left hover:opacity-80"
-                        title="Show what this batch loaded"
+                        title="View what this import loaded"
                       >
-                        {isOpen ? (
-                          <ChevronDown className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
-                        ) : (
-                          <ChevronRight className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
-                        )}
+                        <Eye className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
                         <span className="min-w-0 flex-1">
                           <span className="flex items-center gap-2">
                             <span className="font-mono text-xs text-muted-foreground">
@@ -305,52 +312,6 @@ export function RecentUploadsPanel({
                         {deletingId === b.id ? "Deleting…" : "Delete batch"}
                       </Button>
                     </div>
-
-                    {isOpen && (
-                      <div className="border-t bg-muted/20 px-4 py-2.5">
-                        {detailLoadingId === b.id && (
-                          <p className="text-xs text-muted-foreground">Loading what this batch loaded…</p>
-                        )}
-                        {detailError[b.id] && (
-                          <p className="text-xs text-rose-600">{detailError[b.id]}</p>
-                        )}
-                        {detailLoadingId !== b.id &&
-                          !detailError[b.id] &&
-                          rowsForBatch &&
-                          rowsForBatch.length === 0 && (
-                            <p className="text-xs text-muted-foreground">
-                              No rows remain from this batch — they were deleted from the bank ledger.
-                            </p>
-                          )}
-                        {rowsForBatch && rowsForBatch.length > 0 && (
-                          <ul className="divide-y divide-border/60">
-                            {rowsForBatch.map((row) => (
-                              <li
-                                key={row.id}
-                                className="flex items-center justify-between gap-3 py-1.5"
-                              >
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-center gap-2">
-                                    <span className="font-mono text-[11px] text-muted-foreground shrink-0">
-                                      {row.date}
-                                    </span>
-                                    <span className="truncate">{row.payee || "(no payee)"}</span>
-                                  </div>
-                                  <div className="text-[11px] text-muted-foreground">
-                                    {row.category ?? "uncategorized"}
-                                    {" · "}
-                                    {row.linkedTransactionId != null ? "in ledger" : "bank-only"}
-                                  </div>
-                                </div>
-                                <span className="font-mono shrink-0 tabular-nums">
-                                  {formatCurrency(row.amount, row.currency)}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    )}
                   </li>
                 );
               })}
@@ -358,6 +319,101 @@ export function RecentUploadsPanel({
           )}
         </div>
       )}
+
+      {/* Read-only detail dialog — what this import loaded + where each row is
+          now (in-ledger vs bank-only). Sourced from the batch's bank_transactions
+          via the lineage chain; a faithful editable staging two-pane isn't
+          applicable to an already-processed batch (its staged rows are gone). */}
+      <Dialog
+        open={viewBatchId != null}
+        onOpenChange={(o) => {
+          if (!o) setViewBatchId(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col overflow-hidden">
+          <DialogHeader>
+            <DialogTitle className="truncate">
+              {viewBatch?.filename ?? "Import detail"}
+            </DialogTitle>
+            <DialogDescription>
+              {viewBatch
+                ? `${viewDateLabel} · ${viewBatch.mode} · ${viewBatch.source} · ${viewBatch.currentRowCount}/${viewBatch.rowCount} rows${
+                    viewBatch.anchorCount > 0
+                      ? ` · ${viewBatch.anchorCount} anchor${viewBatch.anchorCount === 1 ? "" : "s"}`
+                      : ""
+                  }`
+                : "What this import loaded."}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+            {viewLoading && (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                Loading what this import loaded…
+              </p>
+            )}
+            {viewErr && <p className="py-4 text-sm text-rose-600">{viewErr}</p>}
+            {!viewLoading && !viewErr && viewRows && viewRows.length === 0 && (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                No rows remain from this import — they were deleted from the bank
+                ledger.
+              </p>
+            )}
+            {viewRows && viewRows.length > 0 && (
+              <>
+                <p className="mb-2 text-xs text-muted-foreground">
+                  {viewInLedger} of {viewRows.length}{" "}
+                  {viewRows.length === 1 ? "row is" : "rows are"} materialized in
+                  your ledger; the rest are bank-only.
+                </p>
+                <table className="w-full text-sm">
+                  <thead className="border-b text-xs text-muted-foreground">
+                    <tr>
+                      <th className="py-1.5 pr-2 text-left font-medium">Date</th>
+                      <th className="py-1.5 pr-2 text-left font-medium">Payee</th>
+                      <th className="py-1.5 pr-2 text-left font-medium">Category</th>
+                      <th className="py-1.5 pr-2 text-left font-medium">Status</th>
+                      <th className="py-1.5 text-right font-medium">Amount</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/60">
+                    {viewRows.map((row) => (
+                      <tr key={row.id}>
+                        <td className="py-1.5 pr-2 font-mono text-xs whitespace-nowrap">
+                          {row.date}
+                        </td>
+                        <td
+                          className="max-w-[200px] truncate py-1.5 pr-2"
+                          title={row.payee ?? ""}
+                        >
+                          {row.payee || "(no payee)"}
+                        </td>
+                        <td className="py-1.5 pr-2 text-muted-foreground">
+                          {row.category ?? "—"}
+                        </td>
+                        <td className="py-1.5 pr-2">
+                          {row.linkedTransactionId != null ? (
+                            <span className="inline-block rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0 text-[10px] text-emerald-700">
+                              in ledger
+                            </span>
+                          ) : (
+                            <span className="inline-block rounded border border-border bg-muted/40 px-1.5 py-0 text-[10px] text-muted-foreground">
+                              bank-only
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-1.5 text-right font-mono tabular-nums whitespace-nowrap">
+                          {formatCurrency(row.amount, row.currency)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Confirmation modal for batches with linked transactions. */}
       {confirm && (
