@@ -136,7 +136,7 @@ export function StagedReviewSurface({
   const onLedgerError = useCallback((msg: string) => {
     setToast({ type: "error", msg });
   }, []);
-  const { dbRows, setDbRows, dbRowsLoading } = useBankLedger(accountId, onLedgerError);
+  const { dbRows, setDbRows, dbRowsLoading, reload: reloadBankLedger } = useBankLedger(accountId, onLedgerError);
 
   const openDetail = useCallback(
     async (id: string) => {
@@ -147,7 +147,14 @@ export function StagedReviewSurface({
         setSelected(
           new Set(
             data.rows
-              .filter((r) => !r.isDuplicate && r.reconcileState !== "skipped_duplicate")
+              .filter(
+                (r) =>
+                  !r.isDuplicate &&
+                  r.reconcileState !== "skipped_duplicate" &&
+                  // Already pushed to the bank ledger on a prior send — kept
+                  // visible (highlighted "imported") but not re-selectable.
+                  r.rowStatus !== "approved",
+              )
               .map((r) => r.id),
           ),
         );
@@ -937,25 +944,47 @@ export function StagedReviewSurface({
         return;
       }
       if (!res.ok) throw new Error(data.error || "Approve failed");
-      // Phase 3 of import-modes refactor (2026-05-25) — approve now writes
-      // ONLY to bank_transactions. The user goes to /reconcile to
-      // categorize + materialize into the ledger.
+      // Phase 3 of import-modes refactor (2026-05-25) — approve writes ONLY to
+      // bank_transactions. 2026-06-05 — the sent rows are no longer deleted;
+      // they stay on the file (right) side highlighted as "imported". So
+      // instead of closing the batch, we stay put and refresh in place:
+      //   - reload the staged detail → sent rows show highlighted + drop out
+      //     of the (re-seeded) selection;
+      //   - reload the bank ledger (left) → sent rows now appear there too;
+      //   - refresh the pending list → the batch leaves it once fully sent.
       const approved = data.approved ?? data.imported ?? 0;
       const skipped = data.skippedDuplicates ?? 0;
       setToast({
         type: "success",
         msg: `Sent ${approved} row${approved === 1 ? "" : "s"} to the bank ledger${
           skipped > 0 ? ` (${skipped} duplicate${skipped === 1 ? "" : "s"} skipped)` : ""
-        }. Open /reconcile to categorize.`,
+        } — marked "imported" below. Open the Reconcile tab to categorize.`,
       });
-      closeDetail();
       loadList();
+      reloadBankLedger();
+      try {
+        const refreshed = await loadDetail(openId);
+        setSelected(
+          new Set(
+            refreshed.rows
+              .filter(
+                (r) =>
+                  !r.isDuplicate &&
+                  r.reconcileState !== "skipped_duplicate" &&
+                  r.rowStatus !== "approved",
+              )
+              .map((r) => r.id),
+          ),
+        );
+      } catch {
+        /* best-effort — the toast already confirmed the send */
+      }
     } catch (e) {
       setToast({ type: "error", msg: e instanceof Error ? e.message : "Approve failed" });
     } finally {
       setActing(false);
     }
-  }, [openId, selected, closeDetail, loadList]);
+  }, [openId, selected, loadList, reloadBankLedger, loadDetail]);
 
   const refreshDetail = useCallback(async () => {
     if (!openId) return;
@@ -1061,6 +1090,21 @@ export function StagedReviewSurface({
         loadList={loadList}
         openDetail={openDetail}
         embedded={embedded}
+        accountScope={accountScope}
+        // Clicking a loaded batch re-opens the SAME staging two-pane review for
+        // its source import (the imported rows persist there, highlighted) —
+        // not a separate view. Null = simplified/auto batch with no staged
+        // detail to open.
+        onOpenLoadedBatch={(stagedImportId) => {
+          if (stagedImportId) {
+            void openDetail(stagedImportId);
+          } else {
+            setToast({
+              type: "error",
+              msg: "This import was loaded directly to the bank ledger — open the Reconcile tab to see its rows.",
+            });
+          }
+        }}
       />
     );
   }

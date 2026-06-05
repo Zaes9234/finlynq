@@ -98,6 +98,9 @@ export function FilePane({
   // the most recent transaction of that day).
   const balanceShownForDate = new Set<string>();
   const hasAnyAnchor = (anchorsByDate?.size ?? 0) > 0;
+  // Rows already pushed to the bank ledger (row_status='approved') stay
+  // visible but aren't re-sendable — exclude them from select-all.
+  const selectableRows = rows.filter((r) => r.rowStatus !== "approved");
   // colSpan for the expanded editor row must cover every header column.
   // Columns: checkbox (1) + chevron (2) + Date (3) + Payee (4) + Type (5)
   //          + Amount (6) [+ Balance (7)] [+ Actions (last)]
@@ -113,19 +116,24 @@ export function FilePane({
               <TableHead className="w-10">
                 <input
                   type="checkbox"
+                  // Already-imported rows (row_status='approved') aren't
+                  // selectable — they've been pushed to the bank ledger — so
+                  // select-all operates only on the still-sendable rows.
                   checked={
-                    rows.length > 0 &&
-                    rows.every((r) => selected.has(r.id))
+                    selectableRows.length > 0 &&
+                    selectableRows.every((r) => selected.has(r.id))
                   }
                   onChange={() => {
-                    const everySelected = rows.every((r) => selected.has(r.id));
+                    const everySelected = selectableRows.every((r) => selected.has(r.id));
                     if (everySelected) {
-                      rows.forEach((r) => onToggleSelect(r.id));
+                      selectableRows.forEach((r) => onToggleSelect(r.id));
                     } else {
-                      rows.filter((r) => !selected.has(r.id)).forEach((r) => onToggleSelect(r.id));
+                      selectableRows
+                        .filter((r) => !selected.has(r.id))
+                        .forEach((r) => onToggleSelect(r.id));
                     }
                   }}
-                  aria-label="Select all visible rows"
+                  aria-label="Select all sendable rows"
                 />
               </TableHead>
               <TableHead className="w-8" />
@@ -142,12 +150,18 @@ export function FilePane({
           <TableBody>
             {rows.map((r) => {
               const isExpanded = expanded.has(r.id);
+              // Pushed to the bank ledger on a prior "Send" — kept visible,
+              // highlighted, not re-sendable.
+              const isImported = r.rowStatus === "approved";
               const dimmed =
                 r.reconcileState === "skipped_duplicate"
                   ? "opacity-60 line-through"
                   : r.isDuplicate || r.reconcileState === "linked"
                     ? "opacity-60"
                     : "";
+              const importedClass = isImported
+                ? "bg-emerald-500/10 hover:bg-emerald-500/15"
+                : "";
               const dayBalance = hasAnyAnchor ? anchorsByDate?.get(r.date) : undefined;
               const showBalance =
                 hasAnyAnchor &&
@@ -162,7 +176,7 @@ export function FilePane({
               return (
                 <RowFragment key={r.id}>
                   <TableRow
-                    className={`${dimmed} ${highlightClass} ${clickable ? "cursor-pointer" : ""}`}
+                    className={`${dimmed} ${importedClass} ${highlightClass} ${clickable ? "cursor-pointer" : ""}`}
                     onClick={
                       clickable
                         ? (e) => {
@@ -184,6 +198,8 @@ export function FilePane({
                         type="checkbox"
                         checked={selected.has(r.id)}
                         onChange={() => onToggleSelect(r.id)}
+                        disabled={isImported}
+                        title={isImported ? "Already loaded into the bank ledger" : undefined}
                         aria-label={`Select row ${r.rowIndex}`}
                       />
                     </TableCell>
@@ -231,6 +247,14 @@ export function FilePane({
                         {r.isDuplicate && r.reconcileState !== "skipped_duplicate" && (
                           <Badge variant="outline" className="text-[10px]">
                             dupe
+                          </Badge>
+                        )}
+                        {isImported && (
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200"
+                          >
+                            imported
                           </Badge>
                         )}
                         <RowBadge

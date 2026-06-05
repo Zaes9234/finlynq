@@ -62,6 +62,11 @@ export async function GET(request: NextRequest) {
       uploadedAt: schema.bankUploadBatches.uploadedAt,
       rowCount: schema.bankUploadBatches.rowCount,
       anchorCount: schema.bankUploadBatches.anchorCount,
+      // 2026-06-05 — surfaced so clicking a loaded batch can re-open the
+      // staging two-pane review for its source import (the imported rows now
+      // persist there, highlighted). NULL for simplified/auto batches (no
+      // staged import).
+      stagedImportId: schema.bankUploadBatches.stagedImportId,
     })
     .from(schema.bankUploadBatches)
     .where(and(...whereClauses))
@@ -123,6 +128,7 @@ export async function GET(request: NextRequest) {
       anchorCount: b.anchorCount,
       currentRowCount: currentByBatch.get(b.id) ?? 0,
       hasLinkedTransactions: linkedSet.has(b.id),
+      stagedImportId: b.stagedImportId ?? null,
     })),
   );
 }

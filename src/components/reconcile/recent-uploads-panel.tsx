@@ -6,13 +6,18 @@
  * Per [plan/import-modes-simplified-detailed.md](../../../../plan/import-modes-simplified-detailed.md).
  *
  * Lists the most recent `bank_upload_batches` rows for the active account so
- * the user can undo an upload that landed bad rows (typo'd CSV, wrong
- * account binding, etc.). Each row has a "Delete batch" action that
- * cascades through bank_transactions + bank_daily_balances. If any bank
- * row in the batch is already linked to a `transactions` row (materialized
- * via /reconcile), the server replies with `requiresConfirmation: true`
- * and the panel surfaces a follow-up modal asking whether to also delete
- * those transactions or keep them as bank-lineage-NULL orphans.
+ * the user can see what's been loaded + undo an upload that landed bad rows
+ * (typo'd CSV, wrong account binding, etc.). Each row has a "Delete batch"
+ * action that cascades through bank_transactions + bank_daily_balances. If any
+ * bank row in the batch is already linked to a `transactions` row (materialized
+ * via /reconcile), the server replies with `requiresConfirmation: true` and the
+ * panel surfaces a follow-up modal asking whether to also delete those
+ * transactions or keep them as bank-lineage-NULL orphans.
+ *
+ * Clicking a batch does NOT open a separate view — it calls `onOpenBatch`, which
+ * the /import page routes to the existing Reconcile screen (the bank-ledger ↔
+ * transactions two-pane). That screen already shows the imported transactions
+ * on its left side; we don't build a second view for "what was loaded".
  *
  * Data flow:
  *   GET /api/import/uploads?accountId=X  → list of batches
@@ -35,6 +40,9 @@ interface BatchRow {
   anchorCount: number;
   currentRowCount: number;
   hasLinkedTransactions: boolean;
+  /** Source staged import — drives the click-through back to the staging
+   *  two-pane review. Null for simplified/auto batches (no staged import). */
+  stagedImportId: string | null;
 }
 
 interface ConfirmState {
@@ -47,9 +55,22 @@ interface ConfirmState {
 export function RecentUploadsPanel({
   accountId,
   onChange,
+  title = "Recent uploads",
+  emptyLabel = "No uploads yet for this account.",
+  onOpenBatch,
 }: {
   accountId: number | null;
   onChange?: () => void;
+  /** Header label. Defaults to "Recent uploads"; the /import Staging tab
+   *  passes "Loaded into the bank ledger" so the section reads as the
+   *  processed counterpart to the pending list above it. */
+  title?: string;
+  /** Empty-state copy when the account has no loaded batches yet. */
+  emptyLabel?: string;
+  /** Clicking a batch row calls this with the batch's source staged_import_id
+   *  (null for simplified/auto). The surface re-opens the staging two-pane
+   *  review for that import. When unset, the row is non-interactive. */
+  onOpenBatch?: (stagedImportId: string | null) => void;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [batches, setBatches] = useState<BatchRow[]>([]);
@@ -132,7 +153,7 @@ export function RecentUploadsPanel({
       >
         <span className="flex items-center gap-2">
           {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-          Recent uploads
+          {title}
           {batches.length > 0 && (
             <span className="text-xs text-muted-foreground font-normal">
               ({batches.length})
@@ -167,7 +188,7 @@ export function RecentUploadsPanel({
           )}
           {batches.length === 0 && !loading && (
             <div className="px-4 py-6 text-center text-sm text-muted-foreground">
-              No uploads yet for this account.
+              {emptyLabel}
             </div>
           )}
           {batches.length > 0 && (
@@ -175,46 +196,59 @@ export function RecentUploadsPanel({
               {batches.map((b) => {
                 const dt = new Date(b.uploadedAt);
                 const dateLabel = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")} ${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
+                const meta = (
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-2">
+                      <span className="font-mono text-xs text-muted-foreground">
+                        {dateLabel}
+                      </span>
+                      <span className="inline-block rounded border border-border bg-muted/40 px-1.5 py-0 text-[10px] uppercase">
+                        {b.mode}
+                      </span>
+                      <span className="inline-block rounded border border-border bg-muted/40 px-1.5 py-0 text-[10px] uppercase">
+                        {b.source}
+                      </span>
+                      {b.hasLinkedTransactions && (
+                        <span className="inline-block rounded border border-amber-200 bg-amber-50 px-1.5 py-0 text-[10px] text-amber-800">
+                          has linked tx
+                        </span>
+                      )}
+                    </span>
+                    <span className="mt-0.5 block truncate text-xs">
+                      {b.filename ?? "(no filename)"}{" "}
+                      <span className="text-muted-foreground">
+                        · {b.currentRowCount}/{b.rowCount} rows
+                        {b.anchorCount > 0 && ` · ${b.anchorCount} anchor${b.anchorCount === 1 ? "" : "s"}`}
+                      </span>
+                    </span>
+                  </span>
+                );
                 return (
-                  <li
-                    key={b.id}
-                    className="flex items-center justify-between gap-4 px-4 py-3 text-sm"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-xs text-muted-foreground">
-                          {dateLabel}
-                        </span>
-                        <span className="inline-block rounded border border-border bg-muted/40 px-1.5 py-0 text-[10px] uppercase">
-                          {b.mode}
-                        </span>
-                        <span className="inline-block rounded border border-border bg-muted/40 px-1.5 py-0 text-[10px] uppercase">
-                          {b.source}
-                        </span>
-                        {b.hasLinkedTransactions && (
-                          <span className="inline-block rounded border border-amber-200 bg-amber-50 px-1.5 py-0 text-[10px] text-amber-800">
-                            has linked tx
-                          </span>
-                        )}
-                      </div>
-                      <div className="mt-0.5 truncate text-xs">
-                        {b.filename ?? "(no filename)"}{" "}
-                        <span className="text-muted-foreground">
-                          · {b.currentRowCount}/{b.rowCount} rows
-                          {b.anchorCount > 0 && ` · ${b.anchorCount} anchor${b.anchorCount === 1 ? "" : "s"}`}
-                        </span>
-                      </div>
+                  <li key={b.id} className="text-sm">
+                    <div className="flex items-center justify-between gap-4 px-4 py-3">
+                      {onOpenBatch ? (
+                        <button
+                          type="button"
+                          onClick={() => onOpenBatch(b.stagedImportId)}
+                          className="min-w-0 flex-1 text-left hover:opacity-80"
+                          title="Open the staging review for this import"
+                        >
+                          {meta}
+                        </button>
+                      ) : (
+                        <div className="min-w-0 flex-1">{meta}</div>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="text-rose-700 hover:text-rose-800 hover:bg-rose-50"
+                        onClick={() => void deleteBatch(b.id, false)}
+                        disabled={deletingId === b.id}
+                      >
+                        <Trash2 className="h-4 w-4 mr-1.5" />
+                        {deletingId === b.id ? "Deleting…" : "Delete batch"}
+                      </Button>
                     </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-rose-700 hover:text-rose-800 hover:bg-rose-50"
-                      onClick={() => void deleteBatch(b.id, false)}
-                      disabled={deletingId === b.id}
-                    >
-                      <Trash2 className="h-4 w-4 mr-1.5" />
-                      {deletingId === b.id ? "Deleting…" : "Delete batch"}
-                    </Button>
                   </li>
                 );
               })}

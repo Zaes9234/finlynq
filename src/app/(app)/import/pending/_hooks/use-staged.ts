@@ -149,6 +149,11 @@ export function useBankLedger(
 ) {
   const [dbRows, setDbRows] = useState<DbTransactionRow[]>([]);
   const [dbRowsLoading, setDbRowsLoading] = useState(false);
+  // Bumped to force a re-fetch without changing the account (e.g. after an
+  // approve pushes new rows into the bank ledger and we want the left pane
+  // to show them immediately).
+  const [reloadNonce, setReloadNonce] = useState(0);
+  const reload = useCallback(() => setReloadNonce((n) => n + 1), []);
 
   useEffect(() => {
     if (!accountId) {
@@ -191,7 +196,7 @@ export function useBankLedger(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accountId]);
+  }, [accountId, reloadNonce]);
 
-  return { dbRows, setDbRows, dbRowsLoading };
+  return { dbRows, setDbRows, dbRowsLoading, reload };
 }
