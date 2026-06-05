@@ -1061,6 +1061,7 @@ export function StagedReviewSurface({
         loadList={loadList}
         openDetail={openDetail}
         embedded={embedded}
+        accountScope={accountScope}
       />
     );
   }

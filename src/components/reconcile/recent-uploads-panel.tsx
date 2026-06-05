@@ -47,9 +47,17 @@ interface ConfirmState {
 export function RecentUploadsPanel({
   accountId,
   onChange,
+  title = "Recent uploads",
+  emptyLabel = "No uploads yet for this account.",
 }: {
   accountId: number | null;
   onChange?: () => void;
+  /** Header label. Defaults to "Recent uploads"; the /import Staging tab
+   *  passes "Loaded into the bank ledger" so the section reads as the
+   *  processed counterpart to the pending list above it. */
+  title?: string;
+  /** Empty-state copy when the account has no loaded batches yet. */
+  emptyLabel?: string;
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [batches, setBatches] = useState<BatchRow[]>([]);
@@ -132,7 +140,7 @@ export function RecentUploadsPanel({
       >
         <span className="flex items-center gap-2">
           {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-          Recent uploads
+          {title}
           {batches.length > 0 && (
             <span className="text-xs text-muted-foreground font-normal">
               ({batches.length})
@@ -167,7 +175,7 @@ export function RecentUploadsPanel({
           )}
           {batches.length === 0 && !loading && (
             <div className="px-4 py-6 text-center text-sm text-muted-foreground">
-              No uploads yet for this account.
+              {emptyLabel}
             </div>
           )}
           {batches.length > 0 && (

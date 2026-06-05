@@ -12,8 +12,9 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  ArrowLeft, Inbox, Mail, Upload, Clock, RefreshCw,
+  ArrowLeft, Inbox, Mail, Upload, Clock, RefreshCw, Hourglass, CheckCircle2,
 } from "lucide-react";
+import { RecentUploadsPanel } from "@/components/reconcile/recent-uploads-panel";
 import { daysUntil, type StagedRow } from "../_types";
 
 export function StagedListView({
@@ -24,6 +25,7 @@ export function StagedListView({
   loadList,
   openDetail,
   embedded = false,
+  accountScope = null,
 }: {
   list: StagedRow[] | null;
   loading: boolean;
@@ -36,7 +38,25 @@ export function StagedListView({
    *  lighter inline strip instead — the surrounding tab already provides the
    *  page header + account context. */
   embedded?: boolean;
+  /** The account this embedded surface is scoped to. Drives the
+   *  "pending to be loaded" summary + the Loaded (processed) section below
+   *  the pending list. Null in route mode (cross-account /import/pending) —
+   *  the Loaded section is suppressed there since it needs a single account. */
+  accountScope?: number | null;
 }) {
+  // Summary over the (already account-filtered by the parent) pending list.
+  // "Rows to load" = the rows that will materialize into the bank ledger on
+  // approve — non-duplicate rows. Duplicates are surfaced separately since
+  // they can still be force-approved but default to skipped.
+  const pending = list ?? [];
+  const pendingBatches = pending.length;
+  const pendingTotalRows = pending.reduce((s, r) => s + (r.totalRowCount ?? 0), 0);
+  const pendingDupes = pending.reduce((s, r) => s + (r.duplicateCount ?? 0), 0);
+  const rowsToLoad = pending.reduce(
+    (s, r) => s + Math.max(0, (r.totalRowCount ?? 0) - (r.duplicateCount ?? 0)),
+    0,
+  );
+
   return (
     <div className={embedded ? "space-y-3" : "space-y-6"}>
       {!embedded && (
@@ -105,6 +125,38 @@ export function StagedListView({
         </Card>
       )}
 
+      {/* Pending summary — embedded (account-scoped) Staging tab only. Gives
+          the "pending to be loaded" count the route-mode page doesn't need
+          (it spans every account). */}
+      {embedded && list && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="inline-flex items-center gap-1.5 rounded-md border bg-card px-2.5 py-1">
+            <Hourglass className="h-3.5 w-3.5 text-amber-600" />
+            <span className="font-medium">{pendingBatches}</span>
+            <span className="text-muted-foreground">
+              batch{pendingBatches === 1 ? "" : "es"} pending review
+            </span>
+          </span>
+          <span className="inline-flex items-center gap-1.5 rounded-md border bg-card px-2.5 py-1">
+            <span className="font-medium">{rowsToLoad}</span>
+            <span className="text-muted-foreground">
+              row{rowsToLoad === 1 ? "" : "s"} pending to be loaded
+            </span>
+          </span>
+          {pendingDupes > 0 && (
+            <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-amber-700">
+              <span className="font-medium">{pendingDupes}</span>
+              <span>duplicate{pendingDupes === 1 ? "" : "s"} (skipped by default)</span>
+            </span>
+          )}
+          {pendingTotalRows !== rowsToLoad && (
+            <span className="text-muted-foreground">
+              · {pendingTotalRows} total parsed
+            </span>
+          )}
+        </div>
+      )}
+
       {loading && !list && (
         <Card>
           <CardContent className="py-8 text-sm text-muted-foreground text-center">
@@ -113,7 +165,7 @@ export function StagedListView({
         </Card>
       )}
 
-      {list && list.length === 0 && (
+      {!embedded && list && list.length === 0 && (
         <Card>
           <CardContent className="py-12 text-center space-y-3">
             <Inbox className="h-10 w-10 text-muted-foreground mx-auto" />
@@ -135,6 +187,14 @@ export function StagedListView({
             </Link>
           </CardContent>
         </Card>
+      )}
+
+      {/* Embedded empty pending — a light inline note instead of the big
+          route-mode card, so the Loaded section below stays visible. */}
+      {embedded && list && list.length === 0 && (
+        <div className="rounded-md border border-dashed bg-muted/20 px-3 py-4 text-center text-xs text-muted-foreground">
+          No imports waiting for review. Processed uploads appear below.
+        </div>
       )}
 
       {list && list.length > 0 && (
@@ -189,6 +249,27 @@ export function StagedListView({
               </Card>
             );
           })}
+        </div>
+      )}
+
+      {/* Loaded (processed) section — embedded Staging tab only. Reuses the
+          bank_upload_batches list (every upload that landed rows in the bank
+          ledger: simplified-direct OR detailed-via-approve), so a batch the
+          user already processed stays visible here instead of vanishing from
+          the pending list. Carries its own per-batch summary (rows / anchors /
+          current count) + the batch-undo action. */}
+      {embedded && accountScope != null && (
+        <div className="pt-1">
+          <div className="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+            Already processed into the bank ledger
+          </div>
+          <RecentUploadsPanel
+            accountId={accountScope}
+            title="Loaded into the bank ledger"
+            emptyLabel="No imports have been loaded into the bank ledger for this account yet."
+            onChange={loadList}
+          />
         </div>
       )}
     </div>
