@@ -339,7 +339,16 @@ export function InboxEmailTab() {
                               onValueChange={(v) => setPickAccount(v ? parseInt(v, 10) : null)}
                             >
                               <SelectTrigger className="w-[200px] h-9">
-                                <SelectValue placeholder="Pick account" />
+                                {/* Explicit render — base-ui SelectValue otherwise
+                                 *  shows the raw account id, not the name. */}
+                                <SelectValue placeholder="Pick account">
+                                  {pickAccount != null
+                                    ? (() => {
+                                        const a = recordableAccounts.find((x) => x.id === pickAccount);
+                                        return a ? `${safeAccountName(a)} · ${a.currency}` : "Pick account";
+                                      })()
+                                    : "Pick account"}
+                                </SelectValue>
                               </SelectTrigger>
                               <SelectContent>
                                 {recordableAccounts.map((a) => (
@@ -357,7 +366,15 @@ export function InboxEmailTab() {
                               onValueChange={(v) => setPickCategory(v ? parseInt(v, 10) : null)}
                             >
                               <SelectTrigger className="w-[200px] h-9">
-                                <SelectValue placeholder="Pick category" />
+                                <SelectValue placeholder="Pick category">
+                                  {pickCategory != null
+                                    ? safeName(
+                                        categories.find((c) => c.id === pickCategory)?.name ?? null,
+                                        "category",
+                                        pickCategory,
+                                      )
+                                    : "Pick category"}
+                                </SelectValue>
                               </SelectTrigger>
                               <SelectContent>
                                 {categories.map((c) => (

@@ -246,7 +246,13 @@ export function EmailRulesManager() {
                 value={draft.accountId != null ? String(draft.accountId) : ""}
                 onValueChange={(v) => setDraft({ ...draft, accountId: v ? parseInt(v, 10) : null })}
               >
-                <SelectTrigger className="w-[180px] h-9"><SelectValue placeholder="Account" /></SelectTrigger>
+                {/* Explicit render — base-ui SelectValue otherwise shows the
+                 *  raw value (the account id) instead of the name. */}
+                <SelectTrigger className="w-[180px] h-9">
+                  <SelectValue placeholder="Account">
+                    {draft.accountId != null ? acctLabel(draft.accountId) : "Account"}
+                  </SelectValue>
+                </SelectTrigger>
                 <SelectContent>
                   {recordableAccounts.map((a) => (
                     <SelectItem key={a.id} value={String(a.id)}>
@@ -261,7 +267,11 @@ export function EmailRulesManager() {
                   setDraft({ ...draft, categoryId: v && v !== "none" ? parseInt(v, 10) : null })
                 }
               >
-                <SelectTrigger className="w-[170px] h-9"><SelectValue placeholder="Category (optional)" /></SelectTrigger>
+                <SelectTrigger className="w-[170px] h-9">
+                  <SelectValue placeholder="Category (optional)">
+                    {draft.categoryId != null ? catLabel(draft.categoryId) : "No category"}
+                  </SelectValue>
+                </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="none">No category</SelectItem>
                   {categories.map((c) => (
