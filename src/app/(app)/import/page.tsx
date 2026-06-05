@@ -384,7 +384,18 @@ function ImportPageInner() {
 
         {visibleTabs.includes("staging") && (
           <TabsContent value="staging">
-            <InboxStagingTab key={`staging-${reloadKey}`} accountId={account.id} />
+            <InboxStagingTab
+              key={`staging-${reloadKey}`}
+              accountId={account.id}
+              // Clicking a loaded batch jumps to the Reconcile tab — the
+              // existing bank-ledger ↔ transactions view that shows the
+              // imported transactions on its left. No separate view.
+              onOpenLoadedBatch={
+                visibleTabs.includes("reconcile")
+                  ? () => setTab("reconcile")
+                  : undefined
+              }
+            />
           </TabsContent>
         )}
 

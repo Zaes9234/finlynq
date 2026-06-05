@@ -16,6 +16,20 @@
 
 import { StagedReviewSurface } from "@/components/import/staged-review-surface";
 
-export function InboxStagingTab({ accountId }: { accountId: number }) {
-  return <StagedReviewSurface embedded accountScope={accountId} />;
+export function InboxStagingTab({
+  accountId,
+  onOpenLoadedBatch,
+}: {
+  accountId: number;
+  /** Clicking a loaded batch routes to the Reconcile tab (existing
+   *  bank-ledger view) instead of opening a separate view. */
+  onOpenLoadedBatch?: () => void;
+}) {
+  return (
+    <StagedReviewSurface
+      embedded
+      accountScope={accountId}
+      onOpenLoadedBatch={onOpenLoadedBatch}
+    />
+  );
 }

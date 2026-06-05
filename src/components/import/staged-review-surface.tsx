@@ -68,9 +68,13 @@ import { UnboundPickerPane } from "@/app/(app)/import/pending/_components/unboun
 export function StagedReviewSurface({
   embedded = false,
   accountScope = null,
+  onOpenLoadedBatch,
 }: {
   embedded?: boolean;
   accountScope?: number | null;
+  /** Forwarded to the Loaded-batch list: clicking a processed batch routes to
+   *  the existing Reconcile screen rather than opening a separate view. */
+  onOpenLoadedBatch?: () => void;
 }) {
   const { list, loading, error, loadList } = useStagedImports();
   const [openId, setOpenId] = useState<string | null>(null);
@@ -1062,6 +1066,7 @@ export function StagedReviewSurface({
         openDetail={openDetail}
         embedded={embedded}
         accountScope={accountScope}
+        onOpenLoadedBatch={onOpenLoadedBatch}
       />
     );
   }
