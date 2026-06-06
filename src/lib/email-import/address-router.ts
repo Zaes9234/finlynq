@@ -54,8 +54,8 @@ const NAMED_HUMAN_RE = /^[a-z0-9][a-z0-9._-]{1,28}[a-z0-9]$/;
 /**
  * Parse and classify a single `to` address.
  *
- * @param rawTo  The address as received in the Resend payload (e.g.
- *               `"import-abc123de@finlynq.com"` or
+ * @param rawTo  The address as received in the inbound payload (e.g.
+ *               `"import-abc123de@mail.finlynq.com"` or
  *               `"Admin <admin@finlynq.com>"`). Case-insensitive.
  */
 export async function routeAddress(rawTo: string): Promise<AddressRoute> {

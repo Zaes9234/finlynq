@@ -1,11 +1,13 @@
 /**
  * Per-environment import-address local-part prefix (2026-06-05).
  *
- * DevManager's Mailpit relay is a single catch-all for all @finlynq.com import
- * mail and routes by local-part prefix to the right environment's receiver:
+ * DevManager's Mailpit relay is a single catch-all for all import mail on the
+ * IMPORT_EMAIL_DOMAIN (mail.finlynq.com as of 2026-06-05 — moved off the root
+ * finlynq.com so that domain's MX is free for normal mail) and routes by
+ * local-part prefix to the right environment's receiver:
  *
- *   import-<hex>@finlynq.com     → prod  (https://finlynq.com/api/import/email-webhook)
- *   importdev-<hex>@finlynq.com  → dev   (https://dev.finlynq.com/api/import/email-webhook)
+ *   import-<hex>@mail.finlynq.com     → prod  (https://finlynq.com/api/import/email-webhook)
+ *   importdev-<hex>@mail.finlynq.com  → dev   (https://dev.finlynq.com/api/import/email-webhook)
  *
  * So each env must GENERATE and MATCH its own prefix. Driven by the env var
  * IMPORT_EMAIL_LOCALPART_PREFIX (default 'import-'; dev sets 'importdev-').
