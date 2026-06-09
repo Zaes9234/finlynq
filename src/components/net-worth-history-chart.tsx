@@ -155,9 +155,7 @@ export function NetWorthHistoryChart({
         <div className="flex items-center justify-between gap-3">
           <div>
             <CardTitle className="text-sm font-semibold">{title}</CardTitle>
-            <p className="text-[11px] text-muted-foreground">
-              {currency} · current-rate FX
-            </p>
+            <p className="text-[11px] text-muted-foreground">{currency}</p>
           </div>
           <div className="flex gap-1">
             {PERIODS.map((p) => (
