@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
+import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { DayChange } from "./portfolio-ui";
 import { ASSET_TYPE_CONFIG, type EnrichedHolding } from "../_types";
 
@@ -231,7 +232,7 @@ export function HoldingsByAccount({
                                 </TableCell>
                                 <TableCell className="text-right">
                                   <Link
-                                    href={`/transactions?portfolioHolding=${encodeURIComponent(h.name)}${h.accountId ? `&accountId=${h.accountId}` : ""}`}
+                                    href={buildTxDrillUrl({ portfolioHolding: h.name, accountId: h.accountId ? String(h.accountId) : undefined })}
                                     onClick={(e) => e.stopPropagation()}
                                     className="text-[11px] text-primary hover:underline whitespace-nowrap"
                                     title="View transactions for this holding in this account"

@@ -18,6 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCurrency } from "@/lib/currency";
+import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { exportByHoldingToCSV } from "./csv";
 import {
   ASSET_TYPE_CONFIG,
@@ -358,7 +359,7 @@ export function HoldingsTable({
                                         </TableCell>
                                         <TableCell className="text-right">
                                           <Link
-                                            href={`/transactions?portfolioHolding=${encodeURIComponent(h.name)}${h.accountId ? `&accountId=${h.accountId}` : ""}`}
+                                            href={buildTxDrillUrl({ portfolioHolding: h.name, accountId: h.accountId ? String(h.accountId) : undefined })}
                                             onClick={(e) => e.stopPropagation()}
                                             className="text-[11px] text-primary hover:underline whitespace-nowrap"
                                             title="View transactions for this holding in this account"
@@ -384,7 +385,7 @@ export function HoldingsTable({
                                 Per-account Edit lives on the account-name
                                 cell in the breakdown table above. */}
                             <Link
-                              href={`/transactions?portfolioHolding=${encodeURIComponent(r.name)}`}
+                              href={buildTxDrillUrl({ portfolioHolding: r.name })}
                               onClick={(e) => e.stopPropagation()}
                               className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline font-medium"
                             >

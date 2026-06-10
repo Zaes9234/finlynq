@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +12,7 @@ import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
+import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
 import {
@@ -252,6 +254,14 @@ export default function BudgetsPage() {
   }
 
   const spendingMap = new Map(spending.map((s) => [s.categoryId, Math.abs(s.total)]));
+
+  // FINLYNQ-130 — drill-through: the budget [startDate, endDate] for the
+  // currently-selected month (mirrors the /api/dashboard fetch range above).
+  // Each category "spent" amount links into /transactions scoped to that
+  // category + month.
+  const budgetMonthStart = `${month}-01`;
+  const [budgetMonthY, budgetMonthM] = month.split("-").map(Number);
+  const budgetMonthEnd = `${month}-${String(new Date(budgetMonthY, budgetMonthM, 0).getDate()).padStart(2, "0")}`;
 
   const totalBudget = budgets.reduce((s, b) => s + b.amount, 0);
   const totalSpent = budgets.reduce((s, b) => s + (spendingMap.get(b.categoryId) ?? 0), 0);
@@ -694,13 +704,21 @@ export default function BudgetsPage() {
                       </div>
                       <div className="flex items-center gap-2">
                         {mode === "envelope" ? (
-                          <span className={`text-sm font-mono tabular-nums ${envelopeAvailable < 0 ? "text-rose-600" : ""}`}>
+                          <Link
+                            href={buildTxDrillUrl({ categoryId: String(b.categoryId), startDate: budgetMonthStart, endDate: budgetMonthEnd })}
+                            className={`text-sm font-mono tabular-nums hover:underline ${envelopeAvailable < 0 ? "text-rose-600" : ""}`}
+                            title={`View ${b.categoryName} transactions for ${getMonthLabel(month)}`}
+                          >
                             {formatCurrency(envelopeAvailable, displayCurrency)} left
-                          </span>
+                          </Link>
                         ) : (
-                          <span className={`text-sm font-mono tabular-nums ${over ? "text-rose-600" : ""}`}>
+                          <Link
+                            href={buildTxDrillUrl({ categoryId: String(b.categoryId), startDate: budgetMonthStart, endDate: budgetMonthEnd })}
+                            className={`text-sm font-mono tabular-nums hover:underline ${over ? "text-rose-600" : ""}`}
+                            title={`View ${b.categoryName} transactions for ${getMonthLabel(month)}`}
+                          >
                             {formatCurrency(spent, displayCurrency)} / {formatCurrency(effectiveBudget, displayCurrency)}
-                          </span>
+                          </Link>
                         )}
                         <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground" onClick={() => handleDelete(b.id)}>
                           <Trash2 className="h-3 w-3" />

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useCallback } from "react";
+import Link from "next/link";
 import { useDevMode } from "@/hooks/use-dev-mode";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -13,6 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { formatCurrency } from "@/lib/currency";
+import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { CHART_COLORS } from "@/lib/chart-colors";
 import { SankeyChart } from "@/components/sankey-chart";
 import {
@@ -61,6 +63,10 @@ type TimeseriesPoint = {
 type BreakdownItem = {
   name: string;
   group: string;
+  // FINLYNQ-130 — present only in category-mode (groupBy="category"); null in
+  // group-mode where one label aggregates several categories. Drives the
+  // drill-through link into /transactions.
+  categoryId?: number | null;
   total: number;
   count: number;
   periods: Record<string, number>;
@@ -674,9 +680,11 @@ export default function ReportsPage() {
                       colorClass="text-emerald-600 dark:text-emerald-400"
                       total={trendsData.totalIncome}
                       currency={displayCurrency}
+                      startDate={startDate}
+                      endDate={endDate}
                     />
                   ) : (
-                    <FlatTable items={trendsData.income} colorClass="text-emerald-600 dark:text-emerald-400" currency={displayCurrency} />
+                    <FlatTable items={trendsData.income} colorClass="text-emerald-600 dark:text-emerald-400" currency={displayCurrency} startDate={startDate} endDate={endDate} />
                   )}
                   <div className="flex justify-between items-center p-3 mt-3 rounded-xl bg-muted/50">
                     <span className="font-semibold text-sm">Total Income</span>
@@ -725,9 +733,11 @@ export default function ReportsPage() {
                       colorClass="text-rose-600 dark:text-rose-400"
                       total={trendsData.totalExpenses}
                       currency={displayCurrency}
+                      startDate={startDate}
+                      endDate={endDate}
                     />
                   ) : (
-                    <FlatTable items={trendsData.expenses} colorClass="text-rose-600 dark:text-rose-400" currency={displayCurrency} />
+                    <FlatTable items={trendsData.expenses} colorClass="text-rose-600 dark:text-rose-400" currency={displayCurrency} startDate={startDate} endDate={endDate} />
                   )}
                   <div className="flex justify-between items-center p-3 mt-3 rounded-xl bg-muted/50">
                     <span className="font-semibold text-sm">Total Expenses</span>
@@ -1190,13 +1200,17 @@ function GroupedTable({
   colorClass,
   total,
   currency,
+  startDate,
+  endDate,
 }: {
-  groups: { name: string; items: { name: string; group: string; total: number; count: number }[]; total: number }[];
+  groups: { name: string; items: { name: string; group: string; categoryId?: number | null; total: number; count: number }[]; total: number }[];
   expanded: Set<string>;
   onToggle: (group: string) => void;
   colorClass: string;
   total: number;
   currency: string;
+  startDate: string;
+  endDate: string;
 }) {
   return (
     <Table>
@@ -1221,6 +1235,8 @@ function GroupedTable({
               colorClass={colorClass}
               total={total}
               currency={currency}
+              startDate={startDate}
+              endDate={endDate}
             />
           );
         })}
@@ -1236,13 +1252,17 @@ function GroupRow({
   colorClass,
   total,
   currency,
+  startDate,
+  endDate,
 }: {
-  group: { name: string; items: { name: string; total: number; count: number }[]; total: number };
+  group: { name: string; items: { name: string; categoryId?: number | null; total: number; count: number }[]; total: number };
   isOpen: boolean;
   onToggle: () => void;
   colorClass: string;
   total: number;
   currency: string;
+  startDate: string;
+  endDate: string;
 }) {
   const pct = total > 0 ? ((group.total / total) * 100).toFixed(1) : "0.0";
   return (
@@ -1275,7 +1295,19 @@ function GroupRow({
             return (
               <TableRow key={i} className="hover:bg-muted/20 bg-muted/10">
                 <TableCell></TableCell>
-                <TableCell className="text-sm pl-6 text-muted-foreground">{item.name}</TableCell>
+                <TableCell className="text-sm pl-6 text-muted-foreground">
+                  {item.categoryId != null ? (
+                    <Link
+                      href={buildTxDrillUrl({ categoryId: String(item.categoryId), startDate, endDate })}
+                      className="hover:underline hover:text-foreground"
+                      title={`View ${item.name} transactions for this period`}
+                    >
+                      {item.name}
+                    </Link>
+                  ) : (
+                    item.name
+                  )}
+                </TableCell>
                 <TableCell className="text-right text-xs text-muted-foreground">{item.count}</TableCell>
                 <TableCell className={`text-right font-mono text-sm ${colorClass}`}>
                   {formatCurrency(item.total, currency)}
@@ -1294,10 +1326,14 @@ function FlatTable({
   items,
   colorClass,
   currency,
+  startDate,
+  endDate,
 }: {
-  items: { name: string; group: string; total: number; count: number }[];
+  items: { name: string; group: string; categoryId?: number | null; total: number; count: number }[];
   colorClass: string;
   currency: string;
+  startDate: string;
+  endDate: string;
 }) {
   const total = items.reduce((s, i) => s + i.total, 0);
   return (
@@ -1315,7 +1351,19 @@ function FlatTable({
           const pct = total > 0 ? ((item.total / total) * 100).toFixed(1) : "0.0";
           return (
             <TableRow key={i} className="hover:bg-muted/30">
-              <TableCell className="text-sm">{item.name}</TableCell>
+              <TableCell className="text-sm">
+                {item.categoryId != null ? (
+                  <Link
+                    href={buildTxDrillUrl({ categoryId: String(item.categoryId), startDate, endDate })}
+                    className="hover:underline"
+                    title={`View ${item.name} transactions for this period`}
+                  >
+                    {item.name}
+                  </Link>
+                ) : (
+                  item.name
+                )}
+              </TableCell>
               <TableCell className="text-right text-xs text-muted-foreground">{item.count}</TableCell>
               <TableCell className={`text-right font-mono text-sm font-semibold ${colorClass}`}>
                 {formatCurrency(item.total, currency)}

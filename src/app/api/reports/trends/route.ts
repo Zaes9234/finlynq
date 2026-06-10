@@ -189,8 +189,12 @@ export async function GET(request: NextRequest) {
   // Build grouped breakdown (totals across all periods). Keyed on the
   // resolved display name + categoryType so income/expense rows with the
   // same label don't collide.
-  const incomeGroups = new Map<string, { group: string; total: number; count: number; periods: Record<string, number> }>();
-  const expenseGroups = new Map<string, { group: string; total: number; count: number; periods: Record<string, number> }>();
+  // FINLYNQ-130 — carry `categoryId` so the reports UI can drill into
+  // /transactions filtered by category. Only set in category-mode (group-mode
+  // aggregates many categories under one label, so there is no single id);
+  // left null there and the client omits the drill link.
+  const incomeGroups = new Map<string, { group: string; categoryId: number | null; total: number; count: number; periods: Record<string, number> }>();
+  const expenseGroups = new Map<string, { group: string; categoryId: number | null; total: number; count: number; periods: Record<string, number> }>();
 
   for (const row of breakdownRows) {
     // group-mode rows already have group as the display label (no encryption);
@@ -201,7 +205,7 @@ export async function GET(request: NextRequest) {
     const name = resolvedName && resolvedName !== "" ? resolvedName : "Uncategorized";
     const catGroup = row.categoryGroup ?? "";
     const target = row.categoryType === "I" ? incomeGroups : expenseGroups;
-    if (!target.has(name)) target.set(name, { group: catGroup, total: 0, count: 0, periods: {} });
+    if (!target.has(name)) target.set(name, { group: catGroup, categoryId: isCategoryMode ? (row.categoryId ?? null) : null, total: 0, count: 0, periods: {} });
     const entry = target.get(name)!;
     const converted = convertGroup(row);
     const amt = row.categoryType === "E" ? Math.abs(converted) : converted;
@@ -215,6 +219,7 @@ export async function GET(request: NextRequest) {
       .map(([name, data]) => ({
         name,
         group: data.group,
+        categoryId: data.categoryId,
         total: Math.round(data.total * 100) / 100,
         count: data.count,
         periods: Object.fromEntries(

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, Suspense } from "react";
+import { useState, useRef, useEffect, Suspense } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
@@ -76,17 +76,24 @@ function TransactionsPageInner() {
   const sortCategory = useDropdownOrder("category");
   const sortHolding = useDropdownOrder("holding");
   const [searchInput, setSearchInput] = useState("");
-  // Initialize from URL params so /portfolio can deep-link into a scoped view.
+  // Filter state is synced FROM the URL via the `useEffect` below (not a
+  // `useState(urlParams.get(...))` initialiser). `useState` only runs on
+  // mount, so client-side drill-through navigation while already on
+  // `/transactions` (e.g. clicking a dashboard/budget/portfolio drill link)
+  // would NOT remount the component and the new query params were silently
+  // ignored, leaving stale filters in place (FINLYNQ-130). The effect
+  // re-syncs `filters` + `searchInput` and resets the page on every
+  // `urlParams` change so a drill REPLACES (not merges) the prior filters.
   // `portfolioHolding` is a server-side post-decrypt filter (ciphertext-at-
   // rest on this column), `accountId` is a standard SQL filter.
   const [filters, setFilters] = useState({
-    startDate: urlParams.get("startDate") ?? "",
-    endDate: urlParams.get("endDate") ?? "",
-    accountId: urlParams.get("accountId") ?? "",
-    categoryId: urlParams.get("categoryId") ?? "",
-    search: urlParams.get("search") ?? "",
-    portfolioHolding: urlParams.get("portfolioHolding") ?? "",
-    tag: urlParams.get("tag") ?? "",
+    startDate: "",
+    endDate: "",
+    accountId: "",
+    categoryId: "",
+    search: "",
+    portfolioHolding: "",
+    tag: "",
   });
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -97,6 +104,24 @@ function TransactionsPageInner() {
   // Pagination index lives at the page level (as it did pre-refactor) so the
   // sort/filter hooks can reset it to 0 on change without a forward reference.
   const [page, setPage] = useState(0);
+
+  // FINLYNQ-130 — re-sync filters from the URL on every navigation (including
+  // client-side drill-through while already mounted on /transactions). Resets
+  // the page index and the controlled search input so a drill fully REPLACES
+  // any prior filter state rather than merging into it.
+  useEffect(() => {
+    setFilters({
+      startDate: urlParams.get("startDate") ?? "",
+      endDate: urlParams.get("endDate") ?? "",
+      accountId: urlParams.get("accountId") ?? "",
+      categoryId: urlParams.get("categoryId") ?? "",
+      search: urlParams.get("search") ?? "",
+      portfolioHolding: urlParams.get("portfolioHolding") ?? "",
+      tag: urlParams.get("tag") ?? "",
+    });
+    setSearchInput(urlParams.get("search") ?? "");
+    setPage(0);
+  }, [urlParams]);
 
   // Per-user table column layout (visibility + order), header sort, and
   // per-column filters — all extracted to hooks (FINLYNQ-111 Phase 2). Each
