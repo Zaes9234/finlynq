@@ -181,6 +181,9 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
   const [coverage, setCoverage] = useState<Coverage | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  // Left-list ordering: "default" = API order (by proposal id); "date" =
+  // earliest displaced-row date ascending (the natural ledger reading order).
+  const [sortMode, setSortMode] = useState<"default" | "date">("default");
   const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string>("");
   const [info, setInfo] = useState<string>("");
@@ -280,6 +283,19 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
   const approvedCount = proposals.filter((p) => p.status === "approved").length;
   const appliedCount = proposals.filter((p) => p.status === "applied").length;
 
+  // Sorted view of the proposal list for the left pane. Proposals carry no
+  // date of their own, so "date" mode keys on the EARLIEST displaced-row date
+  // among each proposal's existingRowIds (ISO strings sort lexicographically).
+  // Ties fall back to proposal id so the order is stable.
+  const sortedProposals = useMemo(() => {
+    if (sortMode === "default") return proposals;
+    return [...proposals].sort((a, b) => {
+      const da = earliestRowDate(a, displacedRows);
+      const db = earliestRowDate(b, displacedRows);
+      return da < db ? -1 : da > db ? 1 : a.id - b.id;
+    });
+  }, [proposals, displacedRows, sortMode]);
+
   return (
     <div className="max-w-7xl mx-auto p-6 space-y-4">
       <div className="flex items-center justify-between">
@@ -317,16 +333,38 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
       {!loading && proposals.length > 0 && (
         <div className="grid grid-cols-12 gap-4">
           {/* LEFT: proposal list */}
-          <div className="col-span-5 space-y-2 max-h-[70vh] overflow-y-auto pr-2">
-            {proposals.map((p) => (
-              <ProposalCard
-                key={p.id}
-                proposal={p}
-                selected={p.id === selectedId}
-                onSelect={() => setSelectedId(p.id)}
-                onToggleApprove={() => updateProposal(p.id, { status: p.status === "approved" ? "pending" : "approved" })}
-              />
-            ))}
+          <div className="col-span-5 space-y-2">
+            <div className="flex items-center justify-between gap-2 text-xs px-1">
+              <span className="text-muted-foreground">{sortedProposals.length} proposal(s)</span>
+              <div className="flex items-center gap-1">
+                <span className="text-muted-foreground">Sort:</span>
+                <button
+                  type="button"
+                  onClick={() => setSortMode("default")}
+                  className={`rounded px-2 py-0.5 border ${sortMode === "default" ? "border-primary bg-primary/5 text-foreground" : "border-border text-muted-foreground hover:border-primary/50"}`}
+                >
+                  Default
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSortMode("date")}
+                  className={`rounded px-2 py-0.5 border ${sortMode === "date" ? "border-primary bg-primary/5 text-foreground" : "border-border text-muted-foreground hover:border-primary/50"}`}
+                >
+                  Date
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2 max-h-[70vh] overflow-y-auto pr-2">
+              {sortedProposals.map((p) => (
+                <ProposalCard
+                  key={p.id}
+                  proposal={p}
+                  selected={p.id === selectedId}
+                  onSelect={() => setSelectedId(p.id)}
+                  onToggleApprove={() => updateProposal(p.id, { status: p.status === "approved" ? "pending" : "approved" })}
+                />
+              ))}
+            </div>
           </div>
 
           {/* RIGHT: detail */}
@@ -364,6 +402,20 @@ export default function BackfillReviewPage({ params }: { params: Promise<{ runId
       )}
     </div>
   );
+}
+
+/**
+ * Earliest displaced-row date for a proposal (ISO "YYYY-MM-DD"), used as the
+ * sort key for the "Date" left-list ordering. Proposals with no resolvable row
+ * date sort last. ISO strings compare lexicographically.
+ */
+function earliestRowDate(p: Proposal, rows: Record<number, DisplacedRow>): string {
+  let min: string | null = null;
+  for (const id of p.existingRowIds) {
+    const d = rows[id]?.date;
+    if (d && (min == null || d < min)) min = d;
+  }
+  return min ?? "9999-12-31";
 }
 
 function ProposalCard({
@@ -928,6 +980,20 @@ function HoldingPicker({
   );
 }
 
+/**
+ * Reconstruct the override-picker option id from a persisted proposal. id ===
+ * kind for every entry EXCEPT the general "Expense" entry, which shares
+ * kind='portfolio_expense' with the holding-attributed one and is identified by
+ * the absence of a related holding.
+ */
+function deriveInitialOverrideOptionId(p: Proposal): string | null {
+  if (p.chosenKind == null) return null;
+  if (p.chosenKind === "portfolio_expense" && p.chosenRelatedHoldingId == null) {
+    return "expense_general";
+  }
+  return p.chosenKind;
+}
+
 // ─── Kind override on refused orphan_stock_leg ────────────────────────
 //
 // Override picker for refused orphan_stock_leg proposals. Pair-less
@@ -962,7 +1028,16 @@ function KindOverridePicker({
   onReject: () => void;
 }) {
   const [open, setOpen] = useState<boolean>(proposal.chosenKind != null);
-  const [chosenKind, setChosenKind] = useState<OverrideKind | null>(proposal.chosenKind);
+  // Select by option id (not kind) so the general "Expense" entry can share
+  // kind='portfolio_expense' with the holding-attributed one. On reload we
+  // reconstruct the id from (chosenKind, chosenRelatedHoldingId): a
+  // portfolio_expense with no related holding is the general variant.
+  const [selectedId, setSelectedId] = useState<string | null>(
+    deriveInitialOverrideOptionId(proposal),
+  );
+  const selectedOption = OVERRIDE_KIND_OPTIONS.find((o) => o.id === selectedId) ?? null;
+  const chosenKind: OverrideKind | null = selectedOption?.kind ?? null;
+  const keepHoldingPairless = selectedOption?.keepHoldingPairless ?? false;
   const [chosenRelatedHoldingId, setChosenRelatedHoldingId] = useState<number | null>(
     proposal.chosenRelatedHoldingId,
   );
@@ -988,7 +1063,11 @@ function KindOverridePicker({
       .filter(([, h]) => !h.isCash);
   }, [holdingMap, orphanRow?.accountId]);
 
-  const needsRelatedHolding = chosenKind === "portfolio_income" || chosenKind === "portfolio_expense";
+  // The general "Expense" entry (keepHoldingPairless) needs NO related holding —
+  // it stays on the current holding like Interest. Only the holding-attributed
+  // income/expense entries require the pick.
+  const needsRelatedHolding =
+    (chosenKind === "portfolio_income" || chosenKind === "portfolio_expense") && !keepHoldingPairless;
   // Pair-less income kinds let the user pick a category so the row reports
   // correctly. dividend/interest auto-create the canonical category when left
   // blank; portfolio_income/expense leave the category untouched when blank.
@@ -1005,8 +1084,17 @@ function KindOverridePicker({
         .filter(([, c]) => c.type === categoryTypeFilter),
     [categoryMap, categoryTypeFilter],
   );
+  // Category auto-created server-side when the picker is left blank.
+  // dividend → "Dividends", interest → "Interest", general expense →
+  // "Investment Fees" (the "fee" kind in resolveOrCreateInvestmentIncomeCategory).
   const autoCategoryName =
-    chosenKind === "dividend" ? "Dividends" : chosenKind === "interest" ? "Interest" : null;
+    chosenKind === "dividend"
+      ? "Dividends"
+      : chosenKind === "interest"
+        ? "Interest"
+        : chosenKind === "portfolio_expense" && keepHoldingPairless
+          ? "Investment Fees"
+          : null;
   const isPaired = chosenKind != null && OVERRIDE_PAIRED_ENABLED_KINDS.has(chosenKind);
   const supportsSynth = chosenKind != null && OVERRIDE_SYNTH_KINDS.has(chosenKind);
   const canApprove =
@@ -1048,11 +1136,12 @@ function KindOverridePicker({
     return computePairlessWillBecome({
       orphanRow,
       chosenKind,
+      keepHoldingPairless,
       chosenRelatedHoldingId,
       chosenCategoryId,
       holdingMap,
     });
-  }, [orphanRow, chosenKind, chosenRelatedHoldingId, chosenCategoryId, holdingMap]);
+  }, [orphanRow, chosenKind, keepHoldingPairless, chosenRelatedHoldingId, chosenCategoryId, holdingMap]);
 
   // Paired preview: the orphan stock leg + the cash leg (synthesized, or the
   // picked existing row re-tagged in link_existing mode).
@@ -1101,24 +1190,27 @@ function KindOverridePicker({
       <div className="grid grid-cols-1 gap-1.5">
         {OVERRIDE_KIND_OPTIONS.map((opt) => {
           const enabled = isOverrideKindEnabled(opt.kind);
-          const isSelected = chosenKind === opt.kind;
+          const isSelected = selectedId === opt.id;
           return (
             <button
-              key={opt.kind}
+              key={opt.id}
               type="button"
               disabled={!enabled}
               onClick={() => {
                 if (!enabled) return;
-                setChosenKind(opt.kind);
+                setSelectedId(opt.id);
                 setCounterpartTxId(null);
                 // Default the cash-leg mode: synth for Buy/Sell, link for the
                 // cross-account kinds (which can't synthesize).
                 if (OVERRIDE_PAIRED_ENABLED_KINDS.has(opt.kind)) {
                   setChosenCounterpartMode(OVERRIDE_SYNTH_KINDS.has(opt.kind) ? "synth_new" : "link_existing");
                 }
-                if (opt.kind !== "portfolio_income" && opt.kind !== "portfolio_expense") {
-                  setChosenRelatedHoldingId(null);
-                }
+                // Clear the related-holding pick unless this entry attributes
+                // income/expense to a holding (the general Expense entry doesn't).
+                const attributes =
+                  (opt.kind === "portfolio_income" || opt.kind === "portfolio_expense") &&
+                  !opt.keepHoldingPairless;
+                if (!attributes) setChosenRelatedHoldingId(null);
               }}
               title={
                 enabled
@@ -1353,12 +1445,16 @@ function KindOverridePicker({
 function computePairlessWillBecome({
   orphanRow,
   chosenKind,
+  keepHoldingPairless,
   chosenRelatedHoldingId,
   chosenCategoryId,
   holdingMap,
 }: {
   orphanRow: DisplacedRow;
   chosenKind: OverrideKind;
+  /** General "Expense" variant — keep the row on its current holding, no
+   *  cash-sleeve move and no related-holding attribution (mirrors Interest). */
+  keepHoldingPairless: boolean;
   chosenRelatedHoldingId: number | null;
   chosenCategoryId: number | null;
   holdingMap: Record<number, HoldingMeta>;
@@ -1372,13 +1468,19 @@ function computePairlessWillBecome({
     willBecome.kind = chosenKind;
     changedKeys.add("kind");
   }
-  // An explicit category pick is reflected here; dividend/interest auto-resolve
-  // server-side (id unknown to the client), so that case is shown via a caption.
+  // An explicit category pick is reflected here; dividend/interest/general-expense
+  // auto-resolve server-side (id unknown to the client), so that case is shown
+  // via a caption.
   if (chosenCategoryId != null && orphanRow.categoryId !== chosenCategoryId) {
     willBecome.categoryId = chosenCategoryId;
     changedKeys.add("category");
   }
-  if (chosenKind === "portfolio_income" || chosenKind === "portfolio_expense") {
+  // The general "Expense" variant keeps the holding — only the holding-attributed
+  // income/expense entries move the row to the cash sleeve + stamp related_holding.
+  if (
+    !keepHoldingPairless &&
+    (chosenKind === "portfolio_income" || chosenKind === "portfolio_expense")
+  ) {
     // Find matching cash sleeve in the same (account, currency).
     const sleeveEntry = Object.entries(holdingMap).find(
       ([, h]) => h.isCash && h.currency === orphanRow.currency,
@@ -1659,72 +1761,99 @@ function WillBecomeTable({
 }
 
 interface OverrideKindOption {
+  // Unique UI id. Equals `kind` for every entry EXCEPT the general "Expense"
+  // entry, which shares kind='portfolio_expense' with the holding-attributed
+  // one and is disambiguated by this id (+ `keepHoldingPairless`).
+  id: string;
   kind: OverrideKind;
   label: string;
   explanation: string;
+  // Pair-less variant that keeps the row on its current holding/cash sleeve —
+  // no cash-sleeve move, no related-holding pick. Mirrors the Interest
+  // override. Only the general "Expense" entry sets this today.
+  keepHoldingPairless?: boolean;
 }
 
 const OVERRIDE_KIND_OPTIONS: readonly OverrideKindOption[] = [
   // Pair-less first (these are enabled now)
   {
+    id: "opening_balance",
     kind: "opening_balance",
     label: "Opening balance",
     explanation:
       "Carried-in position from another platform. Preserves qty + amount, opens a lot at the entered cost basis. No cash leg.",
   },
   {
+    id: "dividend",
     kind: "dividend",
     label: "Dividend (share reinvestment / DRIP)",
     explanation:
       "Treats qty as a share count. Opens a lot at costPerShare = amount/qty. Pick this for crypto staking rewards or true DRIP rows.",
   },
   {
+    id: "interest",
     kind: "interest",
     label: "Interest",
     explanation: "Interest received (or paid, if amount < 0). Pair-less — applies to this row alone.",
   },
   {
+    id: "expense_general",
+    kind: "portfolio_expense",
+    keepHoldingPairless: true,
+    label: "Expense (general fee)",
+    explanation:
+      "A fee or cost NOT tied to a specific holding. Pair-less — stays on this row's current holding / cash sleeve, no related-holding pick. Categorized as Investment Fees (created if needed) unless you choose another expense category. Mirrors the Interest override.",
+  },
+  {
+    id: "portfolio_income",
     kind: "portfolio_income",
     label: "Portfolio income (cash dividend, etc.)",
     explanation:
       "Moves the row to the matching cash sleeve, stamps related_holding_id to the picked stock for reporting. Pick this for ordinary stock cash dividends.",
   },
   {
+    id: "portfolio_expense",
     kind: "portfolio_expense",
-    label: "Portfolio expense (fee, etc.)",
+    label: "Portfolio expense (fee tied to a holding)",
     explanation:
-      "Moves the row to the matching cash sleeve, stamps related_holding_id to the picked stock. Amount should be negative.",
+      "Moves the row to the matching cash sleeve, stamps related_holding_id to the picked stock. Amount should be negative. Use 'Expense (general fee)' above if the cost isn't tied to a holding.",
   },
   // Paired — Buy/Sell wired (Phase 1, synth_new); the rest disabled until
   // their converters + counterpart picker ship.
   {
+    id: "buy",
     kind: "buy",
     label: "Buy",
     explanation:
       "This row is the stock leg of a purchase. Synthesizes the matching cash debit on the account's cash sleeve and opens a lot at cost = |amount| / qty.",
   },
   {
+    id: "sell",
     kind: "sell",
     label: "Sell",
     explanation:
       "This row is the stock leg of a sale. Synthesizes the matching cash credit on the account's cash sleeve and FIFO-closes lots for the realized gain.",
   },
   {
+    id: "in_kind_transfer_out",
     kind: "in_kind_transfer_out",
     label: "In-kind transfer (this is the source leg)",
     explanation: "Moves this holding out to another account. Link the matching row in the destination account (same holding).",
   },
   {
+    id: "in_kind_transfer_in",
     kind: "in_kind_transfer_in",
     label: "In-kind transfer (this is the destination leg)",
     explanation: "Receives this holding from another account. Link the matching row in the source account (same holding).",
   },
   {
+    id: "fx_from",
     kind: "fx_from",
     label: "FX from-leg",
     explanation: "The currency you sold. Link the matching to-leg: a cash row in a different currency, same account.",
   },
   {
+    id: "fx_to",
     kind: "fx_to",
     label: "FX to-leg",
     explanation: "The currency you bought. Link the matching from-leg: a cash row in a different currency, same account.",
@@ -1735,11 +1864,13 @@ const OVERRIDE_KIND_OPTIONS: readonly OverrideKindOption[] = [
   // brokerage_withdrawal_in) are intentionally omitted from the picker; they
   // remain valid kinds for real brokerage ops, just not selectable here.
   {
+    id: "brokerage_deposit_in",
     kind: "brokerage_deposit_in",
     label: "Brokerage deposit",
     explanation: "Cash arriving on the brokerage cash sleeve. Link the matching debit on the funding (non-investment) account.",
   },
   {
+    id: "brokerage_withdrawal_out",
     kind: "brokerage_withdrawal_out",
     label: "Brokerage withdrawal",
     explanation: "Cash leaving the brokerage cash sleeve. Link the matching credit on the receiving (non-investment) account.",

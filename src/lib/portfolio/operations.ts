@@ -1630,9 +1630,65 @@ export interface ConvertFxPairInput {
 }
 
 /**
+ * Resolve the cash sleeve an FX leg should sit on, and its NATIVE currency.
+ *
+ * A cash leg already sits on its sleeve, so the row's own `portfolio_holding_id`
+ * (when it points at a cash sleeve in this account) is the source of truth for
+ * the leg's currency — NOT `transactions.currency`. On a multi-currency
+ * investment account, a manually-entered leg is frequently stored with
+ * `currency` = the account/base currency (e.g. a USD-sleeve row stored as
+ * `currency='CAD'`, with the real USD in `entered_*`/`quantity`). Keying off the
+ * sleeve makes FX matching/conversion robust to that shape. Falls back to a
+ * currency-keyed lookup for legs that carry no holding.
+ */
+async function resolveFxLegSleeve(
+  userId: string,
+  accountId: number,
+  leg: { portfolioHoldingId: number | null; currency: string },
+): Promise<HoldingRow | null> {
+  if (leg.portfolioHoldingId != null) {
+    const row = await db
+      .select({
+        id: schema.portfolioHoldings.id,
+        currency: schema.portfolioHoldings.currency,
+        isCash: schema.portfolioHoldings.isCash,
+      })
+      .from(schema.portfolioHoldings)
+      .where(
+        and(
+          eq(schema.portfolioHoldings.userId, userId),
+          eq(schema.portfolioHoldings.id, leg.portfolioHoldingId),
+          eq(schema.portfolioHoldings.accountId, accountId),
+        ),
+      )
+      .limit(1);
+    const r = row[0];
+    if (r && r.isCash) return { id: r.id, currency: r.currency, isCash: true };
+  }
+  return findCashSleeve(userId, accountId, leg.currency);
+}
+
+/**
+ * Native (sleeve-currency) magnitude of a cash FX leg. For a cash sleeve the
+ * unit count IS the currency amount (1 unit = 1 currency unit), so `quantity`
+ * holds the native value even when `transactions.amount` is the converted
+ * base-currency figure (the USD-sleeve-stored-as-CAD case). Falls back to
+ * |amount| when quantity is absent/zero (canonical rows have amount == quantity).
+ */
+function fxLegNativeMagnitude(leg: { amount: number; quantity: number | null }): number {
+  if (leg.quantity != null && leg.quantity !== 0) return Math.abs(leg.quantity);
+  return Math.abs(leg.amount);
+}
+
+/**
  * Convert a cash orphan into an FX conversion pair. Both legs sit on cash
  * sleeves in the SAME account but DIFFERENT currencies; amounts differ by the
  * FX rate (no sum-to-zero). Paired via link_id; lots via the FX hook.
+ *
+ * Currency + amount are taken from each leg's SLEEVE + native unit count, not
+ * from `transactions.currency`/`amount` — see resolveFxLegSleeve. The orphan's
+ * currency/amount are normalized onto the sleeve so the resulting pair is fully
+ * canonical even when the source row was denominated in the account currency.
  */
 export async function convertExistingToFxPair(
   input: ConvertFxPairInput,
@@ -1645,25 +1701,43 @@ export async function convertExistingToFxPair(
   if (counterpart.accountId !== orphan.accountId) {
     throw new BackfillConvertError("counterpart_account_mismatch", `Both FX legs must be in the same account.`);
   }
-  if (counterpart.currency === orphan.currency) {
-    throw new BackfillConvertError("counterpart_currency_mismatch", `FX legs must be in DIFFERENT currencies (got ${orphan.currency} for both).`);
-  }
 
-  // Resolve each leg's cash sleeve (by account + its own currency).
-  const orphanSleeve = await findCashSleeve(userId, orphan.accountId, orphan.currency);
+  // Resolve each leg's cash sleeve from its OWN holding — the sleeve's currency
+  // is authoritative, NOT transactions.currency (which is often the account/base
+  // currency on a multi-currency investment account).
+  const orphanSleeve = await resolveFxLegSleeve(userId, orphan.accountId, orphan);
   if (!orphanSleeve) {
-    throw new BackfillConvertError("cash_sleeve_missing", `No ${orphan.currency} cash sleeve on account ${orphan.accountId}.`);
+    throw new BackfillConvertError(
+      "cash_sleeve_missing",
+      `No cash sleeve resolved for FX orphan row ${orphan.id} (holding ${orphan.portfolioHoldingId ?? "none"}, ${orphan.currency}).`,
+    );
   }
-  const cpSleeve = await findCashSleeve(userId, orphan.accountId, counterpart.currency);
+  const cpSleeve = await resolveFxLegSleeve(userId, orphan.accountId, counterpart);
   if (!cpSleeve) {
-    throw new BackfillConvertError("cash_sleeve_missing", `No ${counterpart.currency} cash sleeve on account ${orphan.accountId}.`);
+    throw new BackfillConvertError(
+      "cash_sleeve_missing",
+      `No cash sleeve resolved for FX counterpart row ${counterpart.id} (holding ${counterpart.portfolioHoldingId ?? "none"}, ${counterpart.currency}).`,
+    );
+  }
+  // FX requires the two legs in DIFFERENT currencies — compared on the SLEEVE
+  // currency, so two legs both stored as the base currency still match when their
+  // sleeves differ.
+  if (orphanSleeve.currency === cpSleeve.currency) {
+    throw new BackfillConvertError(
+      "counterpart_currency_mismatch",
+      `FX legs must sit on cash sleeves of DIFFERENT currencies (both resolve to ${orphanSleeve.currency}).`,
+    );
   }
 
   const linkId = randomUUID();
   const orphanIsFrom = orphanLeg === "fx_from";
-  const orphanAmount = (orphanIsFrom ? -1 : 1) * Math.abs(orphan.amount);
+  // Each leg is denominated in its sleeve's native currency, taken from the
+  // native unit count (quantity) so a base-currency-stored amount doesn't leak in.
+  const orphanMag = fxLegNativeMagnitude(orphan);
+  const cpMag = fxLegNativeMagnitude(counterpart);
+  const orphanAmount = (orphanIsFrom ? -1 : 1) * orphanMag;
   const cpKind = orphanIsFrom ? "fx_to" : "fx_from";
-  const cpAmount = (orphanIsFrom ? 1 : -1) * Math.abs(counterpart.amount);
+  const cpAmount = (orphanIsFrom ? 1 : -1) * cpMag;
 
   await tx
     .update(schema.transactions)
@@ -1671,6 +1745,7 @@ export async function convertExistingToFxPair(
       kind: orphanLeg,
       amount: orphanAmount,
       quantity: orphanAmount,
+      currency: orphanSleeve.currency,
       portfolioHoldingId: orphanSleeve.id,
       linkId,
       updatedAt: sql`NOW()`,
@@ -1683,6 +1758,7 @@ export async function convertExistingToFxPair(
       kind: cpKind,
       amount: cpAmount,
       quantity: cpAmount,
+      currency: cpSleeve.currency,
       portfolioHoldingId: cpSleeve.id,
       linkId,
       updatedAt: sql`NOW()`,

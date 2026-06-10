@@ -67,7 +67,8 @@ export async function GET(
       return NextResponse.json({ candidates: [], orphan: null });
     }
 
-    // Read the orphan row.
+    // Read the orphan row (left-join its holding so we know the SLEEVE currency,
+    // which is authoritative for FX matching — see below).
     const orphanRows = await db
       .select({
         id: schema.transactions.id,
@@ -76,14 +77,27 @@ export async function GET(
         currency: schema.transactions.currency,
         amount: schema.transactions.amount,
         portfolioHoldingId: schema.transactions.portfolioHoldingId,
+        holdingCurrency: schema.portfolioHoldings.currency,
+        holdingIsCash: schema.portfolioHoldings.isCash,
       })
       .from(schema.transactions)
+      .leftJoin(
+        schema.portfolioHoldings,
+        eq(schema.portfolioHoldings.id, schema.transactions.portfolioHoldingId),
+      )
       .where(and(eq(schema.transactions.id, orphanId), eq(schema.transactions.userId, auth.userId)))
       .limit(1);
     const orphan = orphanRows[0];
     if (!orphan || orphan.accountId == null) {
       return NextResponse.json({ candidates: [], orphan: null });
     }
+    // For FX, the leg's currency is its CASH SLEEVE currency — NOT
+    // transactions.currency, which on a multi-currency investment account is
+    // often the account/base currency (a USD-sleeve row manually stored as
+    // currency='CAD' is exactly what used to make two real FX legs look
+    // same-currency and drop out of each other's candidate list).
+    const orphanSleeveCurrency =
+      orphan.holdingIsCash && orphan.holdingCurrency ? orphan.holdingCurrency : orphan.currency;
     const orphanMeta = {
       id: orphan.id,
       date: orphan.date,
@@ -139,6 +153,7 @@ export async function GET(
         kind: schema.transactions.kind,
         portfolioHoldingId: schema.transactions.portfolioHoldingId,
         isCash: schema.portfolioHoldings.isCash,
+        holdingCurrency: schema.portfolioHoldings.currency,
         holdingNameCt: schema.portfolioHoldings.nameCt,
       })
       .from(schema.transactions)
@@ -160,7 +175,16 @@ export async function GET(
       .filter((r) => {
         if (family === "buysell") return Boolean(r.isCash) || r.portfolioHoldingId == null;
         if (family === "brokerage") return r.portfolioHoldingId == null; // external = non-investment row
-        if (family === "fx") return (Boolean(r.isCash) || r.portfolioHoldingId == null) && r.currency !== orphanMeta.currency;
+        if (family === "fx") {
+          // Compare SLEEVE currency, not transactions.currency, so two legs both
+          // stored in the account/base currency still pair when their sleeves differ.
+          const candSleeveCurrency =
+            r.isCash && r.holdingCurrency ? r.holdingCurrency : r.currency;
+          return (
+            (Boolean(r.isCash) || r.portfolioHoldingId == null) &&
+            candSleeveCurrency !== orphanSleeveCurrency
+          );
+        }
         // transfer: same holding moved to another account
         return r.portfolioHoldingId === orphan.portfolioHoldingId;
       })

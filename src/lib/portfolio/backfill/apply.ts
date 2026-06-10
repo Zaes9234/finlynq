@@ -556,17 +556,20 @@ async function applyOrphanOverride(
     return applyPairedOverride(proposal, chosenKind, userId, dek);
   }
 
-  // Refuse for portfolio_income/_expense without a chosen related holding
-  // — mirror of the cash_dividend branch of dividend_reinvestment. Without
-  // a related holding we'd lose the reporting attribution.
-  if (
-    (chosenKind === "portfolio_income" || chosenKind === "portfolio_expense") &&
-    proposal.chosenRelatedHoldingId == null
-  ) {
+  // Refuse for portfolio_income without a chosen related holding — mirror of the
+  // cash_dividend branch of dividend_reinvestment. Without a related holding we'd
+  // lose the reporting attribution.
+  //
+  // portfolio_expense is INTENTIONALLY exempt: a null related holding is the
+  // general "Expense (general fee)" picker entry, which stays on the row's
+  // current holding (no cash-sleeve move, no attribution) and mirrors the
+  // Interest override. A non-null related holding still routes through the
+  // holding-attributed cash-sleeve branch below.
+  if (chosenKind === "portfolio_income" && proposal.chosenRelatedHoldingId == null) {
     return {
       ok: false,
       code: "related_holding_missing",
-      message: `${chosenKind} override requires chosen_related_holding_id (the stock the income/expense relates to).`,
+      message: `${chosenKind} override requires chosen_related_holding_id (the stock the income relates to).`,
     };
   }
 
@@ -621,8 +624,16 @@ async function applyOrphanOverride(
   // transaction). The user-picked category wins; for dividend/interest with no
   // pick we resolve-or-create the canonical "Dividends"/"Interest" category so
   // the row lands in the Dividend Income / income reports. opening_balance is a
-  // carry-in position (no category); portfolio_income/expense stamp only when
-  // the user picked one (they already carry related-holding attribution).
+  // carry-in position (no category); the holding-attributed portfolio_income/
+  // expense stamp only when the user picked one (they already carry
+  // related-holding attribution).
+  //
+  // The general "Expense (general fee)" entry — portfolio_expense with NO
+  // related holding — mirrors interest: when the user leaves the category blank
+  // we resolve-or-create the canonical "Investment Fees" category (the "fee"
+  // kind) so the row lands in expense reports.
+  const isGeneralExpense =
+    chosenKind === "portfolio_expense" && proposal.chosenRelatedHoldingId == null;
   let overrideCategoryId: number | null = proposal.chosenCategoryId ?? null;
   if (
     overrideCategoryId == null &&
@@ -633,6 +644,13 @@ async function applyOrphanOverride(
       userId,
       dek,
       chosenKind,
+    );
+  } else if (overrideCategoryId == null && isGeneralExpense) {
+    overrideCategoryId = await resolveOrCreateInvestmentIncomeCategory(
+      db,
+      userId,
+      dek,
+      "fee",
     );
   }
 
@@ -673,12 +691,15 @@ async function applyOrphanOverride(
         patch.categoryId = overrideCategoryId;
       }
 
-      // portfolio_income / portfolio_expense — swap onto the matching
-      // cash sleeve and stamp the related holding. Mirror of the
-      // cash_dividend branch of dividend_reinvestment.
+      // Holding-attributed portfolio_income / portfolio_expense (a related
+      // holding was picked) — swap onto the matching cash sleeve and stamp the
+      // related holding. Mirror of the cash_dividend branch of
+      // dividend_reinvestment. The general "Expense (general fee)" entry
+      // (portfolio_expense with NO related holding) skips this block and keeps
+      // its holding, exactly like interest.
       if (
-        chosenKind === "portfolio_income" ||
-        chosenKind === "portfolio_expense"
+        (chosenKind === "portfolio_income" || chosenKind === "portfolio_expense") &&
+        proposal.chosenRelatedHoldingId != null
       ) {
         if (row.accountId == null) {
           throw new Error(
@@ -706,10 +727,10 @@ async function applyOrphanOverride(
         patch.portfolioHoldingId = sleeveId;
         patch.relatedHoldingId = proposal.chosenRelatedHoldingId;
       }
-      // dividend / interest / opening_balance keep the row's existing
-      // portfolio_holding_id (the orphan stock holding) — that's the
-      // whole point of these overrides for DRIP / carry-in / direct
-      // interest cases.
+      // dividend / interest / opening_balance / general expense keep the row's
+      // existing portfolio_holding_id (the orphan stock holding or its cash
+      // sleeve) — that's the whole point of these overrides for DRIP / carry-in
+      // / direct interest / untied-fee cases.
 
       await tx
         .update(schema.transactions)
