@@ -297,11 +297,16 @@ export const loans = pgTable("loans", {
   currency: text("currency").notNull().default("CAD"),
   principal: doublePrecision("principal").notNull(),
   annualRate: doublePrecision("annual_rate").notNull(),
-  termMonths: integer("term_months").notNull(),
+  // FINLYNQ-136 (Loans v2): nullable — payment-driven loans solve for the
+  // term from paymentAmount; at least one of the two must be set.
+  termMonths: integer("term_months"),
   startDate: text("start_date").notNull(),
   paymentAmount: doublePrecision("payment_amount"),
   paymentFrequency: text("payment_frequency").notNull().default("monthly"),
   extraPayment: doublePrecision("extra_payment").default(0),
+  // FINLYNQ-136 (Loans v2): lease residual/buyout — schedule amortizes down
+  // to this instead of 0; balance at term end equals the residual.
+  residualValue: doublePrecision("residual_value"),
   note: text("note").default(""),
   // Stream D (2026-04-24) — dual-write.
   nameCt: text("name_ct"),

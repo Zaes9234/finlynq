@@ -20,8 +20,10 @@ import { encryptRuleFields, decryptRuleFields } from "../src/lib/rules/crypto";
 import { resolveDividendsCategoryId } from "../src/lib/dividends-category";
 import { resolveOrCreateInvestmentIncomeCategory } from "../src/lib/investment-income-category";
 import {
-  generateAmortizationSchedule,
+  buildLoanSchedule,
   calculateDebtPayoff,
+  LoanValidationError,
+  PAYMENT_FREQUENCIES,
   type Debt,
 } from "../src/lib/loan-calculator";
 import {
@@ -1820,7 +1822,7 @@ export function registerPgTools(
   server.tool("get_loans", "[DEPRECATED — use list_loans] Get all loans with amortization summary. Returned in the unified `{ success: true, data: [...] }` envelope as of v3.1.0.", {}, async () => {
     const raw = await q(db, sql`
       SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
-             payment_frequency, extra_payment
+             payment_amount, payment_frequency, extra_payment, residual_value
       FROM loans
       WHERE user_id = ${userId}
     `);
@@ -7285,7 +7287,7 @@ export function registerPgTools(
       const rawRows = await q(db, sql`
         SELECT l.id, l.name_ct, l.type, l.principal, l.annual_rate, l.term_months,
                l.start_date, l.payment_amount, l.payment_frequency, l.extra_payment,
-               l.note, l.account_id, a.name_ct AS account_name_ct
+               l.residual_value, l.note, l.account_id, a.name_ct AS account_name_ct
         FROM loans l
         LEFT JOIN accounts a ON a.id = l.account_id
         WHERE l.user_id = ${userId}
@@ -7298,44 +7300,107 @@ export function registerPgTools(
         // Free-text note is user-DEK encrypted at rest (2026-06-01).
         note: decNote(r.note as string | null),
       }));
+      // FINLYNQ-136: account-linked balances — outstanding = |SUM(amount)| of
+      // the linked account's ledger when it has activity (liability accounts
+      // carry negative balances).
+      const linkedIds = [...new Set(rows.map((r) => r.account_id).filter((x) => x != null).map(Number))];
+      const acctBalances = new Map<number, { balance: number; txCount: number }>();
+      if (linkedIds.length) {
+        const balRows = await q(db, sql`
+          SELECT account_id, COALESCE(SUM(amount), 0) AS balance, COUNT(*) AS tx_count
+          FROM transactions
+          WHERE user_id = ${userId} AND account_id IN (${sql.join(linkedIds.map((id) => sql`${id}`), sql`, `)})
+          GROUP BY account_id
+        `);
+        for (const b of balRows) {
+          acctBalances.set(Number(b.account_id), { balance: Number(b.balance), txCount: Number(b.tx_count) });
+        }
+      }
       const today = new Date().toISOString().split("T")[0];
       const enriched = rows.map((r) => {
+        const integrityRow = (error: string, value: unknown) => ({
+          ...r,
+          monthlyPayment: null,
+          totalInterest: null,
+          payoffDate: null,
+          remainingBalance: null,
+          principalPaid: null,
+          interestPaid: null,
+          periodsRemaining: null,
+          balanceSource: null,
+          dataIntegrity: { error, value },
+        });
         // Issue #213 — guard against pre-validator legacy bad rows. One bad
         // start_date previously poisoned the whole list with
         // `RangeError: Invalid time value`. Surface it per row instead.
         if (parseYmdSafe(String(r.start_date)) === null) {
-          return {
-            ...r,
-            monthlyPayment: null,
-            totalInterest: null,
-            payoffDate: null,
-            remainingBalance: null,
-            principalPaid: null,
-            interestPaid: null,
-            periodsRemaining: null,
-            dataIntegrity: { error: "invalid start_date", value: r.start_date },
-          };
+          return integrityRow("invalid start_date", r.start_date);
         }
-        const summary = generateAmortizationSchedule(
-          Number(r.principal),
-          Number(r.annual_rate),
-          Number(r.term_months),
-          String(r.start_date),
-          Number(r.extra_payment ?? 0),
-          String(r.payment_frequency ?? "monthly"),
-        );
+        let summary;
+        try {
+          summary = buildLoanSchedule({
+            principal: Number(r.principal),
+            annualRate: Number(r.annual_rate),
+            termMonths: r.term_months == null ? null : Number(r.term_months),
+            startDate: String(r.start_date),
+            paymentAmount: r.payment_amount == null ? null : Number(r.payment_amount),
+            paymentFrequency: String(r.payment_frequency ?? "monthly"),
+            extraPayment: Number(r.extra_payment ?? 0),
+            residualValue: r.residual_value == null ? null : Number(r.residual_value),
+          });
+        } catch (e) {
+          if (e instanceof LoanValidationError) return integrityRow(e.message, null);
+          throw e;
+        }
         const paid = summary.schedule.filter((x) => x.date <= today);
         const principalPaid = paid.reduce((s, x) => s + x.principal, 0);
         const interestPaid = paid.reduce((s, x) => s + x.interest, 0);
+
+        let remainingBalance = Math.max(Number(r.principal) - principalPaid, 0);
+        let balanceSource: "account" | "projection" = "projection";
+        let payoffDate = summary.payoffDate;
+        let periodsRemaining = summary.schedule.length - paid.length;
+        const acct = r.account_id != null ? acctBalances.get(Number(r.account_id)) : undefined;
+        if (acct && acct.txCount > 0) {
+          remainingBalance = Math.round(Math.abs(acct.balance) * 100) / 100;
+          balanceSource = "account";
+          const residual = Number(r.residual_value ?? 0);
+          if (remainingBalance <= residual + 0.01) {
+            payoffDate = today;
+            periodsRemaining = 0;
+          } else {
+            try {
+              const anchored = buildLoanSchedule({
+                principal: remainingBalance,
+                annualRate: Number(r.annual_rate),
+                startDate: today,
+                paymentAmount: Number(r.payment_amount ?? summary.paymentPerPeriod),
+                paymentFrequency: String(r.payment_frequency ?? "monthly"),
+                extraPayment: Number(r.extra_payment ?? 0),
+                residualValue: r.residual_value == null ? null : Number(r.residual_value),
+              });
+              payoffDate = anchored.payoffDate;
+              periodsRemaining = anchored.schedule.length;
+            } catch {
+              // Payment doesn't amortize the actual balance — keep projection dates.
+            }
+          }
+        }
         return {
           ...r,
           monthlyPayment: summary.monthlyPayment,
+          paymentPerPeriod: summary.paymentPerPeriod,
+          monthlyEquivalentPayment: summary.monthlyEquivalentPayment,
           totalInterest: summary.totalInterest,
-          payoffDate: summary.payoffDate,
-          remainingBalance: Math.max(Number(r.principal) - principalPaid, 0),
-          principalPaid: Math.round(principalPaid * 100) / 100,
+          payoffDate,
+          remainingBalance,
+          balanceSource,
+          principalPaid:
+            balanceSource === "account"
+              ? Math.round(Math.max(Number(r.principal) - remainingBalance, 0) * 100) / 100
+              : Math.round(principalPaid * 100) / 100,
           interestPaid: Math.round(interestPaid * 100) / 100,
-          periodsRemaining: summary.schedule.length - paid.length,
+          periodsRemaining,
         };
       });
       return text({ success: true, data: enriched });
@@ -7345,22 +7410,23 @@ export function registerPgTools(
   // ── add_loan ──────────────────────────────────────────────────────────────
   server.tool(
     "add_loan",
-    "Create a new loan. All non-optional fields required; payment_amount defaults to calculated monthly payment.",
+    "Create a new loan or lease. Term-driven (term_months → payment derived) or payment-driven (payment_amount → payoff date solved); at least one of the two is required. Leases set residual_value (balance remaining at term end).",
     {
       name: z.string().describe("Loan name"),
-      type: z.string().describe("Loan type (e.g. 'mortgage', 'auto', 'student', 'personal')"),
+      type: z.string().describe("Loan type (e.g. 'mortgage', 'lease', 'auto', 'student', 'personal')"),
       principal: z.number().positive().describe("Original loan principal (must be > 0)"),
       annual_rate: z.number().nonnegative().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0; zero allowed for 0% promo)"),
-      term_months: z.number().int().positive().describe("Loan term in months"),
+      term_months: z.number().int().positive().optional().describe("Loan term in months (optional when payment_amount is given — the term is solved from the payment)"),
       start_date: ymdDate.describe("Loan start date (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias)"),
-      payment_amount: z.number().positive().optional().describe("Override computed monthly payment (must be > 0)"),
-      payment_frequency: z.enum(["monthly", "biweekly"]).optional().describe("Default monthly"),
+      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias). When linked, the account's ledger balance drives the outstanding balance."),
+      payment_amount: z.number().positive().optional().describe("Payment per period (must be > 0). Must exceed the period interest or the call is refused."),
+      payment_frequency: z.enum(PAYMENT_FREQUENCIES).optional().describe("weekly | biweekly | semi_monthly | monthly | quarterly | annual (default monthly)"),
       extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0; default 0)"),
+      residual_value: z.number().nonnegative().optional().describe("Lease residual/buyout — the schedule amortizes down to this instead of 0 (must be < principal)"),
       min_payment: z.number().positive().optional().describe("Alias for payment_amount — minimum required payment (must be > 0)"),
       note: z.string().optional(),
     },
-    async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, min_payment, note }) => {
+    async ({ name, type, principal, annual_rate, term_months, start_date, account, payment_amount, payment_frequency, extra_payment, residual_value, min_payment, note }) => {
       let accountId: number | null = null;
       if (account) {
         const rawAccounts = await q(db, sql`
@@ -7372,14 +7438,32 @@ export function registerPgTools(
         accountId = Number(acct.id);
       }
       const pmt = payment_amount ?? min_payment ?? null;
+      // FINLYNQ-136: refuse non-amortizing inputs (no term AND no payment,
+      // payment below period interest, residual >= principal) with a clear error.
+      try {
+        buildLoanSchedule({
+          principal,
+          annualRate: annual_rate,
+          termMonths: term_months ?? null,
+          startDate: start_date,
+          paymentAmount: pmt,
+          paymentFrequency: payment_frequency ?? "monthly",
+          extraPayment: extra_payment ?? 0,
+          residualValue: residual_value ?? null,
+        });
+      } catch (e) {
+        if (e instanceof LoanValidationError) return err(e.message);
+        throw e;
+      }
       const n = dek ? encryptName(dek, name) : { ct: null, lookup: null };
       // Stream D Phase 4 — plaintext name dropped.
       const result = await q(db, sql`
-        INSERT INTO loans (user_id, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, note, name_ct, name_lookup)
-        VALUES (${userId}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${encNote(note)}, ${n.ct}, ${n.lookup})
+        INSERT INTO loans (user_id, type, account_id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, note, name_ct, name_lookup)
+        VALUES (${userId}, ${type}, ${accountId}, ${principal}, ${annual_rate}, ${term_months ?? null}, ${start_date}, ${pmt}, ${payment_frequency ?? "monthly"}, ${extra_payment ?? 0}, ${residual_value ?? null}, ${encNote(note)}, ${n.ct}, ${n.lookup})
         RETURNING id
       `);
-      return text({ success: true, data: { id: result[0]?.id, message: `Loan "${name}" created — $${principal} at ${annual_rate}% over ${term_months} months` } });
+      const termDesc = term_months != null ? `over ${term_months} months` : `at ${pmt}/${payment_frequency ?? "monthly"} (payment-driven)`;
+      return text({ success: true, data: { id: result[0]?.id, message: `Loan "${name}" created — $${principal} at ${annual_rate}% ${termDesc}` } });
     }
   );
 
@@ -7395,15 +7479,41 @@ export function registerPgTools(
       annual_rate: z.number().nonnegative().optional().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0)"),
       term_months: z.number().int().positive().optional(),
       start_date: ymdDate.optional(),
-      payment_amount: z.number().positive().optional().describe("Monthly payment override (must be > 0)"),
-      payment_frequency: z.enum(["monthly", "biweekly"]).optional(),
+      payment_amount: z.number().positive().optional().describe("Payment per period (must be > 0; must exceed the period interest)"),
+      payment_frequency: z.enum(PAYMENT_FREQUENCIES).optional().describe("weekly | biweekly | semi_monthly | monthly | quarterly | annual"),
       extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0)"),
+      residual_value: z.number().nonnegative().optional().describe("Lease residual/buyout — balance remaining at term end (must be < principal)"),
       account: z.string().optional().describe("Linked account — name or alias (fuzzy matched against name; exact match on alias). Pass empty string to clear."),
       note: z.string().optional(),
     },
-    async ({ id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, account, note }) => {
-      const existing = await q(db, sql`SELECT id FROM loans WHERE id = ${id} AND user_id = ${userId}`);
+    async ({ id, name, type, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, account, note }) => {
+      const existing = await q(db, sql`
+        SELECT id, principal, annual_rate, term_months, start_date, payment_amount,
+               payment_frequency, extra_payment, residual_value
+        FROM loans WHERE id = ${id} AND user_id = ${userId}
+      `);
       if (!existing.length) return err(`Loan #${id} not found`);
+      // FINLYNQ-136: validate the MERGED row still amortizes (e.g. lowering the
+      // payment below the period interest, or raising residual past principal).
+      const cur = existing[0];
+      const merged = {
+        principal: principal ?? Number(cur.principal),
+        annualRate: annual_rate ?? Number(cur.annual_rate),
+        termMonths: term_months ?? (cur.term_months == null ? null : Number(cur.term_months)),
+        startDate: start_date ?? String(cur.start_date),
+        paymentAmount: payment_amount ?? (cur.payment_amount == null ? null : Number(cur.payment_amount)),
+        paymentFrequency: payment_frequency ?? String(cur.payment_frequency ?? "monthly"),
+        extraPayment: extra_payment ?? Number(cur.extra_payment ?? 0),
+        residualValue: residual_value ?? (cur.residual_value == null ? null : Number(cur.residual_value)),
+      };
+      if (parseYmdSafe(merged.startDate) !== null) {
+        try {
+          buildLoanSchedule(merged);
+        } catch (e) {
+          if (e instanceof LoanValidationError) return err(e.message);
+          throw e;
+        }
+      }
 
       let accountIdUpdate: number | null | undefined;
       if (account !== undefined) {
@@ -7435,6 +7545,7 @@ export function registerPgTools(
       if (payment_amount !== undefined) updates.push(sql`payment_amount = ${payment_amount}`);
       if (payment_frequency !== undefined) updates.push(sql`payment_frequency = ${payment_frequency}`);
       if (extra_payment !== undefined) updates.push(sql`extra_payment = ${extra_payment}`);
+      if (residual_value !== undefined) updates.push(sql`residual_value = ${residual_value}`);
       if (accountIdUpdate !== undefined) updates.push(sql`account_id = ${accountIdUpdate}`);
       if (note !== undefined) updates.push(sql`note = ${encNote(note)}`);
       if (!updates.length) return err("No fields to update");
@@ -7483,7 +7594,7 @@ export function registerPgTools(
       // Stream D Phase 4: l.name dropped — read l.name_ct only.
       const rows = await q(db, sql`
         SELECT id, name_ct, principal, annual_rate, term_months, start_date,
-               payment_frequency, extra_payment, currency
+               payment_amount, payment_frequency, extra_payment, residual_value, currency
         FROM loans WHERE id = ${loan_id} AND user_id = ${userId}
       `);
       if (!rows.length) return err(`Loan #${loan_id} not found`);
@@ -7498,14 +7609,22 @@ export function registerPgTools(
           value: loan.start_date,
         });
       }
-      const summary = generateAmortizationSchedule(
-        Number(loan.principal),
-        Number(loan.annual_rate),
-        Number(loan.term_months),
-        String(loan.start_date),
-        Number(loan.extra_payment ?? 0),
-        String(loan.payment_frequency ?? "monthly"),
-      );
+      let summary;
+      try {
+        summary = buildLoanSchedule({
+          principal: Number(loan.principal),
+          annualRate: Number(loan.annual_rate),
+          termMonths: loan.term_months == null ? null : Number(loan.term_months),
+          startDate: String(loan.start_date),
+          paymentAmount: loan.payment_amount == null ? null : Number(loan.payment_amount),
+          paymentFrequency: String(loan.payment_frequency ?? "monthly"),
+          extraPayment: Number(loan.extra_payment ?? 0),
+          residualValue: loan.residual_value == null ? null : Number(loan.residual_value),
+        });
+      } catch (e) {
+        if (e instanceof LoanValidationError) return err(e.message);
+        throw e;
+      }
       const cutoff = as_of_date ?? new Date().toISOString().split("T")[0];
       const paid = summary.schedule.filter((r) => r.date <= cutoff);
       const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
@@ -7519,9 +7638,13 @@ export function registerPgTools(
           reportingCurrency: reporting,
           asOfDate: cutoff,
           monthlyPayment: summary.monthlyPayment,
+          paymentPerPeriod: summary.paymentPerPeriod,
+          monthlyEquivalentPayment: summary.monthlyEquivalentPayment,
+          paymentFrequency: summary.paymentFrequency,
           totalPayments: summary.totalPayments,
           totalInterest: summary.totalInterest,
           payoffDate: summary.payoffDate,
+          residualValue: summary.residualValue,
           asOfSummary: {
             periodsElapsed: paid.length,
             principalPaid: Math.round(principalPaid * 100) / 100,
@@ -7530,6 +7653,9 @@ export function registerPgTools(
             periodsRemaining: summary.schedule.length - paid.length,
           },
           schedule: summary.schedule,
+          // FINLYNQ-136: per-calendar-month reportable interest, day-weighted
+          // across periods that straddle month boundaries.
+          monthlyAccrual: summary.monthlyAccrual,
         },
       });
     }
@@ -7549,7 +7675,7 @@ export function registerPgTools(
       // Stream D Phase 4: l.name dropped — read l.name_ct only.
       const loansRaw = await q(db, sql`
         SELECT id, name_ct, principal, annual_rate, term_months, start_date,
-               payment_amount, payment_frequency, extra_payment
+               payment_amount, payment_frequency, extra_payment, residual_value
         FROM loans WHERE user_id = ${userId}
       `);
       if (!loansRaw.length) return text({ success: true, data: { message: "No loans found", strategies: {} } });
@@ -7559,34 +7685,43 @@ export function registerPgTools(
       // longer poisons the whole strategy computation. The bad rows still
       // surface to the caller (`excluded`) so they can be fixed.
       const excluded: Array<{ loanId: number; error: string; value: unknown }> = [];
-      const validLoans = loans.filter((l) => {
+      const debts: Debt[] = [];
+      for (const l of loans) {
         if (parseYmdSafe(String(l.start_date)) === null) {
           excluded.push({ loanId: Number(l.id), error: "invalid start_date", value: l.start_date });
-          return false;
+          continue;
         }
-        return true;
-      });
-      const debts: Debt[] = validLoans.map((l) => {
-        const summary = generateAmortizationSchedule(
-          Number(l.principal),
-          Number(l.annual_rate),
-          Number(l.term_months),
-          String(l.start_date),
-          Number(l.extra_payment ?? 0),
-          String(l.payment_frequency ?? "monthly"),
-        );
+        let summary;
+        try {
+          summary = buildLoanSchedule({
+            principal: Number(l.principal),
+            annualRate: Number(l.annual_rate),
+            termMonths: l.term_months == null ? null : Number(l.term_months),
+            startDate: String(l.start_date),
+            paymentAmount: l.payment_amount == null ? null : Number(l.payment_amount),
+            paymentFrequency: String(l.payment_frequency ?? "monthly"),
+            extraPayment: Number(l.extra_payment ?? 0),
+            residualValue: l.residual_value == null ? null : Number(l.residual_value),
+          });
+        } catch (e) {
+          if (e instanceof LoanValidationError) {
+            excluded.push({ loanId: Number(l.id), error: e.message, value: null });
+            continue;
+          }
+          throw e;
+        }
         const paid = summary.schedule.filter((r) => r.date <= today);
         const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
         const balance = Math.max(Number(l.principal) - principalPaid, 0);
         const minPayment = Number(l.payment_amount ?? summary.monthlyPayment);
-        return {
+        debts.push({
           id: Number(l.id),
           name: String(l.name),
           balance: Math.round(balance * 100) / 100,
           rate: Number(l.annual_rate),
           minPayment,
-        };
-      });
+        });
+      }
       const strat = strategy ?? "both";
       const extra = extra_payment ?? 0;
       const result: Record<string, unknown> = { inputs: { extraPayment: extra, debts }, reportingCurrency: reporting };

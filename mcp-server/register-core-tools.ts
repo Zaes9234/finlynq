@@ -14,8 +14,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { PgCompatDb } from "./pg-compat.js";
 import {
-  generateAmortizationSchedule,
+  buildLoanSchedule,
   calculateDebtPayoff,
+  LoanValidationError,
   type Debt,
 } from "../src/lib/loan-calculator.js";
 import {
@@ -2024,7 +2025,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ loan_id, as_of_date, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       const loan = await sqlite.prepare(
-        `SELECT id, principal, annual_rate, term_months, start_date, payment_frequency, extra_payment, currency FROM loans WHERE id = ? AND user_id = ?`
+        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value, currency FROM loans WHERE id = ? AND user_id = ?`
       ).get(loan_id, userId) as SqliteRow | undefined;
       if (!loan) return sqliteErr(`Loan #${loan_id} not found`);
       // Issue #213 — guard against legacy bad start_date so this tool no
@@ -2038,14 +2039,22 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           value: loan.start_date,
         });
       }
-      const summary = generateAmortizationSchedule(
-        Number(loan.principal),
-        Number(loan.annual_rate),
-        Number(loan.term_months),
-        String(loan.start_date),
-        Number(loan.extra_payment ?? 0),
-        String(loan.payment_frequency ?? "monthly"),
-      );
+      let summary;
+      try {
+        summary = buildLoanSchedule({
+          principal: Number(loan.principal),
+          annualRate: Number(loan.annual_rate),
+          termMonths: loan.term_months == null ? null : Number(loan.term_months),
+          startDate: String(loan.start_date),
+          paymentAmount: loan.payment_amount == null ? null : Number(loan.payment_amount),
+          paymentFrequency: String(loan.payment_frequency ?? "monthly"),
+          extraPayment: Number(loan.extra_payment ?? 0),
+          residualValue: loan.residual_value == null ? null : Number(loan.residual_value),
+        });
+      } catch (e) {
+        if (e instanceof LoanValidationError) return sqliteErr(e.message);
+        throw e;
+      }
       const cutoff = as_of_date ?? new Date().toISOString().split("T")[0];
       const paid = summary.schedule.filter((r) => r.date <= cutoff);
       const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
@@ -2059,9 +2068,13 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           reportingCurrency: reporting,
           asOfDate: cutoff,
           monthlyPayment: summary.monthlyPayment,
+          paymentPerPeriod: summary.paymentPerPeriod,
+          monthlyEquivalentPayment: summary.monthlyEquivalentPayment,
+          paymentFrequency: summary.paymentFrequency,
           totalPayments: summary.totalPayments,
           totalInterest: summary.totalInterest,
           payoffDate: summary.payoffDate,
+          residualValue: summary.residualValue,
           asOfSummary: {
             periodsElapsed: paid.length,
             principalPaid: Math.round(principalPaid * 100) / 100,
@@ -2070,6 +2083,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
             periodsRemaining: summary.schedule.length - paid.length,
           },
           schedule: summary.schedule,
+          // FINLYNQ-136: per-calendar-month reportable interest.
+          monthlyAccrual: summary.monthlyAccrual,
         },
       });
     }
@@ -2087,42 +2102,51 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
     async ({ strategy, extra_payment, reportingCurrency }) => {
       const reporting = await resolveReportingCurrencyStdio(sqlite, userId, reportingCurrency);
       const loans = await sqlite.prepare(
-        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment FROM loans WHERE user_id = ?`
+        `SELECT id, principal, annual_rate, term_months, start_date, payment_amount, payment_frequency, extra_payment, residual_value FROM loans WHERE user_id = ?`
       ).all(userId) as SqliteRow[];
       if (!loans.length) return txt({ success: true, data: { message: "No loans found", strategies: {} } });
       const today = new Date().toISOString().split("T")[0];
       // Issue #213 — split out legacy bad rows so one bad start_date no
       // longer poisons the whole strategy computation.
       const excluded: Array<{ loanId: number; error: string; value: unknown }> = [];
-      const validLoans = loans.filter((l) => {
+      const debts: Debt[] = [];
+      for (const l of loans) {
         if (parseYmdSafe(String(l.start_date)) === null) {
           excluded.push({ loanId: Number(l.id), error: "invalid start_date", value: l.start_date });
-          return false;
+          continue;
         }
-        return true;
-      });
-      const debts: Debt[] = validLoans.map((l) => {
-        const summary = generateAmortizationSchedule(
-          Number(l.principal),
-          Number(l.annual_rate),
-          Number(l.term_months),
-          String(l.start_date),
-          Number(l.extra_payment ?? 0),
-          String(l.payment_frequency ?? "monthly"),
-        );
+        let summary;
+        try {
+          summary = buildLoanSchedule({
+            principal: Number(l.principal),
+            annualRate: Number(l.annual_rate),
+            termMonths: l.term_months == null ? null : Number(l.term_months),
+            startDate: String(l.start_date),
+            paymentAmount: l.payment_amount == null ? null : Number(l.payment_amount),
+            paymentFrequency: String(l.payment_frequency ?? "monthly"),
+            extraPayment: Number(l.extra_payment ?? 0),
+            residualValue: l.residual_value == null ? null : Number(l.residual_value),
+          });
+        } catch (e) {
+          if (e instanceof LoanValidationError) {
+            excluded.push({ loanId: Number(l.id), error: e.message, value: null });
+            continue;
+          }
+          throw e;
+        }
         const paid = summary.schedule.filter((r) => r.date <= today);
         const principalPaid = paid.reduce((s, r) => s + r.principal, 0);
         const balance = Math.max(Number(l.principal) - principalPaid, 0);
         const minPayment = Number(l.payment_amount ?? summary.monthlyPayment);
-        return {
+        debts.push({
           id: Number(l.id),
           // Stream D Phase 4: stdio cannot decrypt loan name — surface id only.
           name: `Loan #${Number(l.id)}`,
           balance: Math.round(balance * 100) / 100,
           rate: Number(l.annual_rate),
           minPayment,
-        };
-      });
+        });
+      }
       const strat = strategy ?? "both";
       const extra = extra_payment ?? 0;
       const result: Record<string, unknown> = { inputs: { extraPayment: extra, debts }, reportingCurrency: reporting };

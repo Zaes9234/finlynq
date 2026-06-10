@@ -25,13 +25,40 @@ import { CspSafeBar } from "@/components/csp-safe-bar";
 
 type Loan = {
   id: number; name: string; type: string; principal: number; annualRate: number;
-  termMonths: number; startDate: string; paymentFrequency: string; extraPayment: number;
-  monthlyPayment: number; totalInterest: number; payoffDate: string;
-  remainingBalance: number; principalPaid: number; interestPaid: number; periodsRemaining: number;
+  termMonths: number | null; startDate: string; paymentFrequency: string; extraPayment: number;
+  paymentAmount: number | null; residualValue: number | null;
+  monthlyPayment: number; paymentPerPeriod: number; monthlyEquivalentPayment: number;
+  totalInterest: number; payoffDate: string;
+  remainingBalance: number; balanceSource: "account" | "projection" | null;
+  principalPaid: number; interestPaid: number; periodsRemaining: number;
   accountName: string | null;
 };
 type AmortRow = { period: number; date: string; payment: number; principal: number; interest: number; balance: number };
-type AmortResult = { monthlyPayment: number; totalPayments: number; totalInterest: number; payoffDate: string; schedule: AmortRow[] };
+type AccrualRow = { month: string; interest: number };
+type AmortResult = { monthlyPayment: number; totalPayments: number; totalInterest: number; payoffDate: string; residualValue: number; schedule: AmortRow[]; monthlyAccrual: AccrualRow[] };
+
+const FREQUENCY_OPTIONS = [
+  { value: "weekly", label: "Weekly" },
+  { value: "biweekly", label: "Biweekly" },
+  { value: "semi_monthly", label: "Semi-monthly" },
+  { value: "monthly", label: "Monthly" },
+  { value: "quarterly", label: "Quarterly" },
+  { value: "annual", label: "Annual" },
+] as const;
+
+const FREQUENCY_LABELS: Record<string, string> = Object.fromEntries(
+  FREQUENCY_OPTIONS.map((f) => [f.value, f.label])
+);
+
+const PERIODS_PER_YEAR: Record<string, number> = { weekly: 52, biweekly: 26, semi_monthly: 24, monthly: 12, quarterly: 4, annual: 1 };
+
+// What-if is term-driven; for payment-driven loans (termMonths null) derive an
+// equivalent term in months from the solved periods remaining.
+function equivalentTermMonths(loan: Loan): number {
+  if (loan.termMonths != null) return loan.termMonths;
+  const perYear = PERIODS_PER_YEAR[loan.paymentFrequency] ?? 12;
+  return Math.max(1, Math.round((loan.periodsRemaining / perYear) * 12));
+}
 type WhatIf = { extraPayment: number; monthsSaved: number; interestSaved: number; newPayoffDate: string; totalInterest: number };
 type Account = { id: number; name: string };
 
@@ -119,22 +146,26 @@ function LoansPageContent() {
   const [selectedLoan, setSelectedLoan] = useState<Loan | null>(null);
   const [amort, setAmort] = useState<AmortResult | null>(null);
   const [whatIf, setWhatIf] = useState<WhatIf[]>([]);
-  const [form, setForm] = useState({ name: "", type: "mortgage", principal: "", currency: displayCurrency, annualRate: "", termMonths: "", startDate: "", paymentFrequency: "monthly", extraPayment: "0", accountId: "" });
+  const [form, setForm] = useState({ name: "", type: "mortgage", principal: "", currency: displayCurrency, annualRate: "", termMonths: "", startDate: "", paymentAmount: "", paymentFrequency: "monthly", extraPayment: "0", residualValue: "", accountId: "" });
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   function validateForm() {
     const e: Record<string, string> = {};
     if (!form.name.trim()) e.name = "Name is required";
     if (!form.principal || parseFloat(form.principal) <= 0) e.principal = "Principal must be greater than 0";
-    if (!form.annualRate || parseFloat(form.annualRate) <= 0) e.annualRate = "Rate must be greater than 0";
+    if (!form.annualRate || parseFloat(form.annualRate) < 0) e.annualRate = "Rate must be 0 or more";
     if (form.annualRate && parseFloat(form.annualRate) > 100) e.annualRate = "Rate must be 100 or less";
-    if (!form.termMonths || parseInt(form.termMonths) <= 0) e.termMonths = "Term must be greater than 0";
+    // FINLYNQ-136: term OR payment — payment-driven loans solve for the term.
+    if (!form.termMonths && !form.paymentAmount) e.termMonths = "Enter a term or a payment amount";
+    if (form.termMonths && parseInt(form.termMonths) <= 0) e.termMonths = "Term must be greater than 0";
+    if (form.paymentAmount && parseFloat(form.paymentAmount) <= 0) e.paymentAmount = "Payment must be greater than 0";
+    if (form.residualValue && form.principal && parseFloat(form.residualValue) >= parseFloat(form.principal)) e.residualValue = "Residual must be less than principal";
     if (!form.startDate) e.startDate = "Start date is required";
     setErrors(e);
     return Object.keys(e).length === 0;
   }
 
-  const isFormValid = form.name.trim() !== "" && form.principal !== "" && parseFloat(form.principal) > 0 && form.annualRate !== "" && parseFloat(form.annualRate) > 0 && parseFloat(form.annualRate) <= 100 && form.termMonths !== "" && parseInt(form.termMonths) > 0 && form.startDate !== "";
+  const isFormValid = form.name.trim() !== "" && form.principal !== "" && parseFloat(form.principal) > 0 && form.annualRate !== "" && parseFloat(form.annualRate) >= 0 && parseFloat(form.annualRate) <= 100 && (form.termMonths !== "" ? parseInt(form.termMonths) > 0 : form.paymentAmount !== "" && parseFloat(form.paymentAmount) > 0) && form.startDate !== "";
 
   const load = useCallback(() => {
     fetch("/api/loans").then((r) => r.json()).then((data) => { setLoans(data); setLoading(false); });
@@ -146,19 +177,25 @@ function LoansPageContent() {
   async function viewAmortization(loan: Loan) {
     setSelectedLoan(loan);
     const [amortRes, whatIfRes] = await Promise.all([
-      fetch("/api/loans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "amortization", principal: loan.principal, annualRate: loan.annualRate, termMonths: loan.termMonths, startDate: loan.startDate, extraPayment: loan.extraPayment, paymentFrequency: loan.paymentFrequency }) }).then((r) => r.json()),
-      fetch("/api/loans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "what-if", principal: loan.principal, annualRate: loan.annualRate, termMonths: loan.termMonths, startDate: loan.startDate, extraAmounts: [100, 200, 500, 1000] }) }).then((r) => r.json()),
+      fetch("/api/loans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "amortization", principal: loan.principal, annualRate: loan.annualRate, termMonths: loan.termMonths, startDate: loan.startDate, paymentAmount: loan.paymentAmount, extraPayment: loan.extraPayment, paymentFrequency: loan.paymentFrequency, residualValue: loan.residualValue }) }).then((r) => r.json()),
+      fetch("/api/loans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "what-if", principal: loan.principal, annualRate: loan.annualRate, termMonths: equivalentTermMonths(loan), startDate: loan.startDate, extraAmounts: [100, 200, 500, 1000] }) }).then((r) => r.json()),
     ]);
     setAmort(amortRes);
-    setWhatIf(whatIfRes);
+    setWhatIf(Array.isArray(whatIfRes) ? whatIfRes : []);
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!validateForm()) return;
-    await fetch("/api/loans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: form.name, type: form.type, principal: parseFloat(form.principal), currency: form.currency || displayCurrency, annualRate: parseFloat(form.annualRate), termMonths: parseInt(form.termMonths), startDate: form.startDate, paymentFrequency: form.paymentFrequency, extraPayment: parseFloat(form.extraPayment) || 0, accountId: form.accountId ? parseInt(form.accountId) : null }) });
+    const res = await fetch("/api/loans", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: form.name, type: form.type, principal: parseFloat(form.principal), currency: form.currency || displayCurrency, annualRate: parseFloat(form.annualRate), termMonths: form.termMonths ? parseInt(form.termMonths) : null, startDate: form.startDate, paymentAmount: form.paymentAmount ? parseFloat(form.paymentAmount) : null, paymentFrequency: form.paymentFrequency, extraPayment: parseFloat(form.extraPayment) || 0, residualValue: form.type === "lease" && form.residualValue ? parseFloat(form.residualValue) : null, accountId: form.accountId ? parseInt(form.accountId) : null }) });
+    if (!res.ok) {
+      // e.g. payment below the period interest — surface the server's message.
+      const body = await res.json().catch(() => null);
+      setErrors({ ...errors, form: body?.error ?? "Failed to create loan" });
+      return;
+    }
     setDialogOpen(false);
-    setForm({ name: "", type: "mortgage", principal: "", currency: displayCurrency, annualRate: "", termMonths: "", startDate: "", paymentFrequency: "monthly", extraPayment: "0", accountId: "" });
+    setForm({ name: "", type: "mortgage", principal: "", currency: displayCurrency, annualRate: "", termMonths: "", startDate: "", paymentAmount: "", paymentFrequency: "monthly", extraPayment: "0", residualValue: "", accountId: "" });
     setErrors({});
     load();
   }
@@ -168,8 +205,9 @@ function LoansPageContent() {
     load();
   }
 
-  const totalDebt = loans.reduce((s, l) => s + l.remainingBalance, 0);
-  const totalMonthly = loans.reduce((s, l) => s + l.monthlyPayment, 0);
+  const totalDebt = loans.reduce((s, l) => s + (l.remainingBalance ?? 0), 0);
+  // Monthly-equivalent so weekly/quarterly/annual loans sum comparably.
+  const totalMonthly = loans.reduce((s, l) => s + (l.monthlyEquivalentPayment ?? l.monthlyPayment ?? 0), 0);
 
   if (loading) return <LoansSkeleton />;
 
@@ -226,9 +264,25 @@ function LoansPageContent() {
                 </div>
                 <div>
                   <Label>Term (months)</Label>
-                  <Input type="number" value={form.termMonths} onChange={(e) => { setForm({ ...form, termMonths: e.target.value }); setErrors({ ...errors, termMonths: "" }); }} />
+                  <Input type="number" placeholder="From payment" value={form.termMonths} onChange={(e) => { setForm({ ...form, termMonths: e.target.value }); setErrors({ ...errors, termMonths: "" }); }} />
                   {errors.termMonths && <p className="text-xs text-destructive mt-1">{errors.termMonths}</p>}
                 </div>
+              </div>
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <Label>Payment</Label>
+                  <Input type="number" step="0.01" placeholder="From term" value={form.paymentAmount} onChange={(e) => { setForm({ ...form, paymentAmount: e.target.value }); setErrors({ ...errors, paymentAmount: "", termMonths: "" }); }} />
+                  {errors.paymentAmount && <p className="text-xs text-destructive mt-1">{errors.paymentAmount}</p>}
+                </div>
+                <div><Label>Frequency</Label>
+                  <Select value={form.paymentFrequency} onValueChange={(v) => setForm({ ...form, paymentFrequency: v ?? "monthly" })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {FREQUENCY_OPTIONS.map((f) => (<SelectItem key={f.value} value={f.value}>{f.label}</SelectItem>))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div><Label>Extra/Payment</Label><Input type="number" step="0.01" value={form.extraPayment} onChange={(e) => setForm({ ...form, extraPayment: e.target.value })} /></div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -236,7 +290,13 @@ function LoansPageContent() {
                   <Input type="date" value={form.startDate} onChange={(e) => { setForm({ ...form, startDate: e.target.value }); setErrors({ ...errors, startDate: "" }); }} />
                   {errors.startDate && <p className="text-xs text-destructive mt-1">{errors.startDate}</p>}
                 </div>
-                <div><Label>Extra Payment/mo</Label><Input type="number" step="0.01" value={form.extraPayment} onChange={(e) => setForm({ ...form, extraPayment: e.target.value })} /></div>
+                {form.type === "lease" && (
+                  <div>
+                    <Label>Residual / Buyout</Label>
+                    <Input type="number" step="0.01" placeholder="Balance at term end" value={form.residualValue} onChange={(e) => { setForm({ ...form, residualValue: e.target.value }); setErrors({ ...errors, residualValue: "" }); }} />
+                    {errors.residualValue && <p className="text-xs text-destructive mt-1">{errors.residualValue}</p>}
+                  </div>
+                )}
               </div>
               <div><Label>Linked Account</Label>
                 <Combobox
@@ -253,6 +313,7 @@ function LoansPageContent() {
                   className="w-full"
                 />
               </div>
+              {errors.form && <p className="text-xs text-destructive">{errors.form}</p>}
               <Button type="submit" className="w-full" disabled={!isFormValid}>Add Loan</Button>
             </form>
           </DialogContent>
@@ -326,11 +387,20 @@ function LoansPageContent() {
             </CardHeader>
             <CardContent>
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-4">
-                <div><p className="text-xs text-muted-foreground">Remaining</p><p className="font-mono font-bold text-rose-600">{formatCurrency(loan.remainingBalance, displayCurrency)}</p></div>
-                <div><p className="text-xs text-muted-foreground">Monthly</p><p className="font-mono">{formatCurrency(loan.monthlyPayment, displayCurrency)}</p></div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Remaining{loan.balanceSource === "account" && <span className="ml-1 text-emerald-600" title={`Live balance from ${loan.accountName ?? "linked account"}`}>· from account</span>}</p>
+                  <p className="font-mono font-bold text-rose-600">{formatCurrency(loan.remainingBalance, displayCurrency)}</p>
+                </div>
+                <div><p className="text-xs text-muted-foreground">{FREQUENCY_LABELS[loan.paymentFrequency] ?? "Payment"}</p><p className="font-mono">{formatCurrency(loan.paymentPerPeriod ?? loan.monthlyPayment, displayCurrency)}</p></div>
                 <div><p className="text-xs text-muted-foreground">Rate</p><p className="font-mono">{loan.annualRate}%</p></div>
                 <div><p className="text-xs text-muted-foreground">Total Interest</p><p className="font-mono">{formatCurrency(loan.totalInterest, displayCurrency)}</p></div>
-                <div><p className="text-xs text-muted-foreground">Payoff</p><p className="font-mono">{loan.payoffDate}</p></div>
+                <div>
+                  <p className="text-xs text-muted-foreground">{loan.type === "lease" ? "Term end" : "Payoff"}</p>
+                  <p className="font-mono">{loan.payoffDate}</p>
+                  {loan.type === "lease" && loan.residualValue != null && loan.residualValue > 0 && (
+                    <p className="text-xs text-muted-foreground">residual {formatCurrency(loan.residualValue, displayCurrency)}</p>
+                  )}
+                </div>
               </div>
               <div className="space-y-1">
                 <div className="flex justify-between text-xs"><span>Principal paid: {formatCurrency(loan.principalPaid, displayCurrency)}</span><span>{Math.round(paidPct)}%</span></div>
@@ -352,7 +422,7 @@ function LoansPageContent() {
           <CardHeader><CardTitle>Amortization: {selectedLoan.name}</CardTitle></CardHeader>
           <CardContent>
             <Tabs defaultValue="chart">
-              <TabsList><TabsTrigger value="chart">Chart</TabsTrigger><TabsTrigger value="table">Table</TabsTrigger><TabsTrigger value="whatif">What-If</TabsTrigger></TabsList>
+              <TabsList><TabsTrigger value="chart">Chart</TabsTrigger><TabsTrigger value="table">Table</TabsTrigger><TabsTrigger value="monthly">Monthly Interest</TabsTrigger><TabsTrigger value="whatif">What-If</TabsTrigger></TabsList>
               <TabsContent value="chart">
                 <ResponsiveContainer width="100%" height={300}>
                   <BarChart data={amort.schedule.filter((_, i) => i % Math.max(1, Math.floor(amort.schedule.length / 60)) === 0)}>
@@ -375,6 +445,19 @@ function LoansPageContent() {
                     <TableBody>
                       {amort.schedule.map((r) => (
                         <TableRow key={r.period}><TableCell>{r.period}</TableCell><TableCell>{r.date}</TableCell><TableCell>{formatCurrency(r.payment, displayCurrency)}</TableCell><TableCell className="text-emerald-600">{formatCurrency(r.principal, displayCurrency)}</TableCell><TableCell className="text-rose-600">{formatCurrency(r.interest, displayCurrency)}</TableCell><TableCell className="font-mono">{formatCurrency(r.balance, displayCurrency)}</TableCell></TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </TabsContent>
+              <TabsContent value="monthly">
+                <p className="text-sm text-muted-foreground mb-4">Interest accrued per calendar month — the reportable figure, day-weighted when payments straddle month boundaries.</p>
+                <div className="max-h-96 overflow-auto">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>Month</TableHead><TableHead>Interest Accrued</TableHead></TableRow></TableHeader>
+                    <TableBody>
+                      {(amort.monthlyAccrual ?? []).map((m) => (
+                        <TableRow key={m.month}><TableCell className="font-mono">{m.month}</TableCell><TableCell className="text-rose-600 font-mono">{formatCurrency(m.interest, displayCurrency)}</TableCell></TableRow>
                       ))}
                     </TableBody>
                   </Table>
