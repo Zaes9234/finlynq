@@ -28,13 +28,25 @@ vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" } })),
 }));
 
+// The loans surface is DevModeGuard-gated; without this mock every request
+// 404s before reaching the handler (the mocked settings query returns []).
+vi.mock("@/lib/require-dev-mode", () => ({
+  requireDevMode: vi.fn(async () => null),
+  isDevModeEnabled: vi.fn(async () => true),
+}));
+
 const mockGenerateAmortization = vi.fn();
 const mockExtraPaymentImpact = vi.fn();
 const mockDebtPayoff = vi.fn();
 vi.mock("@/lib/loan-calculator", () => ({
   generateAmortizationSchedule: (...a: unknown[]) => mockGenerateAmortization(...a),
+  // FINLYNQ-136 — the route consumes the options-based builder; both shapes
+  // funnel into the same mock so existing expectations keep working.
+  buildLoanSchedule: (...a: unknown[]) => mockGenerateAmortization(...a),
   calculateExtraPaymentImpact: (...a: unknown[]) => mockExtraPaymentImpact(...a),
   calculateDebtPayoff: (...a: unknown[]) => mockDebtPayoff(...a),
+  LoanValidationError: class LoanValidationError extends Error {},
+  PAYMENT_FREQUENCIES: ["weekly", "biweekly", "semi_monthly", "monthly", "quarterly", "annual"],
 }));
 
 vi.mock("drizzle-orm", () => ({

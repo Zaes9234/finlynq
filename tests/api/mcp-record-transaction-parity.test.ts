@@ -1,8 +1,8 @@
 /**
  * FINLYNQ-108 — MCP HTTP write tools route through the shared domain layer.
  *
- * `record_transaction` and `bulk_record_transactions` (and the `record_trade`
- * fee leg) previously issued raw `INSERT INTO transactions`. They now call the
+ * `record_transaction` and `bulk_record_transactions` previously issued raw
+ * `INSERT INTO transactions`. They now call the
  * same `createTransaction` helper the REST `POST /api/transactions` route uses,
  * so the audit trio (`source` / `created_at` / `updated_at`), sign-vs-category,
  * `invalidateUser`, and the investment-account FK guard are STRUCTURAL — defined

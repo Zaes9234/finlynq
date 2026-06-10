@@ -6,7 +6,7 @@
  * inserting the transaction, then stamp the returned id onto
  * `transactions.bank_transaction_id`. Manual entries (REST POST
  * /transactions, MCP HTTP record_transaction / bulk_record_transactions /
- * record_transfer / record_trade) bypass this helper and leave the FK NULL.
+ * record_transfer / portfolio_* op tools) bypass this helper and leave the FK NULL.
  *
  * Tier selection: if `dek` is non-null, the row writes at user-tier (v1:
  * envelope under the user's DEK). If `dek` is null, the row writes at
