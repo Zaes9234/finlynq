@@ -2409,7 +2409,7 @@ async function findHoldingIdViaSql(
 
 // Issue #92: findOrCreateHoldingViaSql was deleted. The transfer path no
 // longer auto-creates a destination holding row — both legs MUST exist via
-// add_portfolio_holding before record_transfer / record_trade. The Drizzle
+// add_portfolio_holding before record_transfer / portfolio_transfer. The Drizzle
 // equivalent (buildHoldingResolver's auto-create branch) is still used by
 // the import pipeline, which has its own resolver-report UX.
 

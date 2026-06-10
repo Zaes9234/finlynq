@@ -181,7 +181,7 @@ export const transactions = pgTable("transactions", {
   // side record of this row. Set on import-sourced INSERTs (executeImport,
   // createTransferPair source leg, approve route's three buckets); NULL on
   // manual entries (REST POST /transactions, MCP HTTP record_transaction /
-  // bulk_record_transactions / record_transfer / record_trade). ON DELETE
+  // bulk_record_transactions / record_transfer / portfolio_* op tools). ON DELETE
   // SET NULL — the bank ledger and the system-side transaction have
   // independent lifecycles; deleting either does not cascade. After a user
   // account-move, transactions.account_id may diverge from

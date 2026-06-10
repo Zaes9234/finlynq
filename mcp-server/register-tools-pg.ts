@@ -47,6 +47,20 @@ import {
   updateTransferPair,
   deleteTransferPair,
 } from "../src/lib/transfer";
+import {
+  recordBuy,
+  recordSell,
+  recordSwap,
+  recordInKindTransfer,
+  recordPortfolioIncomeOrExpense,
+  recordFxConversion,
+  recordBrokerageDeposit,
+  recordBrokerageWithdrawal,
+  CashSleeveNotFoundError,
+  CurrencyMismatchError,
+  HoldingNotFoundError,
+  InvalidLinkPairError,
+} from "../src/lib/portfolio/operations";
 import { resolveReportingCurrency, aggregateInReporting } from "./reporting-currency";
 import { tagAmount } from "./currency-tagging";
 import {
@@ -2709,7 +2723,7 @@ export function registerPgTools(
   // ── record_transaction ─────────────────────────────────────────────────────
   server.tool(
     "record_transaction",
-    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. Investment accounts use a keyword pass (dividend/interest/forex/disbursement) plus a 'Transfers'/'Investment Activity' fallback, and default to uncategorized when none match — never a generic expense category. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns, so callers can preview routing before committing.",
+    "Record a transaction. Prefer `account_id` (exact, no ambiguity) over `account` name; pass at least one. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently writing to the wrong account. Category auto-detected from payee rules/history when omitted. INVESTMENT ACCOUNTS ARE REJECTED — record_transaction cannot write to an is_investment account; route all investment activity through the dedicated portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) instead. For cross-currency entries (user typed an amount in a currency that differs from the account's), pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. For stock/ETF/crypto rows pass `quantity` (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Pass `dryRun: true` to validate + resolve without writing — the response shape includes `dryRun: true`, `wouldBeId: null`, and the same resolved* fields a real write returns, so callers can preview routing before committing.",
     {
       amount: z.number().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."),
       payee: z.string().describe("Payee or merchant name"),
@@ -2779,9 +2793,18 @@ export function registerPgTools(
         acct = resolved.account;
       }
 
-      // Resolve category (fuzzy or auto). Compute is_investment once — it's
-      // also re-used by the holding-FK constraint check below.
+      // Investment accounts are off-limits to record_transaction: all
+      // investment activity must flow through the dedicated portfolio_* tools
+      // so the canonical lot-aware, sign-correct row shapes are written.
+      // Refuse up front — before any category/holding resolution — so the
+      // error is the first thing the caller sees. Mirrors the web UI hiding
+      // investment accounts from the generic Add Transaction dialog in
+      // new-entry mode. `isInvestment` stays `false` past this guard, so the
+      // autoCategory call below always takes the non-investment path.
       const isInvestment = await isInvestmentAccountFn(userId, Number(acct.id));
+      if (isInvestment) {
+        return err(`Account "${acct.name}" is an investment account — record_transaction can't write to it. Use portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion instead.`);
+      }
       let catId: number | null = null;
       if (category) {
         const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
@@ -2818,14 +2841,6 @@ export function registerPgTools(
         `);
         if (!ownsHolding.length) return err(`Portfolio holding #${portfolioHoldingId} not found or not owned by you.`);
         resolvedHoldingId = portfolioHoldingId;
-      }
-
-      // Investment-account constraint: every transaction in a flagged
-      // account must reference a holding. MCP tools take the strict path —
-      // refuse rather than silently default — so Claude surfaces an actionable
-      // error to the user instead of attributing a trade to "Cash".
-      if (resolvedHoldingId == null && isInvestment) {
-        return err(`Account "${acct.name}" is an investment account — pass portfolioHolding (e.g. the ticker, or "Cash" for a cash leg) or portfolioHoldingId. Use get_portfolio_analysis to list this account's holdings.`);
       }
 
       // Resolve the entered/account trilogy. Refuses on fallback rate.
@@ -3028,7 +3043,7 @@ export function registerPgTools(
   // ── bulk_record_transactions ───────────────────────────────────────────────
   server.tool(
     "bulk_record_transactions",
-    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted; investment-account rows use a keyword pass (dividend/interest/forex/disbursement) plus a 'Transfers'/'Investment Activity' fallback, and default to uncategorized when none match — never a generic expense category. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch. Pass top-level `idempotencyKey` (UUID v4) to make this batch safe to retry — if the same `(user, key)` was already committed within 72h, the original result is returned verbatim with no INSERTs (set per-call: callers should generate one fresh UUID per logical batch). After a successful (non-dryRun) batch the response includes a top-level `possibleDuplicates` array — hints only, never blocks the insert — flagging newly-inserted rows that look suspiciously like an existing row in the same account (same direction, amount within 5%, dates within 7 days). Empty array when nothing matches; never null. Use these to decide whether to delete a leg.",
+    "Record multiple transactions at once. Prefer per-row `account_id` (or top-level `account_id` as a fallback for every row that omits its own) over `account` name — exact ids skip fuzzy matching. When only `account` is given, exact/alias/startsWith hits route immediately and weak substring fallbacks fail that row with a 'did you mean…' message rather than silently writing to the wrong account. Category auto-detected when omitted. INVESTMENT ACCOUNTS ARE REJECTED — any row whose account is an is_investment account fails (the rest of the batch still commits); route investment activity through the dedicated portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) instead. For cross-currency entries pass enteredAmount + enteredCurrency on each item — the server locks the FX rate at the date. For stock/ETF/crypto rows pass `quantity` per row (positive=shares acquired, negative=shares sold) so the holding's share count moves; without it the row is treated as cash-only. Each per-row result includes `resolvedAccount` so callers can verify routing immediately. Pass top-level `dryRun: true` to validate + resolve every row without writing — each per-row result then carries `dryRun: true` and `wouldBeId: null` alongside the same resolved* fields a real write returns; the response top-level `dryRun: true` distinguishes preview from a real batch. Pass top-level `idempotencyKey` (UUID v4) to make this batch safe to retry — if the same `(user, key)` was already committed within 72h, the original result is returned verbatim with no INSERTs (set per-call: callers should generate one fresh UUID per logical batch). After a successful (non-dryRun) batch the response includes a top-level `possibleDuplicates` array — hints only, never blocks the insert — flagging newly-inserted rows that look suspiciously like an existing row in the same account (same direction, amount within 5%, dates within 7 days). Empty array when nothing matches; never null. Use these to decide whether to delete a leg.",
     {
       account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row."),
       dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Use this to preview routing for a whole batch (account fuzzy-matches, FX rates, holding bindings) before committing. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`/`resolvedHolding`."),
@@ -3277,6 +3292,20 @@ export function registerPgTools(
           }
           const resolvedAccountInfo = { id: Number(acct.id), name: String(acct.name ?? "") };
 
+          // Investment accounts are off-limits to bulk_record_transactions
+          // (mirror of record_transaction): all investment activity must flow
+          // through the dedicated portfolio_* tools. Fail THIS row only —
+          // the rest of the batch still commits — before any holding work.
+          if (investmentAccountIds.has(Number(acct.id))) {
+            results.push({
+              index: i,
+              success: false,
+              message: `Account "${acct.name}" is an investment account — bulk_record_transactions can't write to it. Use portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion instead.`,
+              resolvedAccount: resolvedAccountInfo,
+            });
+            continue;
+          }
+
           // Resolve holding FK from either input form. Lookup-only — see
           // record_transaction comment above for the policy.
           let rowHoldingId: number | null = null;
@@ -3297,19 +3326,6 @@ export function registerPgTools(
               continue;
             }
             rowHoldingId = t.portfolioHoldingId;
-          }
-
-          // Investment-account constraint — fail this row only, not the
-          // whole batch. Caller can resubmit just the failures with a
-          // holding name.
-          if (rowHoldingId == null && investmentAccountIds.has(Number(acct.id))) {
-            results.push({
-              index: i,
-              success: false,
-              message: `Account "${acct.name}" is an investment account — set portfolioHolding (e.g. the ticker, or "Cash" for a cash leg) or portfolioHoldingId on this row.`,
-              resolvedAccount: resolvedAccountInfo,
-            });
-            continue;
           }
 
           let catId: number | null = null;
@@ -3906,7 +3922,7 @@ export function registerPgTools(
   // /api/transactions/transfer POST handler — both call into createTransferPair().
   server.tool(
     "record_transfer",
-    "Record a transfer between two of the user's accounts. Creates BOTH legs (debit on source, credit on destination) atomically with a shared link_id so they show up as a paired transfer in the UI. PREFER `from_account_id` / `to_account_id` (exact, no ambiguity) over name; pass at least the name when ids aren't known. When only the names are given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency transfers (pass `receivedAmount` to lock the bank's landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares between brokerage accounts; `amount` may be 0 for pure in-kind moves). BOTH the source and destination holdings MUST already exist in their respective accounts. Investment accounts require a cash holding for the transaction currency — if a destination cash sleeve is missing, call `add_portfolio_holding` first with the transaction currency. For brokerage stock/ETF/crypto buys and sells (cash sleeve ↔ symbol holding inside one brokerage account), prefer `record_trade` — it handles the same-account in-kind dance automatically. SAME-ACCOUNT FOREX (cash sleeve ↔ cash sleeve in different conceptual currencies inside ONE account, e.g. 'Cash - USD' → 'Cash - CAD'): both sleeves inherit the parent account's currency at the schema level, so the conceptual currency lives only in the holding name suffix (`... - XXX` ISO-4217 code). When source and destination resolve to two cash sleeves with divergent suffixes, `receivedAmount` is honored and drives both the destination cash leg's `amount` and the destination `quantity` (cash sleeves track quantity = amount). When the suffixes match (or are missing), `receivedAmount` is ignored as before — pass `destQuantity` explicitly if you need asymmetric in-kind semantics for same-currency cash sleeves.",
+    "Record a transfer between two of the user's accounts. Creates BOTH legs (debit on source, credit on destination) atomically with a shared link_id so they show up as a paired transfer in the UI. PREFER `from_account_id` / `to_account_id` (exact, no ambiguity) over name; pass at least the name when ids aren't known. When only the names are given, exact/alias/startsWith hits route immediately and weak substring fallbacks are REJECTED with a 'did you mean…' error rather than silently routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency transfers (pass `receivedAmount` to lock the bank's landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares between brokerage accounts; `amount` may be 0 for pure in-kind moves). BOTH the source and destination holdings MUST already exist in their respective accounts. Investment accounts require a cash holding for the transaction currency — if a destination cash sleeve is missing, call `add_portfolio_holding` first with the transaction currency. For brokerage stock/ETF/crypto buys and sells use `portfolio_buy` / `portfolio_sell`; to move a holding between two brokerage accounts use `portfolio_transfer`; to fund or withdraw brokerage cash use `portfolio_deposit` / `portfolio_withdrawal`. SAME-ACCOUNT FOREX (cash sleeve ↔ cash sleeve in different conceptual currencies inside ONE account, e.g. 'Cash - USD' → 'Cash - CAD'): both sleeves inherit the parent account's currency at the schema level, so the conceptual currency lives only in the holding name suffix (`... - XXX` ISO-4217 code). When source and destination resolve to two cash sleeves with divergent suffixes, `receivedAmount` is honored and drives both the destination cash leg's `amount` and the destination `quantity` (cash sleeves track quantity = amount). When the suffixes match (or are missing), `receivedAmount` is ignored as before — pass `destQuantity` explicitly if you need asymmetric in-kind semantics for same-currency cash sleeves.",
     {
       fromAccount: z.string().optional().describe("Source account name or alias — fuzzy matched against name, exact on alias. PREFER `from_account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `from_account_id` is not provided."),
       toAccount: z.string().optional().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected. PREFER `to_account_id` when known. Required if `to_account_id` is not provided."),
@@ -4075,284 +4091,405 @@ export function registerPgTools(
     }
   );
 
-  // ── record_trade ───────────────────────────────────────────────────────────
-  // High-level brokerage-trade primitive built on top of record_transfer's
-  // same-account in-kind capability. Models a stock/ETF/crypto buy or sell as
-  // a paired in-kind transfer between the account's cash sleeve and the
-  // symbol holding, so the share count + cost basis flow through the
-  // portfolio aggregator unchanged. Optional fees post as a separate expense
-  // entry on the cash sleeve. Saves the agent from having to assemble the
-  // four-parameter dance (fromAccount=toAccount, holding+destHolding,
-  // quantity+destQuantity, amount=0/cashAmount) by hand.
+  // ── portfolio_* operation tools (canonical portfolio writes) ────────────────
+  // Thin MCP wrappers over src/lib/portfolio/operations.ts — the SAME domain
+  // helpers the web forms + mobile drive through /api/portfolio/operations/*.
+  // They write the canonical lot-aware, sign-correct rows (stock leg +, cash
+  // leg −, sum 0; *_cash_leg / fx_* / brokerage_* kinds) that record_transaction
+  // can't. HTTP transport only — they encrypt payee/note and need an unlocked
+  // DEK (stdio has none). CREATE-ONLY: edits stay on the web/REST path (the
+  // edit-as-replace cascade is NextResponse-coupled). Account resolves by name
+  // (strict fuzzy) OR exact id; holdings the same, scoped to the resolved
+  // account. Domain errors map to friendly tool errors (mirrors mapOperationError).
+  type PortfolioAcctResolve = { ok: true; acct: Row } | { ok: false; error: string };
+  const loadOpAccounts = async (): Promise<Row[]> =>
+    decryptNameish(
+      await q(db, sql`SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`),
+      dek,
+    );
+  const resolveOpAccount = (
+    label: string,
+    name: string | undefined,
+    id: number | undefined,
+    accounts: Row[],
+  ): PortfolioAcctResolve => {
+    const resolveErr = (r: Extract<AccountResolveResult, { ok: false }>): string => {
+      const suggestions = suggestionList(name ?? "", accounts);
+      if (r.reason === "ambiguous") return `Ambiguous ${label}: "${name}" matches ${r.candidates.length} accounts. Did you mean: ${suggestions}? (Pass the id to disambiguate.)`;
+      if (r.reason === "low_confidence") return `${label} "${name}" did not match strongly — closest is "${r.suggestion.name}". Did you mean: ${suggestions}? (Pass the id to disambiguate.)`;
+      return `${label} "${name}" not found. Did you mean: ${suggestions}?`;
+    };
+    if (name != null && id != null) {
+      const r = resolveAccountStrict(name, accounts);
+      if (!r.ok) return { ok: false, error: resolveErr(r) };
+      if (Number(r.account.id) !== id) return { ok: false, error: `${label} mismatch: "${name}" resolved to #${Number(r.account.id)}, but id=${id} was passed. Pass only one, or make them agree.` };
+      return { ok: true, acct: r.account };
+    }
+    if (id != null) {
+      const a = accounts.find((x) => Number(x.id) === id) ?? null;
+      if (!a) return { ok: false, error: `${label} #${id} not found or not owned by you.` };
+      return { ok: true, acct: a };
+    }
+    if (!name) return { ok: false, error: `Pass either ${label} name or id.` };
+    const r = resolveAccountStrict(name, accounts);
+    if (!r.ok) return { ok: false, error: resolveErr(r) };
+    return { ok: true, acct: r.account };
+  };
+  const resolveOpHolding = async (
+    label: string,
+    accountId: number,
+    name: string | undefined,
+    id: number | undefined,
+  ): Promise<{ ok: true; id: number } | { ok: false; error: string }> => {
+    if (name != null) {
+      const r = await resolvePortfolioHoldingByName(db, userId, name, dek, accountId);
+      if (!r.ok) return { ok: false, error: r.error };
+      if (id != null && id !== r.id) return { ok: false, error: `${label} "${name}" resolves to #${r.id}, but id=${id} disagrees. Pass only one, or make them match.` };
+      return { ok: true, id: r.id };
+    }
+    if (id != null) {
+      const owns = await q(db, sql`SELECT 1 AS ok FROM portfolio_holdings WHERE id = ${id} AND user_id = ${userId} AND account_id = ${accountId}`);
+      if (!owns.length) return { ok: false, error: `${label} #${id} not found in the resolved account (or not owned by you).` };
+      return { ok: true, id };
+    }
+    return { ok: false, error: `Pass either ${label} name or id.` };
+  };
+  const mapPortfolioOpError = (e: unknown): string | null => {
+    if (
+      e instanceof CashSleeveNotFoundError ||
+      e instanceof CurrencyMismatchError ||
+      e instanceof HoldingNotFoundError ||
+      e instanceof InvalidLinkPairError
+    ) {
+      return e.message;
+    }
+    // operations.ts also throws plain Errors for guard violations (qty<=0,
+    // same source/dest account, cash-sleeve passed to in-kind, etc.). Surface
+    // the message rather than letting it escape as a 500.
+    if (e instanceof Error && /^record(Buy|Sell|Swap|InKindTransfer|PortfolioIncomeOrExpense|FxConversion|Brokerage)/.test(e.message)) {
+      return e.message;
+    }
+    return null;
+  };
+  const today = () => new Date().toISOString().split("T")[0];
+
   server.tool(
-    "record_trade",
-    "Record a stock/ETF/crypto buy or sell in a brokerage account. Wraps record_transfer with the right same-account in-kind dance so the symbol holding's share count + cost basis flow through the portfolio aggregator. BUY: source=cash sleeve in `currency`, destination=symbol holding (must already exist — call `add_portfolio_holding` first if missing). SELL: mirror — source=symbol holding (must already exist), destination=cash sleeve (must already exist for the trade currency — call `add_portfolio_holding` first if missing). Cross-currency trades require `fxRate` (trade_currency → account_currency); the cash sleeve for the trade currency is auto-managed on first use within record_trade itself. Optional `fees` post as a separate expense transaction on the cash sleeve. PREFER `account_id` over `account` name; weak substring matches on the name path are REJECTED with a 'did you mean…' error rather than silently routing the trade to the wrong account. Use this instead of record_transaction for trades — record_transaction loses the holding-pair link and can't move the share count + cost basis atomically.",
+    "portfolio_buy",
+    "Buy shares/units of a holding in a brokerage account. Writes the canonical buy + buy_cash_leg pair (stock leg positive, cash leg negative, sum 0), opens a cost-basis lot, and debits the cash sleeve for the holding's currency — that sleeve must already exist (add_portfolio_holding a 'Cash' holding for the currency first if missing). Resolve the account by `account` name (strict fuzzy) or exact `account_id`, and the position by `holding` name/ticker or exact `holdingId`. CREATE-ONLY (edit on the web). Replaces the removed record_trade buy path.",
     {
-      account: z.string().optional().describe("Brokerage account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
-      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. If both this and `account` are passed, this wins."),
-      side: z.enum(["buy", "sell"]).describe("'buy' (cash → symbol) or 'sell' (symbol → cash)."),
-      symbol: z.string().min(1).max(50).describe("Ticker symbol of the security being traded (e.g. 'AAPL', 'VEQT.TO', 'BTC'). Used as both the holding name and symbol when auto-creating the position."),
-      quantity: z.number().positive().describe("Share count (always positive — `side` controls the direction)."),
-      price: z.number().positive().describe("Per-share price in `currency` (defaults to account currency)."),
-      currency: z.string().optional().describe("ISO code (USD/CAD/...) of the trade — the cash sleeve and symbol holding both inherit this. Defaults to the account's currency."),
-      fees: z.number().nonnegative().optional().describe("Optional commission/fees in `currency`. Booked as a separate negative-amount cash transaction on the cash sleeve (not part of the trade pair). Defaults to 0."),
-      fxRate: z.number().positive().optional().describe("Trade-currency → account-currency rate for cross-currency trades. REQUIRED when `currency` differs from the account's currency. Ignored when currencies match (rate=1)."),
-      date: ymdDate.optional().describe("Trade/settlement date YYYY-MM-DD (default: today). Applied to both legs and the optional fees row."),
-      note: z.string().optional().describe("Optional note applied to both legs."),
+      account: z.string().optional().describe("Brokerage account name or alias (strict fuzzy). Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      holding: z.string().optional().describe("Holding name or ticker to buy (must already exist in the account). Pass this or holdingId."),
+      holdingId: z.number().int().optional().describe("portfolio_holdings.id of the position (exact)."),
+      qty: z.number().positive().describe("Units acquired (> 0)."),
+      totalCost: z.number().positive().describe("Total cost in the holding's currency (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional().describe("Comma-separated tags."),
+      cashSleeveHoldingId: z.number().int().optional().describe("Explicit cash sleeve to debit; defaults to the (account, holding-currency) sleeve."),
     },
-    async ({ account, account_id, side, symbol, quantity, price, currency, fees, fxRate, date, note }) => {
-      if (!dek) return err("Trades require an active session DEK — log in again to encrypt the rows.");
-
-      const txDate = date ?? new Date().toISOString().split("T")[0];
-      const trimmedSymbol = symbol.trim();
-      if (!trimmedSymbol) return err("symbol cannot be empty");
-
-      const rawAccounts = await q(db, sql`
-        SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
-      `);
-      if (!rawAccounts.length) return err("No accounts found — create accounts first.");
-      const allAccounts = decryptNameish(rawAccounts, dek);
-      // Issue #234 (Phase 2) — name + id mismatch check.
-      if (account != null && account_id != null) {
-        const resolved = resolveAccountStrict(account, allAccounts);
-        if (!resolved.ok) {
-          const suggestions = suggestionList(account, allAccounts);
-          if (resolved.reason === "ambiguous") {
-            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
-          }
-          if (resolved.reason === "low_confidence") {
-            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass only account_id to disambiguate.)`);
-          }
-          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
-        }
-        if (Number(resolved.account.id) !== account_id) {
-          return err(`Account mismatch: "${account}" resolved to id #${Number(resolved.account.id)}, but account_id=${account_id} was passed. Pass only one, or make them agree.`);
-        }
-      }
-      let acct: Row | null = null;
-      if (account_id != null) {
-        acct = allAccounts.find(a => Number(a.id) === account_id) ?? null;
-        if (!acct) return err(`Account #${account_id} not found or not owned by you.`);
-      } else {
-        if (!account) return err("Pass either `account_id` or `account` (name/alias).");
-        const resolved = resolveAccountStrict(account, allAccounts);
-        if (!resolved.ok) {
-          // Issue #211 Bug e: top-N suggestions only.
-          const suggestions = suggestionList(account, allAccounts);
-          if (resolved.reason === "ambiguous") {
-            return err(`Ambiguous: "${account}" matches ${resolved.candidates.length} accounts. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
-          }
-          if (resolved.reason === "low_confidence") {
-            return err(`Account "${account}" did not match strongly — closest is "${resolved.suggestion.name}" but no shared whitespace token. Did you mean: ${suggestions}? (Pass account_id to disambiguate.)`);
-          }
-          return err(`Account "${account}" not found. Did you mean: ${suggestions}?`);
-        }
-        acct = resolved.account;
-      }
-
-      // Trades only make sense in investment accounts. Bail early so the
-      // user gets a pointed error rather than silently writing trade rows
-      // that the portfolio aggregator can't attribute (FK constraint would
-      // also refuse, but the message would be opaque).
-      const isInvestment = await isInvestmentAccountFn(userId, Number(acct.id));
-      if (!isInvestment) {
-        return err(`Account "${acct.name}" is not an investment account — toggle is_investment first or use record_transaction for non-trade entries.`);
-      }
-
-      const acctCurrency = String(acct.currency ?? "CAD").toUpperCase();
-      const tradeCurrency = (currency ?? acctCurrency).toUpperCase();
-      const isCrossCurrency = tradeCurrency !== acctCurrency;
-      let fx = 1;
-      if (isCrossCurrency) {
-        if (fxRate == null) {
-          return err(`Trade currency ${tradeCurrency} differs from account currency ${acctCurrency} — pass fxRate (${tradeCurrency}→${acctCurrency}) so the cost-basis side can be locked.`);
-        }
-        fx = fxRate;
-      }
-
-      const cashAmountTrade = Math.round(quantity * price * 100) / 100; // 2dp in trade currency
-      const cashAmountAcct = Math.round(cashAmountTrade * fx * 100) / 100;
-
-      // Find or create the cash sleeve in this account for tradeCurrency.
-      // Match: holding in (user, account) with currency=tradeCurrency AND
-      // (symbol IS NULL OR symbol = tradeCurrency). Prefer symbol IS NULL
-      // (the account's default cash sleeve when same currency) for
-      // determinism; falls back to the foreign-currency sleeve.
-      const cashName = isCrossCurrency ? `${tradeCurrency} Cash` : "Cash";
-      // Stream D Phase 4 — plaintext name/symbol columns dropped. Match by
-      // currency only (the cash row has symbol_ct NULL or symbol_lookup
-      // matching the currency code via HMAC). Conservative: take any
-      // matching-currency row whose symbol_ct IS NULL OR symbol_lookup
-      // matches the currency lookup hash.
-      const tradeCurrencyLookup = nameLookup(dek, tradeCurrency);
-      const cashCandidates = await q(db, sql`
-        SELECT id, name_ct
-          FROM portfolio_holdings
-         WHERE user_id = ${userId} AND account_id = ${acct.id}
-           AND currency = ${tradeCurrency}
-           AND (symbol_ct IS NULL OR symbol_lookup = ${tradeCurrencyLookup})
-         ORDER BY (symbol_ct IS NULL) DESC, id ASC
-         LIMIT 1
-      `);
-      let cashHoldingId: number;
-      let cashHoldingName: string;
-      if (cashCandidates.length) {
-        cashHoldingId = Number(cashCandidates[0].id);
-        // Stream D Phase 4 — plaintext name dropped; decrypt name_ct only.
-        const ct = cashCandidates[0].name_ct as string | null | undefined;
-        const decrypted = ct ? decryptField(dek, String(ct)) : null;
-        cashHoldingName = decrypted ?? cashName;
-      } else {
-        const cashSymbol = isCrossCurrency ? tradeCurrency : null;
-        const enc = encryptName(dek, cashName);
-        const symEnc = encryptName(dek, cashSymbol);
-        // Stream D Phase 4 — plaintext name/symbol dropped.
-        const ins = await q(db, sql`
-          INSERT INTO portfolio_holdings (
-            user_id, account_id, currency, is_crypto, note,
-            name_ct, name_lookup, symbol_ct, symbol_lookup
-          )
-          VALUES (
-            ${userId}, ${acct.id}, ${tradeCurrency}, 0, 'auto-created for cash sleeve',
-            ${enc.ct}, ${enc.lookup}, ${symEnc.ct}, ${symEnc.lookup}
-          )
-          RETURNING id
-        `);
-        cashHoldingId = Number(ins[0]?.id);
-        cashHoldingName = cashName;
-        // Issue #205 — dual-write holding_accounts pairing. Mirrors the
-        // canonical pattern at register-tools-pg.ts:4190-4201 in
-        // add_portfolio_holding. Without the pairing, every aggregator (issue
-        // #25) silently drops trades against this sleeve. On pairing failure,
-        // DELETE the orphan portfolio_holdings row.
-        try {
-          await q(db, sql`
-            INSERT INTO holding_accounts (holding_id, account_id, user_id, qty, cost_basis, is_primary)
-            VALUES (${cashHoldingId}, ${acct.id}, ${userId}, 0, 0, true)
-            ON CONFLICT (holding_id, account_id) DO NOTHING
-          `);
-        } catch (pairingErr) {
-          await q(db, sql`
-            DELETE FROM portfolio_holdings WHERE id = ${cashHoldingId} AND user_id = ${userId}
-          `);
-          throw pairingErr;
-        }
-      }
-
-      // For BUY: cash sleeve is the source (must exist — done above);
-      //          symbol holding is the destination (createTransferPair
-      //          auto-creates if missing).
-      // For SELL: symbol holding is the source — MUST exist before the
-      //          transfer call. Pre-flight the lookup so the error is
-      //          actionable ("position not found") instead of the
-      //          generic createTransferPair message.
-      if (side === "sell") {
-        const symbolHolding = await resolvePortfolioHoldingByName(db, userId, trimmedSymbol, dek, Number(acct.id));
-        if (!symbolHolding.ok) return err(`Cannot sell "${trimmedSymbol}" in "${acct.name}" — no existing position. ${symbolHolding.error}`);
-      }
-
-      const tradePayee = `${side === "buy" ? "Buy" : "Sell"} ${quantity} ${trimmedSymbol} @ ${price.toFixed(2)} ${tradeCurrency}`;
-      const sourceHolding = side === "buy" ? cashHoldingName : trimmedSymbol;
-      const destHolding = side === "buy" ? trimmedSymbol : cashHoldingName;
-      const sourceQty = side === "buy" ? cashAmountTrade : quantity;
-      const destQty = side === "buy" ? quantity : cashAmountTrade;
-
-      let transferResult: Awaited<ReturnType<typeof createTransferPair>>;
+    async ({ account, account_id, holding, holdingId, qty, totalCost, date, payee, note, tags, cashSleeveHoldingId }) => {
+      if (!dek) return err("portfolio_buy requires an active session DEK — log in again to encrypt the rows.");
+      const accounts = await loadOpAccounts();
+      const a = resolveOpAccount("account", account, account_id, accounts);
+      if (!a.ok) return err(a.error);
+      const h = await resolveOpHolding("holding", Number(a.acct.id), holding, holdingId);
+      if (!h.ok) return err(h.error);
+      const txDate = date ?? today();
       try {
-        transferResult = await createTransferPair({
-          userId,
-          dek,
-          fromAccountId: Number(acct.id),
-          toAccountId: Number(acct.id),
-          enteredAmount: cashAmountAcct,
-          date: txDate,
-          holdingName: sourceHolding,
-          destHoldingName: destHolding,
-          quantity: sourceQty,
-          destQuantity: destQty,
-          note: note ?? tradePayee,
-          tags: "source:record_trade",
-          // Issue #28: MCP HTTP transport.
-          txSource: "mcp_http",
-        });
+        const result = await recordBuy({ userId, dek, accountId: Number(a.acct.id), holdingId: h.id, qty, totalCost, date: txDate, payee, note, tags, cashSleeveHoldingId, source: "mcp_http" });
+        invalidateUserTxCache(userId);
+        await markSnapshotsDirty(userId, txDate);
+        return text({ success: true, data: { ...result, resolvedAccount: { id: Number(a.acct.id), name: String(a.acct.name ?? "") }, message: `Bought ${qty} × holding #${h.id} for ${totalCost} on ${txDate} in ${a.acct.name}.` } });
       } catch (e) {
-        // record_trade always supplies sourceHolding + destHolding, so the
-        // strict-mode guard shouldn't fire here. Defensive catch in case a
-        // future refactor removes one of those — surface the same friendly
-        // tool error rather than letting the throw escape as a 500.
-        if (e instanceof InvestmentHoldingRequiredError) return err(e.message);
+        const m = mapPortfolioOpError(e);
+        if (m) return err(m);
         throw e;
       }
-      if (!transferResult.ok) return err(transferResult.message);
+    }
+  );
 
-      // Optional fees: a single negative-amount transaction on the cash
-      // sleeve. Same currency as the trade; converted to account currency
-      // via the same fx rate. Plain expense (no transfer link), categorized
-      // by the user's existing rule engine on next read. Tagged so it can be
-      // tied back to the trade pair if needed.
-      let feeTxId: number | null = null;
-      // Issue #208 — round fee amounts via the helper (currency-aware).
-      // `tradeCurrency` is the trade's own ccy; `acctCurrency` is the account ccy.
-      const feeAmountTrade = fees != null && fees > 0 ? roundMoney(fees, tradeCurrency) : 0;
-      if (feeAmountTrade > 0) {
-        const feeAmountAcct = roundMoney(feeAmountTrade * fx, acctCurrency);
-        const feePayee = `Trade fee — ${trimmedSymbol}`;
-        const encPayee = encryptField(dek, feePayee);
-        const encNote = encryptField(dek, "");
-        const encTags = encryptField(dek, `source:record_trade,trade-link:${transferResult.linkId}`);
-        // Issue #28: stamp source explicitly. Fee leg shares the trade's
-        // surface attribution.
-        // FINLYNQ-108 — route the fee leg through the shared `createTransaction`
-        // helper (same path REST + record_transaction use). Single uncategorized
-        // (`category_id = NULL`) expense row on the cash sleeve; identical to the
-        // prior raw INSERT (encrypted payee/note/tags, rounded amounts,
-        // `source='mcp_http'`). The HTTP MCP `db` IS `@/db`.
-        const feeIns = await createTransaction(
-          userId,
-          {
-            date: txDate,
-            accountId: Number(acct.id),
-            categoryId: null,
-            currency: acctCurrency,
-            amount: -feeAmountAcct,
-            enteredCurrency: tradeCurrency,
-            enteredAmount: -feeAmountTrade,
-            enteredFxRate: fx,
-            payee: encPayee,
-            note: encNote,
-            tags: encTags,
-            portfolioHoldingId: cashHoldingId,
-            quantity: null,
-            source: "mcp_http",
-          },
-          dek,
-        );
-        feeTxId = Number(feeIns?.id ?? 0) || null;
+  server.tool(
+    "portfolio_sell",
+    "Sell shares/units of a holding in a brokerage account. Writes sell + sell_cash_leg (stock leg negative, cash leg positive, sum 0), closes cost-basis lots, and credits the cash sleeve. `lotSelection.method` is FIFO (default), HIFO, or SPECIFIC (SPECIFIC needs lotIds or per-lot lots[]). CREATE-ONLY. Replaces the removed record_trade sell path.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      holding: z.string().optional().describe("Holding name or ticker to sell (must already exist). Pass this or holdingId."),
+      holdingId: z.number().int().optional().describe("portfolio_holdings.id of the position (exact)."),
+      qty: z.number().positive().describe("Units sold (> 0)."),
+      totalProceeds: z.number().positive().describe("Total proceeds in the holding's currency (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      lotSelection: z
+        .object({
+          method: z.enum(["FIFO", "HIFO", "SPECIFIC"]),
+          lotIds: z.array(z.number().int().positive()).optional(),
+          lots: z.array(z.object({ lotId: z.number().int().positive(), qty: z.number().positive() })).optional(),
+        })
+        .optional()
+        .describe("Lot disposal strategy (default FIFO). SPECIFIC requires lotIds or per-lot lots."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+      cashSleeveHoldingId: z.number().int().optional().describe("Explicit cash sleeve to credit; defaults to the (account, holding-currency) sleeve."),
+    },
+    async ({ account, account_id, holding, holdingId, qty, totalProceeds, date, lotSelection, payee, note, tags, cashSleeveHoldingId }) => {
+      if (!dek) return err("portfolio_sell requires an active session DEK — log in again to encrypt the rows.");
+      const accounts = await loadOpAccounts();
+      const a = resolveOpAccount("account", account, account_id, accounts);
+      if (!a.ok) return err(a.error);
+      const h = await resolveOpHolding("holding", Number(a.acct.id), holding, holdingId);
+      if (!h.ok) return err(h.error);
+      const txDate = date ?? today();
+      try {
+        const result = await recordSell({ userId, dek, accountId: Number(a.acct.id), holdingId: h.id, qty, totalProceeds, date: txDate, lotSelection, payee, note, tags, cashSleeveHoldingId, source: "mcp_http" });
+        invalidateUserTxCache(userId);
+        await markSnapshotsDirty(userId, txDate);
+        return text({ success: true, data: { ...result, resolvedAccount: { id: Number(a.acct.id), name: String(a.acct.name ?? "") }, message: `Sold ${qty} × holding #${h.id} for ${totalProceeds} on ${txDate} in ${a.acct.name}.` } });
+      } catch (e) {
+        const m = mapPortfolioOpError(e);
+        if (m) return err(m);
+        throw e;
       }
+    }
+  );
 
-      invalidateUserTxCache(userId);
-      // Snapshot history is stale from this trade date forward — auto-rebuild.
-      await markSnapshotsDirty(userId, txDate);
-      return text({
-        success: true,
-        data: {
-          side,
-          symbol: trimmedSymbol,
-          linkId: transferResult.linkId,
-          fromTransactionId: transferResult.fromTransactionId,
-          toTransactionId: transferResult.toTransactionId,
-          cashHoldingId,
-          symbolHoldingId: side === "buy" ? transferResult.holding?.toHoldingId : transferResult.holding?.fromHoldingId,
-          cashAmount: cashAmountTrade,
-          cashAmountAccountCurrency: cashAmountAcct,
-          tradeCurrency,
-          accountCurrency: acctCurrency,
-          fxRate: fx,
-          resolvedAccount: { id: Number(acct.id), name: String(acct.name ?? "") },
-          ...(feeTxId != null ? { feeTransactionId: feeTxId, fees: feeAmountTrade } : {}),
-          message: `${tradePayee} in ${acct.name}${isCrossCurrency ? ` (${cashAmountAcct} ${acctCurrency} @ rate ${fx.toFixed(6)})` : ""}${feeAmountTrade > 0 ? ` · fees ${feeAmountTrade} ${tradeCurrency}` : ""}`,
-        },
-      });
+  server.tool(
+    "portfolio_swap",
+    "Exchange one holding for another inside a SINGLE brokerage account in one atomic operation (an internal sell of the source + buy of the destination, sharing a swap_link_id). Both holdings must already exist in the account. CREATE-ONLY.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      sourceHolding: z.string().optional().describe("Holding being sold (name/ticker). Pass this or sourceHoldingId."),
+      sourceHoldingId: z.number().int().optional().describe("portfolio_holdings.id of the holding being sold."),
+      sourceQty: z.number().positive().describe("Units of the source holding disposed (> 0)."),
+      sourceProceeds: z.number().positive().describe("Proceeds realised from the source (> 0), in account/holding currency."),
+      destHolding: z.string().optional().describe("Holding being acquired (name/ticker). Pass this or destHoldingId."),
+      destHoldingId: z.number().int().optional().describe("portfolio_holdings.id of the holding being acquired."),
+      destQty: z.number().positive().describe("Units of the destination holding acquired (> 0)."),
+      destCost: z.number().positive().describe("Cost allocated to the destination (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+    },
+    async ({ account, account_id, sourceHolding, sourceHoldingId, sourceQty, sourceProceeds, destHolding, destHoldingId, destQty, destCost, date, payee, note }) => {
+      if (!dek) return err("portfolio_swap requires an active session DEK — log in again to encrypt the rows.");
+      const accounts = await loadOpAccounts();
+      const a = resolveOpAccount("account", account, account_id, accounts);
+      if (!a.ok) return err(a.error);
+      const src = await resolveOpHolding("sourceHolding", Number(a.acct.id), sourceHolding, sourceHoldingId);
+      if (!src.ok) return err(src.error);
+      const dst = await resolveOpHolding("destHolding", Number(a.acct.id), destHolding, destHoldingId);
+      if (!dst.ok) return err(dst.error);
+      const txDate = date ?? today();
+      try {
+        const result = await recordSwap({ userId, dek, accountId: Number(a.acct.id), sourceHoldingId: src.id, sourceQty, sourceProceeds, destHoldingId: dst.id, destQty, destCost, date: txDate, payee, note, source: "mcp_http" });
+        invalidateUserTxCache(userId);
+        await markSnapshotsDirty(userId, txDate);
+        return text({ success: true, data: { ...result, resolvedAccount: { id: Number(a.acct.id), name: String(a.acct.name ?? "") }, message: `Swapped ${sourceQty} × #${src.id} → ${destQty} × #${dst.id} on ${txDate} in ${a.acct.name}.` } });
+      } catch (e) {
+        const m = mapPortfolioOpError(e);
+        if (m) return err(m);
+        throw e;
+      }
+    }
+  );
+
+  server.tool(
+    "portfolio_transfer",
+    "Move shares/units of the SAME holding between two different brokerage accounts (in-kind, no cash). Cascades cost basis from source to destination. The holding is resolved in the SOURCE account; source and destination accounts must differ. CREATE-ONLY.",
+    {
+      sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
+      sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
+      destAccount: z.string().optional().describe("Destination brokerage account name or alias. Pass this or destAccount_id."),
+      destAccount_id: z.number().int().optional().describe("Destination account id (exact; wins over name)."),
+      holding: z.string().optional().describe("Holding to move (name/ticker), resolved in the source account. Pass this or holdingId."),
+      holdingId: z.number().int().optional().describe("portfolio_holdings.id of the holding (in the source account)."),
+      qty: z.number().positive().describe("Units leaving source / arriving at destination (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+    },
+    async ({ sourceAccount, sourceAccount_id, destAccount, destAccount_id, holding, holdingId, qty, date, payee, note }) => {
+      if (!dek) return err("portfolio_transfer requires an active session DEK — log in again to encrypt the rows.");
+      const accounts = await loadOpAccounts();
+      const src = resolveOpAccount("sourceAccount", sourceAccount, sourceAccount_id, accounts);
+      if (!src.ok) return err(src.error);
+      const dst = resolveOpAccount("destAccount", destAccount, destAccount_id, accounts);
+      if (!dst.ok) return err(dst.error);
+      const h = await resolveOpHolding("holding", Number(src.acct.id), holding, holdingId);
+      if (!h.ok) return err(h.error);
+      const txDate = date ?? today();
+      try {
+        const result = await recordInKindTransfer({ userId, dek, sourceAccountId: Number(src.acct.id), destAccountId: Number(dst.acct.id), holdingId: h.id, qty, date: txDate, payee, note, source: "mcp_http" });
+        invalidateUserTxCache(userId);
+        await markSnapshotsDirty(userId, txDate);
+        return text({ success: true, data: { ...result, resolvedSourceAccount: { id: Number(src.acct.id), name: String(src.acct.name ?? "") }, resolvedDestAccount: { id: Number(dst.acct.id), name: String(dst.acct.name ?? "") }, message: `Transferred ${qty} × holding #${h.id} from ${src.acct.name} to ${dst.acct.name} on ${txDate}.` } });
+      } catch (e) {
+        const m = mapPortfolioOpError(e);
+        if (m) return err(m);
+        throw e;
+      }
+    }
+  );
+
+  server.tool(
+    "portfolio_income_expense",
+    "Record portfolio income (dividend/interest, amount > 0) or an expense (fee, amount < 0) on a brokerage cash sleeve. The cash sleeve for `currency` must already exist. `incomeType` resolves the canonical category (Dividends/Interest/Fees) when no explicit categoryId is given and the sign matches. Optionally tie the row to the holding that earned it via relatedHolding/relatedHoldingId. CREATE-ONLY.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      currency: supportedCurrencyEnum.describe("Currency of the cash sleeve to credit/debit (ISO code)."),
+      amount: z.number().refine((v) => v !== 0, { message: "amount cannot be 0" }).describe("Positive = income (dividend/interest), negative = expense (fee)."),
+      incomeType: z.enum(["dividend", "interest", "fee", "other"]).optional().describe("Category hint. dividend/interest apply to income (amount>0); fee to expense (amount<0); other leaves the category unset. Ignored when categoryId is given."),
+      relatedHolding: z.string().optional().describe("Holding (name/ticker) this income/expense relates to, for reporting. Pass this or relatedHoldingId."),
+      relatedHoldingId: z.number().int().optional().describe("portfolio_holdings.id this relates to."),
+      categoryId: z.number().int().optional().describe("Explicit category id (overrides incomeType)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async ({ account, account_id, currency, amount, incomeType, relatedHolding, relatedHoldingId, categoryId, date, payee, note, tags }) => {
+      if (!dek) return err("portfolio_income_expense requires an active session DEK — log in again to encrypt the rows.");
+      const accounts = await loadOpAccounts();
+      const a = resolveOpAccount("account", account, account_id, accounts);
+      if (!a.ok) return err(a.error);
+      let relatedId: number | null = null;
+      if (relatedHolding != null || relatedHoldingId != null) {
+        const rh = await resolveOpHolding("relatedHolding", Number(a.acct.id), relatedHolding, relatedHoldingId);
+        if (!rh.ok) return err(rh.error);
+        relatedId = rh.id;
+      }
+      // Category precedence mirrors the REST route: explicit categoryId wins;
+      // else map the income type to its canonical category when the sign agrees.
+      let resolvedCategoryId: number | null = categoryId ?? null;
+      if (resolvedCategoryId == null && incomeType && incomeType !== "other") {
+        const wantIncome = incomeType === "dividend" || incomeType === "interest";
+        if ((wantIncome && amount > 0) || (incomeType === "fee" && amount < 0)) {
+          resolvedCategoryId = await resolveOrCreateInvestmentIncomeCategory(db, userId, dek, incomeType);
+        }
+      }
+      const txDate = date ?? today();
+      try {
+        const result = await recordPortfolioIncomeOrExpense({ userId, dek, accountId: Number(a.acct.id), currency, amount, relatedHoldingId: relatedId, categoryId: resolvedCategoryId, date: txDate, payee, note, tags, source: "mcp_http" });
+        invalidateUserTxCache(userId);
+        await markSnapshotsDirty(userId, txDate);
+        return text({ success: true, data: { ...result, resolvedAccount: { id: Number(a.acct.id), name: String(a.acct.name ?? "") }, message: `Recorded ${result.kind} ${amount} ${currency} on ${txDate} in ${a.acct.name}.` } });
+      } catch (e) {
+        const m = mapPortfolioOpError(e);
+        if (m) return err(m);
+        throw e;
+      }
+    }
+  );
+
+  server.tool(
+    "portfolio_fx_conversion",
+    "Convert cash from one currency to another inside a SINGLE brokerage account (e.g. USD sleeve → CAD sleeve). Writes fx_from + fx_to (+ optional fx_fee). Both currency sleeves (and the fee sleeve, if any) must already exist. CREATE-ONLY.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      fromCurrency: supportedCurrencyEnum.describe("Currency debited (source sleeve)."),
+      fromAmount: z.number().positive().describe("Amount debited from the source sleeve (> 0)."),
+      toCurrency: supportedCurrencyEnum.describe("Currency credited (destination sleeve)."),
+      toAmount: z.number().positive().describe("Amount credited to the destination sleeve (> 0)."),
+      feeAmount: z.number().positive().optional().describe("Optional conversion fee (> 0)."),
+      feeCurrency: supportedCurrencyEnum.optional().describe("Currency of the fee."),
+      feeOnSleeveCurrency: supportedCurrencyEnum.optional().describe("Which sleeve currency absorbs the fee (defaults to feeCurrency)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+    },
+    async ({ account, account_id, fromCurrency, fromAmount, toCurrency, toAmount, feeAmount, feeCurrency, feeOnSleeveCurrency, date, payee, note }) => {
+      if (!dek) return err("portfolio_fx_conversion requires an active session DEK — log in again to encrypt the rows.");
+      const accounts = await loadOpAccounts();
+      const a = resolveOpAccount("account", account, account_id, accounts);
+      if (!a.ok) return err(a.error);
+      const txDate = date ?? today();
+      try {
+        const result = await recordFxConversion({ userId, dek, accountId: Number(a.acct.id), fromCurrency, fromAmount, toCurrency, toAmount, feeAmount, feeCurrency, feeOnSleeveCurrency, date: txDate, payee, note, source: "mcp_http" });
+        invalidateUserTxCache(userId);
+        await markSnapshotsDirty(userId, txDate);
+        return text({ success: true, data: { ...result, resolvedAccount: { id: Number(a.acct.id), name: String(a.acct.name ?? "") }, message: `Converted ${fromAmount} ${fromCurrency} → ${toAmount} ${toCurrency} on ${txDate} in ${a.acct.name}.` } });
+      } catch (e) {
+        const m = mapPortfolioOpError(e);
+        if (m) return err(m);
+        throw e;
+      }
+    }
+  );
+
+  server.tool(
+    "portfolio_deposit",
+    "Fund a brokerage cash sleeve from a non-investment (bank/chequing) account. Writes a brokerage_deposit_out / brokerage_deposit_in pair linked by link_id. The destination cash sleeve must already exist (or pass destCashSleeveHoldingId). CREATE-ONLY.",
+    {
+      sourceAccount: z.string().optional().describe("Source (non-investment) account name or alias. Pass this or sourceAccount_id."),
+      sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
+      destAccount: z.string().optional().describe("Destination brokerage account name or alias. Pass this or destAccount_id."),
+      destAccount_id: z.number().int().optional().describe("Destination brokerage account id (exact; wins over name)."),
+      destCashSleeveHoldingId: z.number().int().optional().describe("Explicit destination cash sleeve; defaults to the brokerage's cash sleeve for the amount currency."),
+      amount: z.number().positive().describe("Amount transferred (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async ({ sourceAccount, sourceAccount_id, destAccount, destAccount_id, destCashSleeveHoldingId, amount, date, payee, note, tags }) => {
+      if (!dek) return err("portfolio_deposit requires an active session DEK — log in again to encrypt the rows.");
+      const accounts = await loadOpAccounts();
+      const src = resolveOpAccount("sourceAccount", sourceAccount, sourceAccount_id, accounts);
+      if (!src.ok) return err(src.error);
+      const dst = resolveOpAccount("destAccount", destAccount, destAccount_id, accounts);
+      if (!dst.ok) return err(dst.error);
+      const txDate = date ?? today();
+      try {
+        const result = await recordBrokerageDeposit({ userId, dek, sourceAccountId: Number(src.acct.id), destAccountId: Number(dst.acct.id), destCashSleeveHoldingId, amount, date: txDate, payee, note, tags, source: "mcp_http" });
+        invalidateUserTxCache(userId);
+        await markSnapshotsDirty(userId, txDate);
+        return text({ success: true, data: { ...result, resolvedSourceAccount: { id: Number(src.acct.id), name: String(src.acct.name ?? "") }, resolvedDestAccount: { id: Number(dst.acct.id), name: String(dst.acct.name ?? "") }, message: `Deposited ${amount} from ${src.acct.name} into ${dst.acct.name} on ${txDate}.` } });
+      } catch (e) {
+        const m = mapPortfolioOpError(e);
+        if (m) return err(m);
+        throw e;
+      }
+    }
+  );
+
+  server.tool(
+    "portfolio_withdrawal",
+    "Withdraw cash from a brokerage cash sleeve to a non-investment (bank/chequing) account. Writes a brokerage_withdrawal_out / brokerage_withdrawal_in pair linked by link_id. The source cash sleeve must already exist (or pass sourceCashSleeveHoldingId). CREATE-ONLY.",
+    {
+      sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
+      sourceAccount_id: z.number().int().optional().describe("Source brokerage account id (exact; wins over name)."),
+      sourceCashSleeveHoldingId: z.number().int().optional().describe("Explicit source cash sleeve; defaults to the brokerage's cash sleeve for the amount currency."),
+      destAccount: z.string().optional().describe("Destination (non-investment) account name or alias. Pass this or destAccount_id."),
+      destAccount_id: z.number().int().optional().describe("Destination account id (exact; wins over name)."),
+      amount: z.number().positive().describe("Amount withdrawn (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async ({ sourceAccount, sourceAccount_id, sourceCashSleeveHoldingId, destAccount, destAccount_id, amount, date, payee, note, tags }) => {
+      if (!dek) return err("portfolio_withdrawal requires an active session DEK — log in again to encrypt the rows.");
+      const accounts = await loadOpAccounts();
+      const src = resolveOpAccount("sourceAccount", sourceAccount, sourceAccount_id, accounts);
+      if (!src.ok) return err(src.error);
+      const dst = resolveOpAccount("destAccount", destAccount, destAccount_id, accounts);
+      if (!dst.ok) return err(dst.error);
+      const txDate = date ?? today();
+      try {
+        const result = await recordBrokerageWithdrawal({ userId, dek, sourceAccountId: Number(src.acct.id), destAccountId: Number(dst.acct.id), sourceCashSleeveHoldingId, amount, date: txDate, payee, note, tags, source: "mcp_http" });
+        invalidateUserTxCache(userId);
+        await markSnapshotsDirty(userId, txDate);
+        return text({ success: true, data: { ...result, resolvedSourceAccount: { id: Number(src.acct.id), name: String(src.acct.name ?? "") }, resolvedDestAccount: { id: Number(dst.acct.id), name: String(dst.acct.name ?? "") }, message: `Withdrew ${amount} from ${src.acct.name} to ${dst.acct.name} on ${txDate}.` } });
+      } catch (e) {
+        const m = mapPortfolioOpError(e);
+        if (m) return err(m);
+        throw e;
+      }
     }
   );
 
@@ -5282,7 +5419,14 @@ export function registerPgTools(
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark' (SP500|TSX|MSCI_WORLD|BONDS_CA).",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
           record_transfer: "record_transfer(from_account_id? OR fromAccount, to_account_id? OR toAccount, amount, ...) — Atomic transfer pair between two accounts. PREFER from_account_id/to_account_id (exact); the name path is strict fuzzy with fail-loud ambiguity. Mismatched name+id pairs fail loud. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity. Same-account forex (cash-sleeve ↔ cash-sleeve in different conceptual currencies inside one account, e.g. 'Cash - USD' → 'Cash - CAD'): receivedAmount is honored when both holding names carry divergent ISO-4217 suffixes — pass receivedAmount and the destination quantity is derived from it (cash sleeves track quantity = amount).",
-          record_trade: "record_trade(account_id? OR account, side, symbol, quantity, price, currency?, fees?, fxRate?) — Brokerage buy/sell. PREFER account_id (exact); the account name path is strict fuzzy with fail-loud ambiguity, mismatched name+id fails loud. Wraps record_transfer with the cash-sleeve↔symbol-holding in-kind pair so the share count and cost basis flow through the portfolio aggregator. Cross-currency requires fxRate. Use this instead of record_transaction for trades.",
+          portfolio_buy: "portfolio_buy(account_id? OR account, holdingId? OR holding, qty, totalCost, date?, payee?, note?, tags?) — Buy shares in a brokerage account. Writes the canonical buy + buy_cash_leg pair (stock leg +, cash leg −, sum 0), opens a cost-basis lot, debits the cash sleeve. The cash sleeve for the holding's currency must already exist (add_portfolio_holding a 'Cash' holding first). Replaces the removed record_trade buy path.",
+          portfolio_sell: "portfolio_sell(account_id? OR account, holdingId? OR holding, qty, totalProceeds, date?, lotSelection?, payee?, note?, tags?) — Sell shares. Writes sell + sell_cash_leg, closes lots (lotSelection.method FIFO|HIFO|SPECIFIC, default FIFO), credits the cash sleeve. Replaces the removed record_trade sell path.",
+          portfolio_swap: "portfolio_swap(account_id? OR account, sourceHolding(Id), sourceQty, sourceProceeds, destHolding(Id), destQty, destCost, date?, ...) — Exchange one holding for another inside one account in a single atomic op (sell + buy sharing a swap_link_id).",
+          portfolio_transfer: "portfolio_transfer(sourceAccount(_id), destAccount(_id), holding(Id), qty, date?, ...) — In-kind move of the SAME holding between two brokerage accounts (no cash). Cascades cost basis source→dest.",
+          portfolio_income_expense: "portfolio_income_expense(account_id? OR account, currency, amount, incomeType?(dividend|interest|fee|other), relatedHolding(Id)?, categoryId?, date?, ...) — Dividend/interest (amount>0) or fee (amount<0) on a cash sleeve. incomeType resolves the canonical category when no categoryId is given.",
+          portfolio_fx_conversion: "portfolio_fx_conversion(account_id? OR account, fromCurrency, fromAmount, toCurrency, toAmount, feeAmount?, feeCurrency?, date?, ...) — Convert cash between two currency sleeves inside one account (fx_from/fx_to[/fx_fee]).",
+          portfolio_deposit: "portfolio_deposit(sourceAccount(_id) [non-investment], destAccount(_id) [brokerage], amount, date?, ...) — Fund a brokerage cash sleeve from a bank account (link_id pair).",
+          portfolio_withdrawal: "portfolio_withdrawal(sourceAccount(_id) [brokerage], destAccount(_id) [non-investment], amount, date?, ...) — Withdraw cash from a brokerage to a bank account (link_id pair).",
           preview_bulk_update: "preview_bulk_update(filter, changes) — accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker → id), tags ({mode: append|replace|remove, value}). Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. Stdio surface is narrower (no quantity/holding fields).",
           execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Same `changes` keys as preview_bulk_update. Stdio: category-by-name only; quantity/holding writes refused.",
           get_financial_health_score: "get_financial_health_score(reportingCurrency?) — Score 0-100 with 5 components (Savings Rate, Debt-to-Income, Emergency Fund, Net Worth Trend, Budget Adherence). Issue #235: final score is summed un-rounded then rounded once at the end (no off-by-one). DTI uses trailing-12m debt payments / trailing-12m income (not 3m × 4). Liquid assets EXCLUDE illiquid asset accounts (uses is_investment + cash-group whitelist; real estate / vehicles / locked-in retirement no longer slip through). Net Worth Trend is a real 3M delta returning {direction, magnitudePct, descriptor}. Components with no data (no budgets, insufficient history) are EXCLUDED from the weighted average and surfaced in `excludedComponents` — remaining weights renormalize to 1.0.",
@@ -5299,8 +5443,9 @@ export function registerPgTools(
           read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_loans", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast", "preview_delete_category"],
           write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
-          trade_tools: ["record_transfer", "record_trade"],
-          tip: "Use tool_name='record_transaction' for detailed usage of any tool. For brokerage buys/sells prefer record_trade; record_transfer is the manual fallback for non-trade in-kind moves (e.g. forex sleeve, ACATS).",
+          portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
+          trade_tools: ["record_transfer"],
+          tip: "Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts.",
         });
       }
 
@@ -5346,19 +5491,22 @@ export function registerPgTools(
             { task: "Analyze investments", call: "get_portfolio_analysis()" },
             { task: "Rebalance vs targets", call: 'get_investment_insights(mode="rebalancing", targets=[{holding:"VEQT", target_pct:60}])' },
             { task: "Net worth trend", call: "get_net_worth(months=12)" },
-            { task: "Buy 10 AAPL @ $150 USD in a USD brokerage", call: 'record_trade(account="Questrade USD", side="buy", symbol="AAPL", quantity=10, price=150)' },
-            { task: "Sell 5 AAPL @ $160 USD with $4.95 commission", call: 'record_trade(account="Questrade USD", side="sell", symbol="AAPL", quantity=5, price=160, fees=4.95)' },
-            { task: "Cross-currency buy: 10 AAPL @ $150 USD in a CAD account", call: 'record_trade(account="Questrade CAD", side="buy", symbol="AAPL", quantity=10, price=150, currency="USD", fxRate=1.37)' },
+            { task: "Buy 10 AAPL for $1500 in a USD brokerage", call: 'portfolio_buy(account="Questrade USD", holding="AAPL", qty=10, totalCost=1500)' },
+            { task: "Sell 5 AAPL for $800 (FIFO)", call: 'portfolio_sell(account="Questrade USD", holding="AAPL", qty=5, totalProceeds=800)' },
+            { task: "Record a $42 dividend", call: 'portfolio_income_expense(account="Questrade USD", currency="USD", amount=42, incomeType="dividend")' },
+            { task: "Fund a brokerage from chequing", call: 'portfolio_deposit(sourceAccount="RBC Chequing", destAccount="Questrade USD", amount=2000)' },
           ],
         });
       }
 
       if (t === "portfolio") {
         return dataResponse({
-          tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
+          read_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
+          write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
           modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
+          note_on_writes: "Investment activity MUST go through the portfolio_* write tools (record_transaction / bulk_record_transactions reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — add_portfolio_holding a 'Cash' holding for that currency first if missing.",
           disclaimer: PORTFOLIO_DISCLAIMER,
-          note: "All portfolio tools return a disclaimer field. Not financial advice.",
+          note: "All portfolio read tools return a disclaimer field. Not financial advice.",
         });
       }
 

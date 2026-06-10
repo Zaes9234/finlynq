@@ -844,7 +844,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       // Investment-account constraint: stdio MCP record_transaction has no
       // portfolio-holding parameter, so it can't satisfy the FK requirement.
       if (acct.is_investment) {
-        return sqliteErr(`Account #${account_id} is an investment account — record_transaction over stdio MCP can't bind to a portfolio holding. Use the HTTP MCP at /mcp (record_transaction has portfolioHolding/portfolioHoldingId there) or the web app to record transactions in this account.`);
+        return sqliteErr(`Account #${account_id} is an investment account — record_transaction can't write to it (over any transport). Use the HTTP MCP at /mcp (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) or the web app to record investment activity.`);
       }
 
       let catId: number | null = null;
@@ -1137,7 +1137,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
   // inner prepare() calls each acquire their own pool client.
   server.tool(
     "record_transfer",
-    "Record a transfer between two of the user's accounts. Stream D Phase 4 (stdio): pass `from_account_id` and `to_account_id` (numeric) — the `fromAccount`/`toAccount`/`holding`/`destHolding` name fields are refused because stdio cannot resolve names. Use `record_trade` only on HTTP MCP. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount.",
+    "Record a transfer between two of the user's accounts. Stream D Phase 4 (stdio): pass `from_account_id` and `to_account_id` (numeric) — the `fromAccount`/`toAccount`/`holding`/`destHolding` name fields are refused because stdio cannot resolve names. For investment buys/sells/transfers use the portfolio_* tools on HTTP MCP. Auto-creates a Transfer category (type='R') if missing. For cross-currency transfers pass `receivedAmount` to lock the bank's landed amount.",
     {
       fromAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `from_account_id` instead."),
       toAccount: z.string().optional().describe("REFUSED on stdio (Stream D Phase 4). Pass `to_account_id` instead."),
@@ -1217,30 +1217,6 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         },
       });
     }
-  );
-
-  // ── record_trade ───────────────────────────────────────────────────────────
-  // Mirror of the HTTP MCP tool. Stdio writes are plaintext (no DEK in this
-  // transport — see CLAUDE.md "Stdio MCP writes are plaintext"), so the cash
-  // sleeve / symbol holding insert paths skip the *_ct columns and rely on
-  // the next-login Stream D backfill to fill them in.
-  server.tool(
-    "record_trade",
-    "Record a stock/ETF/crypto buy or sell. Stream D Phase 4: refused entirely on stdio. The cash-sleeve auto-create path INSERTs plaintext name+symbol (Phase-4 dropped) and the symbol pre-flight does LOWER(name)/LOWER(symbol). Use HTTP MCP at /mcp or the web UI.",
-    {
-      account: z.string().optional(),
-      account_id: z.number().int().optional(),
-      side: z.enum(["buy", "sell"]),
-      symbol: z.string().min(1).max(50),
-      quantity: z.number().positive(),
-      price: z.number().positive(),
-      currency: z.string().optional(),
-      fees: z.number().nonnegative().optional(),
-      fxRate: z.number().positive().optional(),
-      date: ymdDate.optional(),
-      note: z.string().optional(),
-    },
-    async () => streamDRefuseRead("record_trade", "portfolio_holdings"),
   );
 
   // ── update_transfer ────────────────────────────────────────────────────────
@@ -1871,7 +1847,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark'",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
           record_transfer: "record_transfer(from_account_id, to_account_id, amount, ...) — Atomic transfer pair. Stdio requires numeric ids; HTTP MCP also accepts fromAccount/toAccount (strict fuzzy fail-loud ambiguity per issue #234). In-kind: holding+quantity.",
-          record_trade: "record_trade(account_id, side, symbol, quantity, price, currency?, fees?, fxRate?) — Refused on stdio post Stream D Phase 4 (no DEK to resolve symbol → holding). HTTP MCP only.",
+          portfolio_buy: "portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion — HTTP MCP only (need an unlocked DEK; unavailable on stdio). Canonical investment writes; record_transaction rejects investment accounts.",
           preview_bulk_update: "preview_bulk_update(filter, changes) — stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. (HTTP transport adds quantity, portfolioHoldingId, portfolioHolding.)",
           execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Stdio: category-by-name only (HTTP supports quantity/holding writes too).",
         };
@@ -1884,8 +1860,8 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_net_worth", "get_categories", "get_loans", "get_goals", "get_recurring_transactions", "get_income_statement", "get_spotlight_items", "get_weekly_recap", "get_transaction_rules"],
         write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
         portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
-        trade_tools: ["record_transfer", "record_trade"],
-        tip: "Use tool_name='record_transaction' for usage details. For brokerage buys/sells prefer record_trade; record_transfer is the manual fallback for non-trade in-kind moves (e.g. forex sleeve, ACATS).",
+        trade_tools: ["record_transfer"],
+        tip: "Use tool_name='record_transaction' for usage details. Investment accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the HTTP-MCP portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion), which are unavailable on stdio (no DEK). record_transfer remains the path for plain cash transfers between non-investment accounts.",
       });
 
       if (t === "schema") return dataResponse({

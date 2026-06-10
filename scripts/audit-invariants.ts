@@ -192,11 +192,11 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // exception line as each tool gets wired.
   //
   // bulk_record_transactions — needs per-row applyLotEffectsForTx loop after the batch INSERT.
-  // record_trade — buy-pair tool, needs openLotForBuyHook on the stock leg + paired-cash-leg substitution.
   // update_transaction — needs reverseLotsForDeleteHook + redo via applyLotEffectsForTx.
-  // (record_transaction + delete_transaction are already wired as of 2026-05-25.)
+  // (record_transaction + delete_transaction are already wired as of 2026-05-25.
+  //  The portfolio_* op tools delegate to operations.ts, which is lot-wired.)
   "mcp-server/register-tools-pg.ts:lots-write-hook":
-    "Phase 1 follow-up — bulk_record_transactions / record_trade / update_transaction need lot wiring; record_transaction + delete_transaction already wired; backfill covers the gap until flag-flip",
+    "Phase 1 follow-up — bulk_record_transactions / update_transaction need lot wiring; record_transaction + delete_transaction already wired; the portfolio_* op tools delegate to operations.ts (lot-wired); backfill covers the gap until flag-flip",
   // operations.ts is the canonical writer of the multi-leg portfolio op
   // kinds; it can't very well "import from @/lib/portfolio/operations" of
   // itself. Accepted as a baseline exception for invariant #8.

@@ -36,7 +36,7 @@
  *
  * `linkId` here is a parser-side TEMP value used to group sibling rows when
  * the import-pipeline emits them. The pipeline persists `link_id` as-is —
- * the "server-generated only" rule applies to MCP `record_trade` /
+ * the "server-generated only" rule applies to the MCP `portfolio_*` op tools /
  * `createTransferPair`, not import. The pipeline accepts a `linkId` from
  * the row and uses it directly.
  */
