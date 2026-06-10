@@ -16,6 +16,8 @@ import { useEffect, useMemo, useState } from "react";
 import {
   LineChart,
   Line,
+  AreaChart,
+  Area,
   XAxis,
   YAxis,
   Tooltip,
@@ -27,6 +29,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 import { prepareTimeSeries } from "@/lib/chart-series";
+import { buildStackedSeries, type StackPoint } from "@/lib/chart-stack";
+import { StackedChartLegend } from "@/components/chart-stack-legend";
 
 type Period = "1m" | "3m" | "6m" | "ytd" | "1y" | "all";
 
@@ -36,6 +40,18 @@ interface SeriesPoint {
   costBasis: number;
   contribution: number;
   gapsFilled: boolean;
+}
+
+/** One sampled grid point of per-holding market value (FINLYNQ-129). */
+interface HoldingsPoint {
+  date: string;
+  total: number;
+  members: { id: number; name: string; value: number }[];
+}
+
+interface HoldingsApiResponse {
+  success: boolean;
+  data?: { currency: string; points: HoldingsPoint[] };
 }
 
 interface ApiResponse {
@@ -64,6 +80,12 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
   const [period, setPeriod] = useState<Period>("1y");
   const [data, setData] = useState<ApiResponse["data"] | null>(null);
   const [loading, setLoading] = useState(true);
+  // FINLYNQ-129 — component-only "By holding (value)" toggle (resets on reload).
+  // The per-holding $ series is a SEPARATE, lazily-fetched endpoint (prices+FX
+  // per holding per grid day), so only load it once the user opts in.
+  const [stacked, setStacked] = useState(false);
+  const [holdings, setHoldings] = useState<{ currency: string; points: HoldingsPoint[] } | null>(null);
+  const [holdingsLoading, setHoldingsLoading] = useState(false);
 
   useEffect(() => {
     const params = new URLSearchParams();
@@ -80,6 +102,24 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
       .finally(() => setLoading(false));
   }, [period, accountId]);
 
+  // Lazy per-holding fetch — only when stacked mode is on. Re-fetches on
+  // period/account change so the stack re-ranks for the new window.
+  useEffect(() => {
+    if (!stacked) return;
+    const params = new URLSearchParams();
+    params.set("period", period);
+    if (accountId != null) params.set("accountId", String(accountId));
+    setHoldingsLoading(true);
+    fetch(`/api/portfolio/performance/holdings?${params.toString()}`)
+      .then((r) => r.json())
+      .then((json: HoldingsApiResponse) => {
+        if (json.success && json.data) setHoldings(json.data);
+        else setHoldings(null);
+      })
+      .catch(() => setHoldings(null))
+      .finally(() => setHoldingsLoading(false));
+  }, [stacked, period, accountId]);
+
   const fmtPct = (v: number) => `${(v * 100).toFixed(2)}%`;
 
   const rawChartData = useMemo(() => data?.series ?? [], [data]);
@@ -94,12 +134,33 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
     [rawChartData],
   );
 
+  const stackCurrency = holdings?.currency ?? data?.currency ?? "USD";
+  const { rows: stackedRows, legend } = useMemo(
+    () =>
+      buildStackedSeries(
+        (holdings?.points ?? []).map(
+          (p): StackPoint => ({ date: p.date, total: p.total, members: p.members }),
+        ),
+        { maxMembers: 10 },
+      ),
+    [holdings],
+  );
+  const showStacked = stacked && legend.length > 0;
+
   return (
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between gap-3">
           <CardTitle>Performance</CardTitle>
-          <div className="flex gap-1">
+          <div className="flex flex-wrap items-center gap-1">
+            <Button
+              size="sm"
+              variant={stacked ? "default" : "outline"}
+              onClick={() => setStacked((s) => !s)}
+              title="Stack per-holding market value (dollar axis)"
+            >
+              By holding (value)
+            </Button>
             {PERIODS.map((p) => (
               <Button
                 key={p}
@@ -141,39 +202,83 @@ export function PerformanceChart({ accountId }: PerformanceChartProps) {
                 </Badge>
               )}
             </div>
+            {/* Axis-unit label — flips from the TWRR/value line to a per-holding
+                dollar stack in stacked mode (tc-2: "y-axis switches to $"). */}
+            <p className="text-[11px] text-muted-foreground mb-1">
+              {showStacked
+                ? `Market value by holding (${stackCurrency})`
+                : `Market value (${data.currency})`}
+            </p>
             <div className="h-72 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData}>
-                  <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-                  <YAxis
-                    tick={{ fontSize: 11 }}
-                    tickFormatter={(v) => formatCurrency(Number(v), data.currency)}
-                    domain={domain}
-                  />
-                  <Tooltip
-                    formatter={(v) => formatCurrency(Number(v), data.currency)}
-                  />
-                  {spansZero && <ReferenceLine y={0} stroke="#888" />}
-                  <Line
-                    type="monotone"
-                    dataKey="marketValue"
-                    stroke="#06b6d4"
-                    strokeWidth={2}
-                    dot={false}
-                    name="Market value"
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="costBasis"
-                    stroke="#94a3b8"
-                    strokeWidth={1}
-                    strokeDasharray="3 3"
-                    dot={false}
-                    name="Cost basis"
-                  />
-                </LineChart>
+                {showStacked ? (
+                  <AreaChart data={stackedRows}>
+                    <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                    <YAxis
+                      tick={{ fontSize: 11 }}
+                      tickFormatter={(v) => formatCurrency(Number(v), stackCurrency)}
+                    />
+                    <Tooltip
+                      formatter={(v, n) => [formatCurrency(Number(v), stackCurrency), n]}
+                    />
+                    {legend.map((b) => (
+                      <Area
+                        key={b.key}
+                        type="monotone"
+                        dataKey={b.key}
+                        name={b.name}
+                        stackId="perf"
+                        stroke={b.color}
+                        strokeWidth={1}
+                        fill={b.color}
+                        fillOpacity={0.55}
+                        dot={false}
+                        isAnimationActive={false}
+                      />
+                    ))}
+                  </AreaChart>
+                ) : (
+                  <LineChart data={chartData}>
+                    <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                    <YAxis
+                      tick={{ fontSize: 11 }}
+                      tickFormatter={(v) => formatCurrency(Number(v), data.currency)}
+                      domain={domain}
+                    />
+                    <Tooltip
+                      formatter={(v) => formatCurrency(Number(v), data.currency)}
+                    />
+                    {spansZero && <ReferenceLine y={0} stroke="#888" />}
+                    <Line
+                      type="monotone"
+                      dataKey="marketValue"
+                      stroke="#06b6d4"
+                      strokeWidth={2}
+                      dot={false}
+                      name="Market value"
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="costBasis"
+                      stroke="#94a3b8"
+                      strokeWidth={1}
+                      strokeDasharray="3 3"
+                      dot={false}
+                      name="Cost basis"
+                    />
+                  </LineChart>
+                )}
               </ResponsiveContainer>
             </div>
+            {stacked && holdingsLoading && (
+              <p className="text-xs text-muted-foreground mt-2">Loading per-holding values…</p>
+            )}
+            {stacked && !holdingsLoading && legend.length === 0 && (
+              <p className="text-xs text-muted-foreground mt-2">
+                No per-holding values to stack for this range.
+              </p>
+            )}
+            {showStacked && <StackedChartLegend legend={legend} />}
           </>
         )}
       </CardContent>

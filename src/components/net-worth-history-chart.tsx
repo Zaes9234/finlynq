@@ -28,6 +28,9 @@ import { formatCurrency } from "@/lib/currency";
 import { RebuildSnapshotsButton } from "@/components/portfolio/rebuild-snapshots-button";
 import { prepareTimeSeries } from "@/lib/chart-series";
 import { TooltipBreakdownList, type BreakdownRow } from "@/components/chart-breakdown-list";
+import { buildStackedSeries, type StackPoint } from "@/lib/chart-stack";
+import { StackedChartLegend } from "@/components/chart-stack-legend";
+import type { BreakdownMember } from "@/lib/chart-breakdown";
 
 type Period = "6m" | "1y" | "all";
 
@@ -36,6 +39,8 @@ interface NetWorthPoint {
   value: number;
   /** Per-account top-10 (+ "Other") breakdown, pre-ranked by the API (FINLYNQ-128). */
   breakdown?: BreakdownRow[];
+  /** FULL per-account members (with ids) for the stacked "By account" view (FINLYNQ-129). */
+  members?: BreakdownMember[];
 }
 
 interface ApiResponse {
@@ -122,6 +127,10 @@ export function NetWorthHistoryChart({
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  // FINLYNQ-129 — component-only stacked-member toggle (resets on reload). The
+  // per-account "By account" stack is hidden for single-account (balance) charts.
+  const [stacked, setStacked] = useState(false);
+  const stackable = accountId == null;
 
   function load() {
     const params = new URLSearchParams();
@@ -157,6 +166,25 @@ export function NetWorthHistoryChart({
   );
   const hasAnyValue = useMemo(() => series.some((p) => p.value !== 0), [series]);
 
+  // FINLYNQ-129 — build the per-account stacked series from the SAME downsampled
+  // points the aggregate chart plots, so toggling never shifts the X grid. The
+  // outer stack boundary equals `value` at every point (residual = total − top10).
+  const { rows: stackedRows, legend } = useMemo(
+    () =>
+      buildStackedSeries(
+        series.map(
+          (p): StackPoint => ({
+            date: p.date,
+            total: p.value,
+            members: p.members ?? [],
+          }),
+        ),
+        { maxMembers: 10 },
+      ),
+    [series],
+  );
+  const showStacked = stackable && stacked && legend.length > 0;
+
   return (
     <Card className="card-hover">
       <CardHeader className="pb-1 px-5 pt-5">
@@ -165,7 +193,17 @@ export function NetWorthHistoryChart({
             <CardTitle className="text-sm font-semibold">{title}</CardTitle>
             <p className="text-[11px] text-muted-foreground">{currency}</p>
           </div>
-          <div className="flex gap-1">
+          <div className="flex items-center gap-1">
+            {stackable && (
+              <Button
+                size="sm"
+                variant={stacked ? "default" : "outline"}
+                onClick={() => setStacked((s) => !s)}
+                title="Break the total into a stacked top-10 view by account"
+              >
+                By account
+              </Button>
+            )}
             {PERIODS.map((p) => (
               <Button
                 key={p.key}
@@ -198,6 +236,48 @@ export function NetWorthHistoryChart({
         ) : (
           <>
             <ResponsiveContainer width="100%" height={260}>
+              {showStacked ? (
+                <AreaChart data={stackedRows} margin={{ top: 8, right: 4, bottom: 0, left: -10 }}>
+                  <XAxis
+                    dataKey="date"
+                    fontSize={10}
+                    tickLine={false}
+                    axisLine={false}
+                    minTickGap={48}
+                    interval="preserveStartEnd"
+                    tickFormatter={(d) => fmtTick(String(d), period)}
+                    tick={{ fill: "var(--color-muted-foreground)" }}
+                  />
+                  <YAxis
+                    fontSize={10}
+                    tickLine={false}
+                    axisLine={false}
+                    width={48}
+                    tick={{ fill: "var(--color-muted-foreground)" }}
+                    tickFormatter={(v) => fmtAxis(Number(v))}
+                  />
+                  <Tooltip
+                    formatter={(v, n) => [formatCurrency(Number(v), currency), n]}
+                    labelFormatter={(d) => fmtFullDate(String(d))}
+                    cursor={{ stroke: "var(--color-border)", strokeDasharray: "4 4" }}
+                  />
+                  {legend.map((b) => (
+                    <Area
+                      key={b.key}
+                      type="monotone"
+                      dataKey={b.key}
+                      name={b.name}
+                      stackId="nw"
+                      stroke={b.color}
+                      strokeWidth={1}
+                      fill={b.color}
+                      fillOpacity={0.55}
+                      dot={false}
+                      isAnimationActive={false}
+                    />
+                  ))}
+                </AreaChart>
+              ) : (
               <AreaChart data={series} margin={{ top: 8, right: 4, bottom: 0, left: -10 }}>
                 <defs>
                   <linearGradient id="nwHistGradient" x1="0" y1="0" x2="0" y2="1">
@@ -242,7 +322,9 @@ export function NetWorthHistoryChart({
                   activeDot={{ r: 4, strokeWidth: 2, fill: "var(--color-card)" }}
                 />
               </AreaChart>
+              )}
             </ResponsiveContainer>
+            {showStacked && <StackedChartLegend legend={legend} />}
             {!data.hasInvestmentData && accountId == null && (
               <p className="text-[11px] text-muted-foreground mt-2">
                 Cash &amp; liabilities only — no investment snapshots found.

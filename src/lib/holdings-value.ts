@@ -28,6 +28,23 @@ export type AccountHoldingsValue = {
   currency: string;    // account currency
 };
 
+/**
+ * Per-HOLDING valuation at a point in time (FINLYNQ-129 stacked Performance
+ * view). Same pricing/FX path as the per-account aggregate — `value` is the
+ * holding's market value in its ACCOUNT currency, so the caller's per-holding
+ * sum equals `getHoldingsValueByAccount` for that account (the stacked outer
+ * edge ties to the portfolio market value line).
+ */
+export type HoldingValue = {
+  holdingId: number;
+  accountId: number;
+  name: string | null;  // decrypted display name (null without a DEK)
+  symbol: string | null; // decrypted symbol (null without a DEK)
+  value: number;        // market value in account currency
+  costBasis: number;    // remaining cost basis in account currency
+  currency: string;     // account currency
+};
+
 export type HoldingsValueOpts = {
   /**
    * Compute the snapshot as of this date (ISO YYYY-MM-DD). Transactions
@@ -37,11 +54,17 @@ export type HoldingsValueOpts = {
   asOfDate?: string;
 };
 
-export async function getHoldingsValueByAccount(
+/**
+ * Shared core: value every held position at `asOfDate` and return one row per
+ * holding (in account currency). `getHoldingsValueByAccount` sums these per
+ * account; `getHoldingsValueByHolding` returns them verbatim. Single source of
+ * the per-holding pricing loop (no duplication across the two public helpers).
+ */
+async function valueHoldingsAtDate(
   userId: string,
   dek?: Buffer | null,
   opts?: HoldingsValueOpts,
-): Promise<Map<number, AccountHoldingsValue>> {
+): Promise<HoldingValue[]> {
   const asOfDate = opts?.asOfDate ?? todayISO();
   const isToday = asOfDate >= todayISO();
   // Stream D Phase 4 — plaintext name/symbol dropped; ciphertext only.
@@ -59,7 +82,7 @@ export async function getHoldingsValueByAccount(
     .leftJoin(schema.accounts, eq(schema.portfolioHoldings.accountId, schema.accounts.id))
     .where(eq(schema.portfolioHoldings.userId, userId));
 
-  if (rawHoldings.length === 0) return new Map();
+  if (rawHoldings.length === 0) return [];
 
   // Stream D Phase 4 — plaintext columns dropped, decrypt the ciphertext.
   // Without this, the symbol-keyed price lookup misses.
@@ -229,10 +252,11 @@ export async function getHoldingsValueByAccount(
       : await getCryptoPricesAtDate(cgPairs, asOfDate);
   const cryptoByUpperSymbol = new Map(cryptoPrices.map(p => [p.symbol.toUpperCase(), p]));
 
-  // Accumulate market value per accountId, converting holding currency -> account currency via FX
+  // Value each holding, converting holding currency -> account currency via FX.
   // Historical FX uses getRate(from, to, asOfDate) which triangulates via
-  // USD using fx_rates cache + Yahoo backfill for missing dates.
-  const out = new Map<number, AccountHoldingsValue>();
+  // USD using fx_rates cache + Yahoo backfill for missing dates. The caller
+  // aggregates per account (or keeps per-holding rows for the stacked view).
+  const out: HoldingValue[] = [];
   const fxCache = new Map<string, number>();
   const getFx = async (from: string, to: string): Promise<number> => {
     if (from === to) return 1;
@@ -336,19 +360,62 @@ export async function getHoldingsValueByAccount(
       costBasisInAccountCcy = valueInAccountCcy;
     }
 
-    const existing = out.get(h.accountId);
-    if (existing) {
-      existing.value += valueInAccountCcy;
-      existing.costBasis += costBasisInAccountCcy;
-    } else {
-      out.set(h.accountId, {
-        accountId: h.accountId,
-        value: valueInAccountCcy,
-        costBasis: costBasisInAccountCcy,
-        currency: accountCurrency,
-      });
-    }
+    out.push({
+      holdingId: h.id,
+      accountId: h.accountId,
+      name: h.name,
+      symbol: h.symbol,
+      value: valueInAccountCcy,
+      costBasis: costBasisInAccountCcy,
+      currency: accountCurrency,
+    });
   }
 
   return out;
+}
+
+/**
+ * Per-account market value + cost basis (in account currency). Sums the shared
+ * per-holding core. Behaviour-identical to the pre-FINLYNQ-129 implementation.
+ */
+export async function getHoldingsValueByAccount(
+  userId: string,
+  dek?: Buffer | null,
+  opts?: HoldingsValueOpts,
+): Promise<Map<number, AccountHoldingsValue>> {
+  const holdings = await valueHoldingsAtDate(userId, dek, opts);
+  const out = new Map<number, AccountHoldingsValue>();
+  for (const h of holdings) {
+    const existing = out.get(h.accountId);
+    if (existing) {
+      existing.value += h.value;
+      existing.costBasis += h.costBasis;
+    } else {
+      out.set(h.accountId, {
+        accountId: h.accountId,
+        value: h.value,
+        costBasis: h.costBasis,
+        currency: h.currency,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Per-HOLDING market value at `asOfDate` (FINLYNQ-129 stacked Performance view).
+ * Optionally restricted to one account. The per-account sum of these rows equals
+ * `getHoldingsValueByAccount`, so a stacked per-holding chart's outer edge ties
+ * to the portfolio market-value line.
+ */
+export async function getHoldingsValueByHolding(
+  userId: string,
+  dek?: Buffer | null,
+  opts?: HoldingsValueOpts & { accountId?: number | null },
+): Promise<HoldingValue[]> {
+  const holdings = await valueHoldingsAtDate(userId, dek, opts);
+  const accountId = opts?.accountId ?? null;
+  return accountId == null
+    ? holdings
+    : holdings.filter((h) => h.accountId === accountId);
 }

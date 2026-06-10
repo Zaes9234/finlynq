@@ -222,16 +222,17 @@ export async function GET(request: NextRequest) {
       accountNameById.set(b.accountId, safeAccountName({ id: b.accountId, name, alias }));
     }
     const series = rawSeries.map((p) => {
-      const { rows, other } = rankBreakdown(
-        p.breakdown.map((e) => ({
-          id: e.accountId,
-          name: accountNameById.get(e.accountId) ?? `Account #${e.accountId}`,
-          value: e.value,
-        })),
-        { maxMembers: 10 },
-      );
+      const named = p.breakdown.map((e) => ({
+        id: e.accountId,
+        name: accountNameById.get(e.accountId) ?? `Account #${e.accountId}`,
+        value: e.value,
+      }));
+      const { rows, other } = rankBreakdown(named, { maxMembers: 10 });
       const breakdown = other ? [...rows, other] : rows;
-      return { date: p.date, value: p.value, breakdown };
+      // FINLYNQ-129 — the stacked "By account" view needs the FULL per-account
+      // members (with stable account ids) so the client can re-rank + stack on
+      // toggle. `breakdown` stays the pre-ranked top-10 + "Other" tooltip rows.
+      return { date: p.date, value: p.value, breakdown, members: named };
     });
 
     // Auto-rebuild stale investment history with the request DEK (a cron can't
