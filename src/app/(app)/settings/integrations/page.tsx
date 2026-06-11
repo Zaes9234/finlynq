@@ -31,21 +31,34 @@ export default function IntegrationsSettingsPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-sm text-muted-foreground">
-            The MCP server runs locally and provides read-only access to your financial data.
-            AI assistants like Claude, ChatGPT, and Gemini can query your data through it.
+            The MCP server lets AI assistants like Claude and ChatGPT query and manage your
+            financial data in natural language. It exposes 101 tools over HTTP and 86 over stdio —
+            accounts, transactions, budgets, portfolio, goals, loans, and imports. Destructive
+            actions (deletes, bulk edits) always use a preview-then-confirm step.
           </p>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <Badge variant="outline" className="text-xs">
               <div className="h-1.5 w-1.5 rounded-full bg-emerald-500 mr-1.5" />
-              Local Only
+              HTTP + stdio
             </Badge>
             <Badge variant="outline" className="text-xs">
               <Shield className="h-3 w-3 mr-1" />
-              Read-only
+              OAuth 2.1 / API key
+            </Badge>
+            <Badge variant="outline" className="text-xs">
+              Read + write
             </Badge>
           </div>
+          <p className="text-sm text-muted-foreground">
+            Easiest setup is Claude or ChatGPT over HTTP with OAuth — no keys to paste. The{" "}
+            <a href="/mcp-guide" className="underline underline-offset-2 hover:text-foreground">
+              Connect Your AI guide
+            </a>{" "}
+            has step-by-step setup for every client (Claude, ChatGPT, Cursor, Windsurf, Cline),
+            example prompts, and troubleshooting.
+          </p>
           <div className="bg-muted/50 p-4 rounded-xl border border-dashed">
-            <p className="text-xs font-medium text-muted-foreground mb-2">Claude Desktop configuration:</p>
+            <p className="text-xs font-medium text-muted-foreground mb-2">Self-hosted stdio configuration (Claude Desktop):</p>
             <pre className="text-xs overflow-x-auto font-mono leading-relaxed">
 {`{
   "mcpServers": {

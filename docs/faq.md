@@ -49,7 +49,7 @@ Yes. The web UI ships a built-in AI chat that runs natural-language queries over
 
 Finlynq runs an MCP (Model Context Protocol) server that external clients can connect to:
 
-- **HTTP transport** at `/api/mcp` (Streamable HTTP). Auth via session cookie or Bearer API key (`pf_*` prefix). For Claude Web / Claude Mobile / ChatGPT (via the Anthropic Connectors Directory) the server supports **OAuth 2.1 with Dynamic Client Registration**.
+- **HTTP transport** at `/api/mcp` (Streamable HTTP). Auth via session cookie or Bearer API key (`pf_*` prefix). For Claude Web / Claude Mobile (added as a custom connector) and ChatGPT (added as a custom app under **Settings → Apps → developer mode**) the server supports **OAuth 2.1 with Dynamic Client Registration** — the same server URL works in both, since ChatGPT's Apps SDK is built on MCP.
 - **Stdio transport** for Claude Desktop and other CLI-style clients. Self-hosters set `PF_USER_ID` + `DATABASE_URL` in the client's MCP config.
 
 See the [Getting Started guide](./getting-started.md#connecting-an-ai-assistant-optional) for client-specific setup steps.

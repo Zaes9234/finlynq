@@ -133,6 +133,8 @@ To connect an external client, the easiest path is **Claude on the web or mobile
 2. Set the **Server URL** to `https://finlynq.com/api/mcp` (or your self-hosted URL + `/api/mcp`).
 3. Click **Add**, then **Connect**, and authorize when Finlynq prompts you. OAuth handles authentication — no keys to paste.
 
+To connect **ChatGPT** instead, enable developer mode under **Settings → Apps → Advanced settings** (activate), then **Settings → Apps → Create app** and paste the same `https://finlynq.com/api/mcp` URL. ChatGPT's Apps SDK speaks the same MCP standard as Claude, so OAuth handles auth there too. (Developer mode needs a paid ChatGPT plan.)
+
 For desktop/CLI clients (Claude Desktop, Cursor, Windsurf, Cline), generate an API key in **Settings → Account → API Key** (shown once — store it safely) and point the client at `/api/mcp` with an `Authorization: Bearer <your-key>` header:
 
 ```json

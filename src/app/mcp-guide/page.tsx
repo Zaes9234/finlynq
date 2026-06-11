@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { CheckCircle2, XCircle, Copy, Check, Terminal, Zap, Bot, Key, Eye, EyeOff, Globe, Plus, Shield, Upload, Wand2, Radar, Landmark, Globe2, Scissors, Scale, Lightbulb, Briefcase, LifeBuoy } from "lucide-react";
 
-type ClientTab = "claude-desktop" | "claude-web" | "cursor" | "cline" | "windsurf" | "custom";
+type ClientTab = "claude-desktop" | "claude-web" | "chatgpt" | "cursor" | "cline" | "windsurf" | "custom";
 type StatusState = "checking" | "connected" | "disconnected";
 
 const examplePrompts = [
@@ -299,6 +299,7 @@ export default function McpGuidePage() {
   const tabs: { id: ClientTab; label: string; icon: string }[] = [
     { id: "claude-desktop", label: "Claude Desktop", icon: "🤖" },
     { id: "claude-web", label: "Claude Web / Mobile", icon: "🌐" },
+    { id: "chatgpt", label: "ChatGPT", icon: "💬" },
     { id: "cursor", label: "Cursor", icon: "⚡" },
     { id: "cline", label: "Cline (VS Code)", icon: "🔌" },
     { id: "windsurf", label: "Windsurf", icon: "🌊" },
@@ -316,7 +317,7 @@ export default function McpGuidePage() {
             </div>
             <div>
               <h1 className="text-2xl font-bold tracking-tight text-foreground">Connect Your AI</h1>
-              <p className="text-sm text-muted-foreground">Ask Claude, Cursor, Windsurf, or any MCP client about your finances</p>
+              <p className="text-sm text-muted-foreground">Ask Claude, ChatGPT, Cursor, Windsurf, or any MCP client about your finances</p>
             </div>
           </div>
 
@@ -586,6 +587,101 @@ export default function McpGuidePage() {
                     <strong className="text-foreground">Privacy note:</strong> Claude Web uses OAuth 2.1 — your
                     Finlynq passphrase and financial data are never shared with Anthropic. Only the tool
                     responses (query results) pass through Claude&apos;s servers.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {activeTab === "chatgpt" && (
+              <div className="space-y-5 text-sm text-foreground">
+                {/* Same-server callout */}
+                <div className="flex items-start gap-3 rounded-xl border border-indigo-500/25 bg-indigo-500/8 p-4">
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-indigo-500/15">
+                    <Globe className="h-4 w-4 text-indigo-400" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-foreground mb-0.5">Same server, no rewrite</p>
+                    <p className="text-xs text-muted-foreground">
+                      ChatGPT&apos;s Apps SDK is built on the same MCP standard as Claude, so the exact same
+                      Finlynq server URL works here. Enable developer mode once, then add Finlynq as a custom
+                      app. Requires a paid ChatGPT plan (Plus, Pro, or Business).
+                    </p>
+                  </div>
+                </div>
+
+                <ol className="space-y-5">
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      1
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1">Turn on developer mode</p>
+                      <p className="text-muted-foreground">
+                        In ChatGPT, go to <strong>Settings → Apps → Advanced settings</strong> and{" "}
+                        <strong>activate</strong> developer mode. On Business / Enterprise workspaces, an admin
+                        must enable it first under <strong>Permissions &amp; Roles</strong>.
+                      </p>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      2
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1">Create the app</p>
+                      <p className="text-muted-foreground">
+                        Go to <strong>Settings → Apps → Create app</strong>.
+                      </p>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      3
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-medium mb-2">Fill in the app details</p>
+                      <div className="rounded-lg border border-border bg-muted/40 divide-y divide-border/50 text-xs overflow-hidden">
+                        <div className="flex items-center gap-3 px-3 py-2">
+                          <span className="w-28 shrink-0 text-muted-foreground">Name</span>
+                          <code className="text-foreground font-mono">Finlynq</code>
+                        </div>
+                        <div className="flex items-center gap-3 px-3 py-2">
+                          <span className="w-28 shrink-0 text-muted-foreground">MCP Server URL</span>
+                          <div className="relative flex-1 min-w-0">
+                            <code className="text-foreground font-mono break-all">{mcpUrl}</code>
+                          </div>
+                          <CopyButton text={mcpUrl} />
+                        </div>
+                        <div className="flex items-center gap-3 px-3 py-2">
+                          <span className="w-28 shrink-0 text-muted-foreground">Authentication</span>
+                          <span className="text-muted-foreground italic">OAuth — no API key to paste</span>
+                        </div>
+                      </div>
+                    </div>
+                  </li>
+
+                  <li className="flex gap-3">
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/20 text-[11px] font-bold text-primary mt-0.5">
+                      4
+                    </span>
+                    <div>
+                      <p className="font-medium mb-1">Click <strong>Create</strong>, then authorize</p>
+                      <p className="text-muted-foreground">
+                        ChatGPT opens a Finlynq authorization page. Log in if prompted, then click{" "}
+                        <strong>Allow</strong>. The Finlynq tools are now available in your chats.
+                      </p>
+                    </div>
+                  </li>
+                </ol>
+
+                <div className="flex items-start gap-2 rounded-lg bg-amber-500/5 border border-amber-500/20 p-3">
+                  <Shield className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+                  <p className="text-xs text-muted-foreground">
+                    <strong className="text-foreground">Connecting your own ChatGPT</strong> via developer mode
+                    is separate from <strong>publishing</strong> Finlynq to the ChatGPT app directory (a
+                    review-gated submission). The steps above are all you need to use it yourself.
                   </p>
                 </div>
               </div>
