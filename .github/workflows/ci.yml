@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, staging, dev]
+    branches: [main, dev]
     # Mobile-only PRs are covered by mobile-ci.yml — skip the web build for them.
     paths-ignore:
       - 'mobile/**'

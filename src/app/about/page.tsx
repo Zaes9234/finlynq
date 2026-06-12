@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { Metadata } from "next";
+import { AnalyticsConsent } from "@/components/analytics-consent";
 import {
   JsonLd,
   softwareApplicationSchema,
@@ -17,7 +18,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "What is Finlynq? — open-source personal finance with first-party MCP",
     description:
-      "Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, 91 MCP tools. Not affiliated with Finq.com or Finlync.",
+      "Open-source (AGPL v3) personal finance app with a first-party MCP server. Self-hostable, per-user envelope encryption, Canadian tax accounts, 102 MCP tools. Not affiliated with Finq.com or Finlync.",
     url: "/about",
     siteName: "Finlynq",
     type: "article",
@@ -49,7 +50,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Monarch Money, YNAB, or Simplifi?",
-    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable with a first-party MCP server (91 HTTP / 87 stdio tools) and per-user envelope encryption that excludes even the operator from reading your data. Finlynq does not yet have first-party Plaid bank sync — it imports from CSV, OFX, QFX, and email today, with the SnapTrade brokerage integration on the roadmap. Side-by-side comparison at finlynq.com/vs/monarch.",
+    a: "Monarch, YNAB, and Simplifi are polished closed-source hosted SaaS products with mature US bank-aggregation via Plaid. Finlynq is open-source and self-hostable with a first-party MCP server (102 HTTP / 93 stdio tools) and per-user envelope encryption that excludes even the operator from reading your data. Finlynq does not yet have first-party Plaid bank sync — it imports from CSV, OFX, QFX, and email today, with the SnapTrade brokerage integration on the roadmap. Side-by-side comparison at finlynq.com/vs/monarch.",
   },
   {
     q: "How is Finlynq different from Firefly III or Actual Budget?",
@@ -57,7 +58,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "How is Finlynq different from Era?",
-    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Finlynq's specific differentiators vs Era: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for AES-256-at-rest), and a 91-tool MCP surface vs Era's 27. Era has stronger US bank sync, native iOS/Android, and shared household features. Side-by-side comparison at finlynq.com/vs/era.",
+    a: "Era is a closed-source hosted AI-native PFM that launched with first-party MCP in May 2026. Finlynq's specific differentiators vs Era: AGPL v3 open source (Era is closed), self-hostable on your own infrastructure (Era is hosted-only), per-user envelope encryption with keys derived from your password (Era holds the keys for AES-256-at-rest), and a 102 HTTP / 93 stdio tool MCP surface (v3.2.0) vs Era's 27. Era has stronger US bank sync, native iOS/Android, and shared household features. Side-by-side comparison at finlynq.com/vs/era.",
   },
   {
     q: "Does Finlynq sync with my bank automatically?",
@@ -65,7 +66,7 @@ const faqItems: { q: string; a: string }[] = [
   },
   {
     q: "Does Finlynq have a mobile app?",
-    a: "Yes. Finlynq ships a React Native (Expo) mobile app with Dashboard, Transactions, Import, Budgets, and Settings screens that connects to your Finlynq web server (managed cloud or self-hosted). It is functional but not at parity with mature consumer mobile apps like Monarch's iOS/Android.",
+    a: "Almost. Finlynq has a React Native (Expo) mobile app with Dashboard, Transactions, Import, Budgets, and Settings screens that connects to your Finlynq web server (managed cloud or self-hosted). The Android app is in final testing on Google Play, with iOS to follow. It is not yet at parity with mature consumer mobile apps like Monarch's iOS/Android. Read the announcement at finlynq.com/blog/finlynq-mobile-app.",
   },
   {
     q: "What AI assistants does Finlynq work with?",
@@ -88,6 +89,7 @@ const faqItems: { q: string; a: string }[] = [
 export default function AboutPage() {
   return (
     <div className="min-h-screen bg-background text-foreground">
+      <AnalyticsConsent />
       {/* JSON-LD for Google's Knowledge Graph + AI search disambiguation
           (separates Finlynq from Finq.com / Finlync). Routed through the
           nonce-aware <JsonLd> helper to satisfy the strict script-src CSP. */}
@@ -121,7 +123,7 @@ export default function AboutPage() {
             any MCP-compatible AI assistant.
           </p>
           <p className="mt-3 text-xs text-muted-foreground">
-            Last updated: 2026-05-27
+            Last updated: 2026-06-11
           </p>
         </header>
 
@@ -176,7 +178,7 @@ export default function AboutPage() {
           <ul className="list-disc pl-6 space-y-2">
             <li>
               <strong className="text-foreground">First-party MCP server.</strong>{" "}
-              91 HTTP tools and 87 stdio tools at v3.1.0 — built into the
+              102 HTTP tools and 93 stdio tools at v3.2.0 — built into the
               project, not a community wrapper. OAuth 2.1 + Dynamic Client
               Registration, Bearer API keys, and stdio transports all
               supported.
@@ -213,8 +215,16 @@ export default function AboutPage() {
             </li>
             <li>
               <strong className="text-foreground">Mobile app.</strong> React
-              Native (Expo) — Dashboard, Transactions, Import, Budgets,
-              Settings on iOS and Android.
+              Native (Expo) covering Dashboard, Transactions, Import, Budgets,
+              and Settings. The Android app is in final testing on Google Play,
+              with iOS to follow.{" "}
+              <Link
+                href="/blog/finlynq-mobile-app"
+                className="underline underline-offset-2 hover:text-primary"
+              >
+                Read the announcement
+              </Link>
+              .
             </li>
             <li>
               <strong className="text-foreground">Self-hostable.</strong> Docker
@@ -284,6 +294,12 @@ export default function AboutPage() {
               >
                 Try the managed cloud
                 <span aria-hidden="true">→</span>
+              </Link>
+              <Link
+                href="/try-demo?next=/dashboard"
+                className="inline-flex items-center gap-2 rounded-xl border border-border bg-background px-4 py-2 text-sm font-medium text-foreground hover:bg-muted/40 transition-colors"
+              >
+                Try the live demo (no signup)
               </Link>
               <Link
                 href="/self-hosted"

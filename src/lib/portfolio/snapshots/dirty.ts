@@ -41,7 +41,7 @@ export async function markSnapshotsDirty(userId: string, fromDate: string): Prom
         marked_at = NOW()
     `);
   } catch (err) {
-    // eslint-disable-next-line no-console
+
     console.warn("[markSnapshotsDirty] non-fatal:", err instanceof Error ? err.message : err);
   }
 }

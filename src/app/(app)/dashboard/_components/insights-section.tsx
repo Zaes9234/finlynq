@@ -58,8 +58,26 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
   const [recurring, setRecurring] = useState<RecurringData | null>(null);
 
   useEffect(() => {
-    fetch("/api/insights").then((r) => r.json()).then(setInsights);
-    fetch("/api/recurring").then((r) => r.json()).then(setRecurring);
+    let cancelled = false;
+    fetch("/api/insights")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d && typeof d === "object") setInsights(d as InsightsData);
+      })
+      .catch(() => {
+        /* cards self-hide when data is absent */
+      });
+    fetch("/api/recurring")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d && typeof d === "object") setRecurring(d as RecurringData);
+      })
+      .catch(() => {
+        /* cards self-hide when data is absent */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return (
@@ -153,7 +171,7 @@ export function InsightsSection({ currency = "CAD" }: { currency?: string }) {
       {insights && insights.trends.length > 0 && (
         <InsightCard
           icon={TrendingUp}
-          iconBg="bg-indigo-100 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400"
+          iconBg="bg-primary/10 text-primary"
           title="Category Trends"
           subtitle="Spending direction by category"
         >

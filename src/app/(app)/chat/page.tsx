@@ -353,8 +353,8 @@ function ChatPageContent() {
         transition={{ duration: 0.4 }}
         className="text-center max-w-md"
       >
-        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 shadow-lg shadow-indigo-500/30">
-          <Sparkles className="h-8 w-8 text-white" />
+        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary shadow-lg shadow-primary/30">
+          <Sparkles className="h-8 w-8 text-primary-foreground" />
         </div>
         <h2 className="text-xl font-semibold text-foreground mb-2">Ask about your finances</h2>
         <p className="text-sm text-muted-foreground mb-6">
@@ -382,8 +382,8 @@ function ChatPageContent() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 md:px-6 py-3 border-b border-border bg-background/80 backdrop-blur-sm shrink-0">
         <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 via-violet-500 to-purple-600 shadow-md shadow-indigo-500/20">
-            <MessageSquare className="h-4 w-4 text-white" />
+          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary shadow-md shadow-primary/20">
+            <MessageSquare className="h-4 w-4 text-primary-foreground" />
           </div>
           <div>
             <h1 className="text-base font-semibold text-foreground">AI Chat</h1>
@@ -418,8 +418,8 @@ function ChatPageContent() {
                 className={`flex gap-2.5 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
               >
                 {msg.role === "assistant" && (
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-800 mt-0.5">
-                    <Bot className="h-4 w-4 text-slate-600 dark:text-slate-400" />
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted mt-0.5">
+                    <Bot className="h-4 w-4 text-muted-foreground" />
                   </div>
                 )}
 
@@ -431,8 +431,8 @@ function ChatPageContent() {
                   <div
                     className={`rounded-2xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
                       msg.role === "user"
-                        ? "bg-indigo-600 text-white rounded-br-md"
-                        : "bg-slate-100 dark:bg-slate-800 text-foreground rounded-bl-md"
+                        ? "bg-primary text-primary-foreground rounded-br-md"
+                        : "bg-muted text-foreground rounded-bl-md"
                     }`}
                   >
                     {msg.text}
@@ -452,8 +452,8 @@ function ChatPageContent() {
                 </div>
 
                 {msg.role === "user" && (
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-indigo-100 dark:bg-indigo-900/40 mt-0.5">
-                    <User className="h-4 w-4 text-indigo-600 dark:text-indigo-400" />
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 mt-0.5">
+                    <User className="h-4 w-4 text-primary" />
                   </div>
                 )}
               </motion.div>
@@ -467,14 +467,14 @@ function ChatPageContent() {
               animate={{ opacity: 1, y: 0 }}
               className="flex gap-2.5 justify-start"
             >
-              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-slate-100 dark:bg-slate-800 mt-0.5">
-                <Bot className="h-4 w-4 text-slate-600 dark:text-slate-400" />
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-muted mt-0.5">
+                <Bot className="h-4 w-4 text-muted-foreground" />
               </div>
-              <div className="rounded-2xl rounded-bl-md bg-slate-100 dark:bg-slate-800 px-4 py-3">
+              <div className="rounded-2xl rounded-bl-md bg-muted px-4 py-3">
                 <div className="flex gap-1.5">
-                  <div className="h-2 w-2 rounded-full bg-slate-400 animate-bounce [animation-delay:0ms]" />
-                  <div className="h-2 w-2 rounded-full bg-slate-400 animate-bounce [animation-delay:150ms]" />
-                  <div className="h-2 w-2 rounded-full bg-slate-400 animate-bounce [animation-delay:300ms]" />
+                  <div className="h-2 w-2 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:0ms]" />
+                  <div className="h-2 w-2 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:150ms]" />
+                  <div className="h-2 w-2 rounded-full bg-muted-foreground/50 animate-bounce [animation-delay:300ms]" />
                 </div>
               </div>
             </motion.div>
@@ -514,7 +514,8 @@ function ChatPageContent() {
             onClick={() => sendMessage(input)}
             disabled={!input.trim() || loading}
             size="icon"
-            className="bg-indigo-600 hover:bg-indigo-700 text-white shrink-0"
+            aria-label="Send message"
+            className="bg-primary hover:bg-primary/90 text-primary-foreground shrink-0"
           >
             <Send className="h-4 w-4" />
           </Button>

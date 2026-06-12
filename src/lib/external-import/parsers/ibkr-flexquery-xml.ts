@@ -29,6 +29,7 @@
  */
 
 import type { RawTransaction } from "@/lib/import-pipeline";
+import { round2 } from "@/lib/utils/number";
 import { sourceTagFor } from "@/lib/tx-source";
 import type { OfxCanonicalResult, OfxExternalAccount } from "./ofx";
 
@@ -270,10 +271,6 @@ function netCancellationTriplets(rows: ParsedCashTxn[]): ParsedCashTxn[] {
     });
   }
   return [...passthrough, ...netted];
-}
-
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
 }
 
 /** Map an IB cash-transaction `type` to a payee prefix the rule engine /

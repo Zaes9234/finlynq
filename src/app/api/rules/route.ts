@@ -24,6 +24,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 import { verifyOwnership, OwnershipError } from "@/lib/verify-ownership";
+import { todayISO } from "@/lib/utils/date";
 import {
   ConditionGroup,
   Action,
@@ -188,7 +189,7 @@ export async function POST(req: NextRequest) {
         actions: enc.actions as unknown as object,
         isActive: isActive ?? true,
         priority: priority ?? 0,
-        createdAt: new Date().toISOString().split("T")[0],
+        createdAt: todayISO(),
       })
       .returning()
       .get();

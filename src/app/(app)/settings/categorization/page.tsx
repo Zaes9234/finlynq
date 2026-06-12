@@ -34,7 +34,13 @@ export default function CategorizationSettingsPage() {
 
   // Load categories
   const loadCategories = useCallback(() => {
-    fetch("/api/categories").then((r) => r.json()).then(setCategories);
+    fetch("/api/categories")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => setCategories(Array.isArray(d) ? d : []))
+      .catch(() => {
+        setCategories([]);
+        setCatError("Failed to load categories");
+      });
   }, []);
 
   useEffect(() => { loadCategories(); }, [loadCategories]);
@@ -209,10 +215,10 @@ export default function CategorizationSettingsPage() {
                             if (e.key === "Escape") { setEditingId(null); setEditName(""); }
                           }}
                         />
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => handleEditCategory(cat.id)}>
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => handleEditCategory(cat.id)} aria-label="Save category name">
                           <Check className="h-3 w-3" />
                         </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setEditingId(null); setEditName(""); }}>
+                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setEditingId(null); setEditName(""); }} aria-label="Cancel editing">
                           <X className="h-3 w-3" />
                         </Button>
                       </div>
@@ -225,10 +231,10 @@ export default function CategorizationSettingsPage() {
                           </Badge>
                         </div>
                         <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setEditingId(cat.id); setEditName(cat.name); setCatError(""); }}>
+                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => { setEditingId(cat.id); setEditName(cat.name); setCatError(""); }} aria-label="Edit category">
                             <Pencil className="h-3 w-3" />
                           </Button>
-                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => handleDeleteCategory(cat.id)}>
+                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => handleDeleteCategory(cat.id)} aria-label="Delete category">
                             <Trash2 className="h-3 w-3" />
                           </Button>
                         </div>

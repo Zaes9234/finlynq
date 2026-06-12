@@ -147,7 +147,7 @@ export function decryptTxRow<T extends Partial<Record<TxEncryptedKey, string | n
         // the whole list-rendering path. The "v1:..." marker surfaces in the
         // UI so the failure isn't completely silent.
         try {
-          // eslint-disable-next-line no-console
+
           console.warn(
             `[envelope] decryptTxRow failed on ${k}; returning ciphertext:`,
             err instanceof Error ? err.message : String(err),
@@ -217,7 +217,7 @@ export function decryptSplitRow<T extends Partial<Record<SplitEncryptedKey, stri
         (out as Record<string, string | null>)[k] = decryptField(dek, v);
       } catch (err) {
         try {
-          // eslint-disable-next-line no-console
+
           console.warn(
             `[envelope] decryptSplitRow failed on ${k}; returning ciphertext:`,
             err instanceof Error ? err.message : String(err),
@@ -313,7 +313,7 @@ export function decryptName(
     return decryptField(dek, ct);
   } catch (err) {
     try {
-      // eslint-disable-next-line no-console
+
       console.warn(
         "[envelope] decryptName failed; returning null:",
         err instanceof Error ? err.message : String(err),

@@ -1,16 +1,39 @@
 # Finlynq — Self-hosted setup
-# Usage: docker compose up -d
-# Then visit http://localhost:3000
+#
+# Usage:
+#   1. Create a sibling .env file next to this compose file with three secrets,
+#      each generated with `openssl rand -hex 32`:
+#        PF_JWT_SECRET=<64 hex chars>
+#        PF_PEPPER=<64 hex chars>       # MUST be >=32 chars — module-load throws in prod
+#        PF_STAGING_KEY=<64 hex chars>  # MUST be >=32 chars — module-load throws in prod
+#      (optional) POSTGRES_PASSWORD=<your-db-password>   # defaults to "changeme"
+#   2. docker compose up -d
+#   3. Visit http://localhost:3000 and register.
+#
+# The three PF_* secrets are REQUIRED — `${VAR:?...}` makes `docker compose`
+# fail fast with a clear message if they're unset, instead of crash-looping
+# the app container at boot.
 
 services:
   app:
     image: ghcr.io/finlynq/finlynq:latest
+    # Self-hosters building from source instead of pulling the published image
+    # can comment out `image:` above and uncomment the line below:
+    # build: .
     ports:
       - "3000:3000"
     environment:
-      DATABASE_URL: postgresql://postgres:changeme@db:5432/finlynq
-      NEXTAUTH_URL: http://localhost:3000
-      NEXTAUTH_SECRET: change-this-to-a-random-secret-at-least-32-chars
+      # Connection string points at the `db` service below. Keep the user / db /
+      # password in sync with the `db` service env (pf / pf / ${POSTGRES_PASSWORD}).
+      DATABASE_URL: postgresql://pf:${POSTGRES_PASSWORD:-changeme}@db:5432/pf
+      # Public URL of the app — used in OAuth issuer metadata, email links, CORS.
+      APP_URL: http://localhost:3000
+      # Signs JWT session tokens. Generate with: openssl rand -hex 32
+      PF_JWT_SECRET: ${PF_JWT_SECRET:?set PF_JWT_SECRET in .env — generate with openssl rand -hex 32}
+      # scrypt password pepper (>=32 chars). Module-load throws in prod if missing.
+      PF_PEPPER: ${PF_PEPPER:?set PF_PEPPER in .env (>=32 chars) — generate with openssl rand -hex 32}
+      # Wraps service-tier email-staged imports (>=32 chars). Module-load throws in prod if missing.
+      PF_STAGING_KEY: ${PF_STAGING_KEY:?set PF_STAGING_KEY in .env (>=32 chars) — generate with openssl rand -hex 32}
       NODE_ENV: production
     depends_on:
       db:
@@ -20,12 +43,13 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_PASSWORD: changeme
-      POSTGRES_DB: finlynq
+      POSTGRES_USER: pf
+      POSTGRES_DB: pf
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U pf -d pf"]
       interval: 10s
       timeout: 5s
       retries: 5

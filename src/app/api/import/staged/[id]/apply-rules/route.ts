@@ -70,7 +70,7 @@ export async function POST(
     const result = await applyRulesToStagedBatch(db, userId, dek, id);
     return NextResponse.json({ success: true, data: result });
   } catch (err) {
-    // eslint-disable-next-line no-console
+
     console.error("[apply-rules] applyRulesToStagedBatch threw", {
       userId,
       stagedImportId: id,

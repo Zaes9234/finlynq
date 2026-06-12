@@ -16,6 +16,7 @@ import { requireEncryption } from "@/lib/auth/require-encryption";
 import { db, schema } from "@/db";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { getRate } from "@/lib/fx-service";
+import { todayISO } from "@/lib/utils/date";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { logApiError, safeErrorMessage, validateBody } from "@/lib/validate";
 
@@ -124,7 +125,7 @@ export async function PATCH(request: NextRequest) {
 
     // Convert: fetch historical rate at the tx's date, rewrite currency/amount
     // to the account's currency, populate enteredFxRate.
-    const date = auditRow[0].txDate ?? new Date().toISOString().split("T")[0];
+    const date = auditRow[0].txDate ?? todayISO();
     const rate = await getRate(
       auditRow[0].recordedCurrency,
       auditRow[0].accountCurrency,

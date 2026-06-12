@@ -34,13 +34,13 @@ Want to look around before signing up? Open **[finlynq.com/cloud?demo=1](https:/
 
 ```bash
 git clone https://github.com/finlynq/finlynq.git
-cd finlynq/pf-app
+cd finlynq
 npm install
 ```
 
 ### Configure
 
-Finlynq connects to PostgreSQL and needs a few secrets for encryption and sessions. Create a `.env.local` file in `pf-app/`:
+Finlynq connects to PostgreSQL and needs a few secrets for encryption and sessions. Create a `.env.local` file in the repository root:
 
 ```bash
 # PostgreSQL connection string
@@ -63,7 +63,9 @@ npm run dev         # start the dev server at http://localhost:3000
 
 Open [http://localhost:3000](http://localhost:3000) and create your account.
 
-For production deployment (systemd, HTTPS, automated migrations, backups), see **DEPLOY.md** in the repository.
+For a containerized self-host, a ready-made `docker-compose.yml` lives at the repository root (see the [README](../README.md#quick-start--self-hosted)) — it runs the app and PostgreSQL together and requires the three `PF_*` secrets via a sibling `.env`. Production deployment notes (systemd, HTTPS, automated migrations, backups) are at [finlynq.com/self-hosted](https://finlynq.com/self-hosted).
+
+If you run Finlynq behind a reverse proxy (Caddy, nginx, Cloudflare Tunnel), point your uptime monitor and proxy health gate at **`/api/healthz`** — it's a public, unauthenticated endpoint that returns `200` when the app and database are healthy (`503` when degraded).
 
 ## Creating your account
 
@@ -123,7 +125,7 @@ Every import lands in a **review queue** before anything is committed. You previ
 
 ## Connecting an AI assistant (optional)
 
-Finlynq's standout feature is its **MCP server**: it lets AI assistants query and manage your finances in natural language — "how much did I spend on groceries last month?", "record a $45 coffee from yesterday", "show an avalanche debt-payoff plan". The server exposes **101 tools over HTTP and 86 over stdio** (server v3.2.0) covering accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, rules, and imports.
+Finlynq's standout feature is its **MCP server**: it lets AI assistants query and manage your finances in natural language — "how much did I spend on groceries last month?", "record a $45 coffee from yesterday", "show an avalanche debt-payoff plan". The server exposes **102 tools over HTTP and 93 over stdio** (server v3.2.0) covering accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, rules, and imports.
 
 You don't even need an external client to start — the web UI ships a **built-in AI chat** (`/chat`) that runs over the same tools.
 

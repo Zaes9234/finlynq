@@ -5,6 +5,7 @@ import { createCategory, createAccount, getAccounts, getCategories } from "@/lib
 import { db, schema } from "@/db";
 import { and, eq } from "drizzle-orm";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
+import { round2 } from "@/lib/utils/number";
 import {
   buildNameFields,
   decryptName,
@@ -97,10 +98,6 @@ function pseudoRandom(seed: number): number {
 
 function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10);
-}
-
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
 }
 
 type RegularTx = {

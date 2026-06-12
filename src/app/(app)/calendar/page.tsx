@@ -267,11 +267,11 @@ function CalendarPageContent() {
 
       {/* Month navigation */}
       <div className="flex items-center justify-between">
-        <Button variant="outline" size="icon" onClick={prevMonth}>
+        <Button variant="outline" size="icon" onClick={prevMonth} aria-label="Previous month">
           <ChevronLeft className="h-4 w-4" />
         </Button>
         <h2 className="text-xl font-semibold">{monthLabel}</h2>
-        <Button variant="outline" size="icon" onClick={nextMonth}>
+        <Button variant="outline" size="icon" onClick={nextMonth} aria-label="Next month">
           <ChevronRight className="h-4 w-4" />
         </Button>
       </div>
@@ -316,11 +316,11 @@ function CalendarPageContent() {
                     isSelected
                       ? "border-primary bg-primary/5"
                       : "border-transparent hover:bg-muted/50"
-                  } ${isToday(day) ? "bg-blue-50" : ""}`}
+                  } ${isToday(day) ? "bg-primary/10 ring-1 ring-primary/30" : ""}`}
                 >
                   <span
                     className={`text-sm font-medium ${
-                      isToday(day) ? "text-blue-600" : ""
+                      isToday(day) ? "text-primary font-semibold" : ""
                     }`}
                   >
                     {day}
@@ -423,8 +423,8 @@ function CalendarPageContent() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <Card>
           <CardContent className="flex items-center gap-4 pt-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100">
-              <TrendingUp className="h-5 w-5 text-emerald-600" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100 dark:bg-emerald-950/60">
+              <TrendingUp className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
             </div>
             <div>
               <p className="text-sm text-muted-foreground">Expected Income</p>
@@ -436,8 +436,8 @@ function CalendarPageContent() {
         </Card>
         <Card>
           <CardContent className="flex items-center gap-4 pt-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-100">
-              <TrendingDown className="h-5 w-5 text-rose-600" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-100 dark:bg-rose-950/60">
+              <TrendingDown className="h-5 w-5 text-rose-600 dark:text-rose-400" />
             </div>
             <div>
               <p className="text-sm text-muted-foreground">Expected Bills</p>
@@ -449,8 +449,8 @@ function CalendarPageContent() {
         </Card>
         <Card>
           <CardContent className="flex items-center gap-4 pt-6">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100">
-              <DollarSign className="h-5 w-5 text-indigo-600" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
+              <DollarSign className="h-5 w-5 text-primary" />
             </div>
             <div>
               <p className="text-sm text-muted-foreground">Net for Month</p>

@@ -15,6 +15,7 @@ import {
   currencyLabel,
   isSupportedCurrency,
 } from "@/lib/fx/supported-currencies";
+import { todayISO } from "@/lib/utils/date";
 
 type Override = {
   id: number;
@@ -25,8 +26,6 @@ type Override = {
   note: string;
   createdAt: string;
 };
-
-const today = () => new Date().toISOString().split("T")[0];
 
 export function FxOverridesSection() {
   const [overrides, setOverrides] = useState<Override[]>([]);
@@ -42,7 +41,7 @@ export function FxOverridesSection() {
     currency: "EUR",
     rateInput: "",
     rateMode: "to-usd" as "to-usd" | "from-usd",
-    dateFrom: today(),
+    dateFrom: todayISO(),
     dateTo: "",
     note: "",
   });

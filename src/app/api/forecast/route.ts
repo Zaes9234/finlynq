@@ -1,8 +1,9 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { sql, eq, and } from "drizzle-orm";
+import { sql, eq, and, inArray } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
+import { round2 } from "@/lib/utils/number";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { tryDecryptField } from "@/lib/crypto/envelope";
@@ -60,14 +61,34 @@ export async function GET(request: NextRequest) {
     ))
     .all();
 
+  // One GROUP BY pass instead of N per-account SUM queries (FINLYNQ-145). The
+  // FINLYNQ-123 currency split is preserved EXACTLY: we still sum each account's
+  // NATIVE amount on its own and convert per-account at the CURRENT rate via
+  // convertWithRateMap — never SUM(amount) across mixed currencies.
   let currentBalance = 0;
-  for (const ba of bankAccounts) {
-    const result = await db
-      .select({ total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)` })
+  const accountIds = bankAccounts.map((ba) => ba.id);
+  if (accountIds.length > 0) {
+    const sums = await db
+      .select({
+        accountId: schema.transactions.accountId,
+        total: sql<number>`COALESCE(SUM(${schema.transactions.amount}), 0)`,
+      })
       .from(schema.transactions)
-      .where(and(eq(schema.transactions.accountId, ba.id), eq(schema.transactions.userId, userId)))
-      .get();
-    currentBalance += convertWithRateMap(result?.total ?? 0, ba.currency ?? displayCurrency, rateMap);
+      .where(and(
+        eq(schema.transactions.userId, userId),
+        inArray(schema.transactions.accountId, accountIds),
+      ))
+      .groupBy(schema.transactions.accountId)
+      .all();
+
+    const totalByAccount = new Map<number, number>(
+      sums.map((r) => [r.accountId as number, Number(r.total) || 0]),
+    );
+
+    for (const ba of bankAccounts) {
+      const total = totalByAccount.get(ba.id) ?? 0;
+      currentBalance += convertWithRateMap(total, ba.currency ?? displayCurrency, rateMap);
+    }
   }
 
   const activeRecurring = detected.map((r) => ({ ...r, active: true }));
@@ -79,7 +100,7 @@ export async function GET(request: NextRequest) {
     .map((f) => ({ date: f.date, balance: f.balance }));
 
   return NextResponse.json({
-    currentBalance: Math.round(currentBalance * 100) / 100,
+    currentBalance: round2(currentBalance),
     forecast,
     warnings,
     daysAhead: days,

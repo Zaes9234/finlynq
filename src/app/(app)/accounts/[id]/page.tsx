@@ -307,7 +307,7 @@ export default function AccountDetailPage() {
                   </p>
                 ) : null}
               </div>
-              <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${displayBalance >= 0 ? "bg-emerald-100 text-emerald-600" : "bg-rose-100 text-rose-600"}`}>
+              <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${displayBalance >= 0 ? "bg-emerald-100 text-emerald-600 dark:bg-emerald-950/60 dark:text-emerald-400" : "bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400"}`}>
                 <Wallet className="h-5 w-5" />
               </div>
             </div>
@@ -320,7 +320,7 @@ export default function AccountDetailPage() {
                 <p className="text-xs font-medium text-muted-foreground">Group</p>
                 <p className="text-lg font-semibold mt-1">{account.group || "None"}</p>
               </div>
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400">
                 <Layers className="h-5 w-5" />
               </div>
             </div>
@@ -333,7 +333,7 @@ export default function AccountDetailPage() {
                 <p className="text-xs font-medium text-muted-foreground">Transactions</p>
                 <p className="text-lg font-semibold mt-1">{total}</p>
               </div>
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-600">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400">
                 <Hash className="h-5 w-5" />
               </div>
             </div>

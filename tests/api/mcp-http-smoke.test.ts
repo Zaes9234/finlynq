@@ -191,7 +191,7 @@ describe("MCP HTTP read-tool smoke (Stream D Phase 4 cleanup gate)", () => {
         // the expected "no data in test fixture" shapes so the test author
         // can tighten the test if a real bug surfaces.
         const msg = e instanceof Error ? e.message : String(e);
-        // eslint-disable-next-line no-console
+
         console.warn(`[smoke] ${t.name} threw: ${msg.slice(0, 200)}`);
       }
       const newQueries = bootstrapped.queries.slice(startIdx);

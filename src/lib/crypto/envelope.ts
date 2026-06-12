@@ -73,7 +73,7 @@ function getPepperForVersion(version: number): Buffer {
   // Dev fallback — stable empty buffer so dev DEKs stay readable across
   // restarts. We warn once per version so it's visible but not noisy.
   if (!pepperWarned.has(version)) {
-    // eslint-disable-next-line no-console
+
     console.warn(
       `[envelope] ${envVar} not set — using empty pepper for dev. ` +
         "DO NOT deploy to production without setting it."
@@ -252,7 +252,7 @@ export function tryDecryptField(
     return decryptField(dek, value);
   } catch (err) {
     try {
-      // eslint-disable-next-line no-console
+
       console.warn(
         `[envelope] tryDecryptField failed${context ? ` (${context})` : ""}; returning null:`,
         err instanceof Error ? err.message : String(err),

@@ -56,7 +56,7 @@ See the [Getting Started guide](./getting-started.md#connecting-an-ai-assistant-
 
 ### What can the AI assistant do?
 
-The MCP server registers **101 tools on HTTP / 86 tools on stdio** (as of server v3.2.0). They cover reads + writes across accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, recurring transactions, rules, imports, and the staging-review queue. Typical operations: record a transaction, log a transfer between accounts, create a budget or auto-categorize rule, run portfolio analysis, build a debt-payoff plan, review a pending CSV/email import.
+The MCP server registers **102 tools on HTTP / 93 tools on stdio** (as of server v3.2.0). They cover reads + writes across accounts, transactions, transfers, budgets, portfolio holdings, goals, loans, subscriptions, recurring transactions, rules, imports, and the staging-review queue. Typical operations: record a transaction, log a transfer between accounts, create a budget or auto-categorize rule, run portfolio analysis, build a debt-payoff plan, review a pending CSV/email import.
 
 Destructive operations (delete account, delete category, bulk-categorize) use a **confirmation-token preview/execute pattern** so the AI has to show you the impact before it can act.
 
@@ -74,7 +74,7 @@ Finlynq supports five import methods:
 | **OFX/QFX** | Standard bank statement format |
 | **Email** | Forward bank statements to your per-user `import-<code>@finlynq.com` address; attachments are parsed automatically. |
 
-Every import path lands in a **unified staging queue at `/import/pending`** — you review, edit (payee / category / note / tags / holding / amount + currency), flag transfer pairs, and approve before any row is materialized into your transactions table. Nothing is auto-committed.
+Every import path lands in a **unified review queue at `/import`** — you review, edit (payee / category / note / tags / holding / amount + currency), flag transfer pairs, and approve before any row is materialized into your transactions table. Nothing is auto-committed. (Email deep-links may open the per-batch view at `/import/pending`.)
 
 ### Will importing the same file create duplicates?
 
@@ -129,7 +129,7 @@ Common causes:
 - **PDF** — some bank-statement layouts aren't recognized by the table extractor. Try exporting as CSV or OFX from your bank instead.
 - **Large files** — very large uploads may time out. Split into smaller batches.
 
-For email imports that don't show up in `/import/pending`, check that you sent from an address registered on your account and that the receiving address matches your per-user `import-<hex>@finlynq.com` exactly.
+For email imports that don't show up under **Import** (`/import`), check that you sent from an address registered on your account and that the receiving address matches your per-user `import-<hex>@finlynq.com` exactly.
 
 ### The login screen won't accept my password
 

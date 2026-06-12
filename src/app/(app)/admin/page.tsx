@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -21,6 +21,9 @@ import {
   CheckCircle,
   XCircle,
   Mail,
+  ChevronUp,
+  ChevronDown,
+  ChevronsUpDown,
 } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -65,6 +68,82 @@ interface UsageStats {
   activeUsersLast30Days: number;
   loginsLast24Hours?: number;
   recentLogins?: LoginActivityRow[];
+}
+
+// ─── Sort ───────────────────────────────────────────────────────────────────
+
+type SortColumn =
+  | "user"
+  | "role"
+  | "plan"
+  | "verified"
+  | "mfa"
+  | "txns"
+  | "joined";
+type SortDirection = "asc" | "desc";
+
+interface SortState {
+  column: SortColumn;
+  direction: SortDirection;
+}
+
+function sortUsers(
+  users: AdminUser[],
+  sort: SortState | null
+): AdminUser[] {
+  if (!sort) return users;
+  const { column, direction } = sort;
+  const mul = direction === "asc" ? 1 : -1;
+
+  return [...users].sort((a, b) => {
+    let cmp = 0;
+    switch (column) {
+      case "user": {
+        // Sort by the display label shown in the first cell (displayName ?? username ?? email)
+        const aLabel = (a.displayName ?? a.username ?? a.email ?? "").toLowerCase();
+        const bLabel = (b.displayName ?? b.username ?? b.email ?? "").toLowerCase();
+        cmp = aLabel.localeCompare(bLabel);
+        break;
+      }
+      case "role":
+        cmp = (a.role ?? "").localeCompare(b.role ?? "");
+        break;
+      case "plan":
+        cmp = (a.plan ?? "").localeCompare(b.plan ?? "");
+        break;
+      case "verified":
+        cmp = (a.emailVerified ? 1 : 0) - (b.emailVerified ? 1 : 0);
+        break;
+      case "mfa":
+        cmp = (a.mfaEnabled ? 1 : 0) - (b.mfaEnabled ? 1 : 0);
+        break;
+      case "txns":
+        cmp = (a.transactionCount ?? 0) - (b.transactionCount ?? 0);
+        break;
+      case "joined":
+        cmp =
+          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        break;
+    }
+    return cmp * mul;
+  });
+}
+
+function SortIcon({
+  column,
+  sort,
+}: {
+  column: SortColumn;
+  sort: SortState | null;
+}) {
+  if (!sort || sort.column !== column) {
+    return <ChevronsUpDown className="h-3.5 w-3.5 ml-1 inline-block opacity-40" />;
+  }
+  return sort.direction === "asc" ? (
+    <ChevronUp className="h-3.5 w-3.5 ml-1 inline-block" />
+  ) : (
+    <ChevronDown className="h-3.5 w-3.5 ml-1 inline-block" />
+  );
 }
 
 // ─── Animation ──────────────────────────────────────────────────────────────
@@ -155,6 +234,17 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [updatingUser, setUpdatingUser] = useState<string | null>(null);
+  const [sort, setSort] = useState<SortState | null>(null);
+
+  const handleSort = useCallback((column: SortColumn) => {
+    setSort((prev) => {
+      if (!prev || prev.column !== column) return { column, direction: "asc" };
+      if (prev.direction === "asc") return { column, direction: "desc" };
+      return null; // third click clears sort
+    });
+  }, []);
+
+  const sortedUsers = useMemo(() => sortUsers(users, sort), [users, sort]);
 
   const fetchData = useCallback(async () => {
     try {
@@ -341,18 +431,40 @@ export default function AdminPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead>User</TableHead>
-                      <TableHead>Role</TableHead>
-                      <TableHead>Plan</TableHead>
-                      <TableHead>Verified</TableHead>
-                      <TableHead>MFA</TableHead>
-                      <TableHead className="text-right">Txns</TableHead>
-                      <TableHead>Joined</TableHead>
+                      {(
+                        [
+                          { col: "user" as SortColumn, label: "User", align: "" },
+                          { col: "role" as SortColumn, label: "Role", align: "" },
+                          { col: "plan" as SortColumn, label: "Plan", align: "" },
+                          { col: "verified" as SortColumn, label: "Verified", align: "" },
+                          { col: "mfa" as SortColumn, label: "MFA", align: "" },
+                          { col: "txns" as SortColumn, label: "Txns", align: "text-right" },
+                          { col: "joined" as SortColumn, label: "Joined", align: "" },
+                        ] as const
+                      ).map(({ col, label, align }) => (
+                        <TableHead key={col} className={align}>
+                          <button
+                            type="button"
+                            onClick={() => handleSort(col)}
+                            className="inline-flex items-center gap-0.5 hover:text-foreground transition-colors select-none cursor-pointer"
+                            aria-sort={
+                              sort?.column === col
+                                ? sort.direction === "asc"
+                                  ? "ascending"
+                                  : "descending"
+                                : "none"
+                            }
+                          >
+                            {label}
+                            <SortIcon column={col} sort={sort} />
+                          </button>
+                        </TableHead>
+                      ))}
                       <TableHead className="text-right">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {users.map((user) => (
+                    {sortedUsers.map((user) => (
                       <TableRow key={user.id}>
                         <TableCell>
                           <div>

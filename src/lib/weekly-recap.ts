@@ -1,12 +1,12 @@
 // Weekly Financial Recap Generator
 
 import { db, schema } from "@/db";
-import { eq, and, gte, lte, sql, desc } from "drizzle-orm";
+import { eq, and, gte, lte, sql } from "drizzle-orm";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { convertReportingSlice } from "@/lib/fx/reporting-amount";
 
-const { accounts, categories, transactions, budgets } = schema;
+const { categories, transactions, budgets } = schema;
 
 type RateCtx = { displayCurrency: string; rateMap: Map<string, number> };
 

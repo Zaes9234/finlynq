@@ -38,6 +38,8 @@ import { db, schema } from "@/db";
 import { encryptTxWrite, decryptTxRows, buildNameFields, nameLookup } from "@/lib/crypto/encrypted-columns";
 import { encryptField, decryptField } from "@/lib/crypto/envelope";
 import { resolveTxAmountsCore } from "@/lib/currency-conversion";
+import { round2 } from "@/lib/utils/number";
+import { todayISO } from "@/lib/utils/date";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import {
@@ -285,12 +287,7 @@ export type TransferLeg = {
 };
 
 // ─── Internal helpers ───────────────────────────────────────────────────────
-
-const round2 = (n: number): number => Math.round(n * 100) / 100;
-
-function todayISO(): string {
-  return new Date().toISOString().split("T")[0];
-}
+// round2 + todayISO are imported from @/lib/utils (FINLYNQ-145 DRY consolidation).
 
 /**
  * Resolve (or auto-create) the user's Transfer category.

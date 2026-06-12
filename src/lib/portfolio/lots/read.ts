@@ -33,6 +33,7 @@ import type {
   HoldingLotClosure,
   PerHoldingMetrics,
 } from "./types";
+import { todayISO } from "@/lib/utils/date";
 
 // ─── feature flag ─────────────────────────────────────────────────────────
 
@@ -90,7 +91,7 @@ export async function loadMetricsForUser(
   opts: LoadMetricsForUserOpts,
 ): Promise<PerHoldingMetrics[]> {
   const { userId, dek, asOfDate, prices } = opts;
-  const isToday = asOfDate >= new Date().toISOString().split("T")[0];
+  const isToday = asOfDate >= todayISO();
 
   // ─── Lots ─────────────────────────────────────────────────────────────
   const lotRows = await db
@@ -239,7 +240,7 @@ export async function loadMetricsForUser(
     const rate = fxMap.get(`${from}>${to}`);
     if (rate != null) return amount * rate;
     // Defensive fallback — emit 1.0 and log.
-    // eslint-disable-next-line no-console
+
     console.warn(
       `[portfolio.lots.read] fx ${from}->${to} missing in pre-resolve; returning 1.0`,
     );

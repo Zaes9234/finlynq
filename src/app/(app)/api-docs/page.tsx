@@ -472,10 +472,10 @@ function RouteCard({ route }: { route: ApiRoute }) {
 // ============ MCP TOOLS SECTION ============
 
 const MCP_TOOLS = [
-  { name: "get_account_balances", type: "read", description: "Current balances grouped by type" },
+  { name: "get_account_balances", type: "read", description: "Current balances per account; investment accounts at market value on key-bearing connections" },
   { name: "get_budget_summary", type: "read", description: "Budget vs actual for a month" },
   { name: "get_spending_trends", type: "read", description: "Spending trends by category" },
-  { name: "get_net_worth", type: "read", description: "Current totals, or a trend if months>0 is passed" },
+  { name: "get_net_worth", type: "read", description: "Current totals (investment accounts market-valued on key-bearing connections), or a contribution-basis trend if priorMonths>0 is passed" },
   { name: "get_categories", type: "read", description: "All transaction categories" },
   { name: "get_loans", type: "read", description: "Loans with amortization summary" },
   { name: "get_goals", type: "read", description: "Financial goals with progress" },

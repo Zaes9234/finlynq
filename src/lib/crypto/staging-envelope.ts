@@ -44,7 +44,7 @@ function getServiceKey(): Buffer | null {
     );
   }
   if (!stagingWarned) {
-    // eslint-disable-next-line no-console
+
     console.warn(
       "[staging-envelope] PF_STAGING_KEY not set — staged imports will store plaintext. " +
         "DO NOT deploy to production without setting it."

@@ -5,7 +5,15 @@
  * At runtime, pg-shim.ts patches these methods onto the prototype of each
  * PG query builder class. This declaration file makes TypeScript aware of
  * them so call sites compile without errors.
+ *
+ * NOTE (FINLYNQ-145): the interface type parameters below MUST keep Drizzle's
+ * exact names (`TTableName`, `TReturning`, …) — declaration-merging an
+ * augmentation onto Drizzle's interface matches by parameter name, so renaming
+ * them to `_T…` silently breaks the merge and every `.all()/.get()` call stops
+ * type-checking. They can't take the `^_` ignore pattern, so this file carries
+ * a scoped `no-unused-vars` disable for the unavoidable positional placeholders.
  */
+/* eslint-disable @typescript-eslint/no-unused-vars */
 
 import type { PgDeleteBase } from "drizzle-orm/pg-core/query-builders/delete";
 import type { PgInsertBase } from "drizzle-orm/pg-core/query-builders/insert";

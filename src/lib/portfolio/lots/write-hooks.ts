@@ -82,7 +82,7 @@ function softFail(err: unknown, label: string): void {
   // produce the exact bug we just patched on dev (AAPL paired with the
   // Cash sleeve via link_id, no lot effects, user sees no realized gain).
   if (err instanceof InvalidLinkPairError) throw err;
-  // eslint-disable-next-line no-console
+
   console.error(`${HOOK_LABEL} ${label} failed:`, err);
   if (strictMode) throw err;
 }
@@ -459,7 +459,7 @@ export async function closeLotsForSellHook(
           closuresWritten += result.closures.length;
         }
       } else {
-        // eslint-disable-next-line no-console
+
         console.warn(
           `${HOOK_LABEL} closeLotsForSellHook tx=${tx.id} SPECIFIC plan failed (shortfall=${plan.shortfall}); skipping long closure write`,
         );
@@ -946,7 +946,7 @@ export async function applyLotEffectsForTx(
   // were routed above) — but a defensive skip stays for legacy / data-bug
   // rows where a cash_leg kind landed on a non-cash holding.
   if (tx.kind && /_cash_leg$/.test(tx.kind)) {
-    // eslint-disable-next-line no-console
+
     console.warn(
       `${HOOK_LABEL} applyLotEffectsForTx tx=${tx.id} kind='${tx.kind}' landed on a non-cash holding (${tx.portfolioHoldingId}); skipping lot effects. Likely a data-integrity issue — investigate.`,
     );

@@ -19,7 +19,19 @@ export function WeeklyRecap() {
   const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
-    fetch("/api/recap").then((r) => r.json()).then(setRecap);
+    let cancelled = false;
+    fetch("/api/recap")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled) return;
+        if (d && typeof d === "object" && d.spending) setRecap(d as WeeklyRecapData);
+      })
+      .catch(() => {
+        /* widget self-hides on failure */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (!recap) return null;
@@ -34,12 +46,12 @@ export function WeeklyRecap() {
   return (
     <motion.div variants={itemVariants}>
       <Card className="card-hover relative overflow-hidden">
-        <div className="absolute -top-16 -right-16 w-40 h-40 rounded-full bg-indigo-500/5 blur-3xl pointer-events-none" />
+        <div className="absolute -top-16 -right-16 w-40 h-40 rounded-full bg-primary/5 blur-3xl pointer-events-none" />
 
         <CardHeader className="pb-2 px-5 pt-5">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
-              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-primary/10 text-primary">
                 <Calendar className="h-4 w-4" />
               </div>
               <div>
@@ -51,6 +63,8 @@ export function WeeklyRecap() {
             </div>
             <button
               onClick={() => setExpanded(!expanded)}
+              aria-label={expanded ? "Collapse weekly recap" : "Expand weekly recap"}
+              aria-expanded={expanded}
               className="p-1.5 rounded-lg hover:bg-muted/50 transition-colors"
             >
               {expanded ? (
@@ -114,7 +128,7 @@ export function WeeklyRecap() {
                       fontSize: "12px",
                     }}
                   />
-                  <Bar dataKey="amount" fill="#6366f1" radius={[0, 6, 6, 0]} name="Spent" />
+                  <Bar dataKey="amount" fill="var(--color-primary)" radius={[0, 6, 6, 0]} name="Spent" />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -152,7 +166,7 @@ export function WeeklyRecap() {
                                   ? "bg-rose-500"
                                   : b.pctUsed > 80
                                     ? "bg-amber-500"
-                                    : "bg-indigo-500"
+                                    : "bg-primary"
                               }
                             />
                           </div>

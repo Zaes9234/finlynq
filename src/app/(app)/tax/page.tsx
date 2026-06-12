@@ -26,12 +26,26 @@ type TaxData = {
 function TaxPageContent() {
   const { displayCurrency } = useDisplayCurrency();
   const [data, setData] = useState<TaxData | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const [income, setIncome] = useState("100000");
   const [contribution, setContribution] = useState("10000");
   const [comparison, setComparison] = useState<{ rrspBenefit: number; tfsaBenefit: string; recommendation: string } | null>(null);
 
   useEffect(() => {
-    fetch("/api/tax").then((r) => r.json()).then(setData);
+    let cancelled = false;
+    fetch("/api/tax")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled) return;
+        if (d && typeof d === "object") setData(d as TaxData);
+        else setLoadError(true);
+      })
+      .catch(() => {
+        if (!cancelled) setLoadError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   async function compareRrspTfsa() {
@@ -42,6 +56,19 @@ function TaxPageContent() {
     });
     setComparison(await res.json());
   }
+
+  if (loadError) return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-2xl font-bold tracking-tight">Tax Optimization</h1>
+      </div>
+      <Card>
+        <CardContent className="py-10 text-center text-sm text-muted-foreground">
+          We couldn&apos;t load your tax data. Please refresh to try again.
+        </CardContent>
+      </Card>
+    </div>
+  );
 
   if (!data) return (
     <div className="space-y-6">
@@ -70,7 +97,7 @@ function TaxPageContent() {
                 <p className="text-xs font-medium text-muted-foreground">TFSA Room</p>
                 <p className="text-2xl font-bold tracking-tight mt-1">{formatCurrency(data.tfsa.remaining, displayCurrency)}</p>
               </div>
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100 text-emerald-600 dark:bg-emerald-950/60 dark:text-emerald-400">
                 <PiggyBank className="h-5 w-5" />
               </div>
             </div>
@@ -91,7 +118,7 @@ function TaxPageContent() {
                 <p className="text-xs font-medium text-muted-foreground">RESP Grant</p>
                 <p className="text-2xl font-bold tracking-tight text-emerald-600 mt-1">{formatCurrency(data.resp.grantExample, displayCurrency)}/yr</p>
               </div>
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100 text-violet-600">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100 text-violet-600 dark:bg-violet-950/60 dark:text-violet-400">
                 <GraduationCap className="h-5 w-5" />
               </div>
             </div>
@@ -105,7 +132,7 @@ function TaxPageContent() {
                 <p className="text-xs font-medium text-muted-foreground">Marginal Rate @ $100K</p>
                 <p className="text-2xl font-bold tracking-tight mt-1">{data.marginalRates.at100k.combined}%</p>
               </div>
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-600">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400">
                 <Percent className="h-5 w-5" />
               </div>
             </div>
@@ -118,7 +145,7 @@ function TaxPageContent() {
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 text-indigo-600">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
               <Calculator className="h-5 w-5" />
             </div>
             <div>
@@ -163,7 +190,7 @@ function TaxPageContent() {
       <Card>
         <CardHeader>
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-100 text-rose-600">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400">
               <Percent className="h-5 w-5" />
             </div>
             <div>
@@ -201,7 +228,7 @@ function TaxPageContent() {
         <Card>
           <CardHeader>
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-100 text-cyan-600">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-cyan-100 text-cyan-600 dark:bg-cyan-950/60 dark:text-cyan-400">
                 <Lightbulb className="h-5 w-5" />
               </div>
               <div>

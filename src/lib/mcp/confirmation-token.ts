@@ -46,7 +46,7 @@ const getSecret = (() => {
         }
         if (!devWarned) {
           devWarned = true;
-          // eslint-disable-next-line no-console
+
           console.warn(
             "[mcp/confirmation-token] PF_JWT_SECRET not set — using ephemeral dev secret. Tokens won't survive restart."
           );

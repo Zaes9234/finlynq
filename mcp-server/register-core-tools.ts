@@ -20,8 +20,6 @@ import {
   type Debt,
 } from "../src/lib/loan-calculator.js";
 import {
-  getLatestFxRate,
-  getRate,
   getRateToUsdDetailed,
   validateCurrencyCode,
   validateFxDate,
@@ -46,20 +44,7 @@ import {
   csvToRawTransactionsWithMapping,
 } from "../src/lib/csv-parser.js";
 import { parseOfx } from "../src/lib/ofx-parser.js";
-import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline.js";
-import { generateImportHash } from "../src/lib/import-hash.js";
-import {
-  detectProbableDuplicates,
-  type DuplicateCandidatePool,
-  type DuplicateCandidateRow,
-  type DuplicateMatch,
-} from "../src/lib/external-import/duplicate-detect.js";
-import {
-  scanForPossibleDuplicates,
-  dateBoundsForScan,
-  type CommittedInsert,
-  type CandidateRow,
-} from "../src/lib/mcp/duplicate-hints.js";
+import { type RawTransaction } from "../src/lib/import-pipeline.js";
 
 // FINLYNQ-84: rules are JSONB conditions+actions. Stdio matcher mirrors
 // the structure from src/lib/auto-categorize.ts but trims to what stdio
@@ -486,7 +471,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
 
   server.tool(
     "get_net_worth",
-    "Net worth across all accounts. Returns per-currency assets/liabilities/net. Pass `months` > 0 for a trend; omit for current totals. reportingCurrency is surfaced as metadata for cross-currency context.",
+    "Net worth across all accounts. Returns per-currency assets/liabilities/net. Pass `months` > 0 for a trend; omit for current totals. reportingCurrency is surfaced as metadata for cross-currency context. NOTE: this stdio surface values ALL accounts (incl. investment) at ledger / net-contribution basis (SUM(transactions.amount)); market-valued investment balances are available only over the HTTP MCP transport on an OAuth/built-in-chat connection (which carries a decryption key).",
     {
       currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency"),
       months: z.number().optional().describe("If set, return a trend over the last N months"),

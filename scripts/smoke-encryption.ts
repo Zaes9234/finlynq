@@ -1,4 +1,4 @@
-/* eslint-disable no-console */
+
 /**
  * End-to-end smoke test for the Phase 1 encryption primitives.
  * Runs outside Next.js to validate signup → login → write → read →

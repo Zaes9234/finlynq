@@ -267,45 +267,45 @@ function FirePageContent() {
                 <ResultCard
                   label="FIRE Number"
                   value={formatCurrency(result.fireNumber, displayCurrency)}
-                  icon={<Target className="h-5 w-5 text-orange-600" />}
-                  color="bg-orange-100"
+                  icon={<Target className="h-5 w-5 text-orange-600 dark:text-orange-400" />}
+                  color="bg-orange-100 dark:bg-orange-950/60"
                 />
                 <ResultCard
                   label="Years to FIRE"
                   value={`${result.yearsToFire} years`}
-                  icon={<Calendar className="h-5 w-5 text-indigo-600" />}
-                  color="bg-indigo-100"
+                  icon={<Calendar className="h-5 w-5 text-primary" />}
+                  color="bg-primary/10"
                 />
                 <ResultCard
                   label="FIRE Age"
                   value={`Age ${result.fireAge}`}
-                  icon={<Flame className="h-5 w-5 text-rose-600" />}
-                  color="bg-rose-100"
+                  icon={<Flame className="h-5 w-5 text-rose-600 dark:text-rose-400" />}
+                  color="bg-rose-100 dark:bg-rose-950/60"
                 />
                 <ResultCard
                   label="Projected FIRE Date"
                   value={result.fireDate}
-                  icon={<Calendar className="h-5 w-5 text-cyan-600" />}
-                  color="bg-cyan-100"
+                  icon={<Calendar className="h-5 w-5 text-cyan-600 dark:text-cyan-400" />}
+                  color="bg-cyan-100 dark:bg-cyan-950/60"
                 />
                 <ResultCard
                   label="Coast FIRE Number"
                   value={formatCurrency(result.coastFireNumber, displayCurrency)}
-                  icon={<Wallet className="h-5 w-5 text-emerald-600" />}
-                  color="bg-emerald-100"
+                  icon={<Wallet className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />}
+                  color="bg-emerald-100 dark:bg-emerald-950/60"
                 />
                 <ResultCard
                   label="Coast FIRE Age"
                   value={`Age ${result.coastFireAge}`}
-                  icon={<TrendingUp className="h-5 w-5 text-violet-600" />}
-                  color="bg-violet-100"
+                  icon={<TrendingUp className="h-5 w-5 text-violet-600 dark:text-violet-400" />}
+                  color="bg-violet-100 dark:bg-violet-950/60"
                 />
               </div>
 
               {/* Coast FIRE explanation */}
-              <Card className="bg-emerald-50 border-emerald-200">
+              <Card className="bg-emerald-50 border-emerald-200 dark:bg-emerald-950/30 dark:border-emerald-900/50">
                 <CardContent className="py-3">
-                  <p className="text-sm text-emerald-700">
+                  <p className="text-sm text-emerald-700 dark:text-emerald-300">
                     <strong>Coast FIRE:</strong> If you already have {formatCurrency(result.coastFireNumber, displayCurrency)} invested,
                     you could stop saving entirely and still reach your FIRE number by age {parseInt(form.targetRetirementAge)} through investment growth alone.
                     At your current savings rate, you will reach Coast FIRE at age {result.coastFireAge}.
@@ -369,10 +369,10 @@ function FirePageContent() {
                         variant="outline"
                         className={`text-sm font-mono ${
                           mcResult.successProbability >= 80
-                            ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800"
                             : mcResult.successProbability >= 50
-                            ? "bg-amber-50 text-amber-700 border-amber-300"
-                            : "bg-rose-50 text-rose-700 border-rose-300"
+                            ? "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800"
+                            : "bg-rose-50 text-rose-700 border-rose-300 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-800"
                         }`}
                       >
                         {mcResult.successProbability}% success
@@ -505,11 +505,11 @@ function FirePageContent() {
                       {/* Final value percentiles */}
                       <div className="grid grid-cols-5 gap-2 text-center">
                         {([
-                          { label: "Worst Case (P10)", value: mcResult.finalValues.p10, color: "text-rose-600" },
-                          { label: "P25", value: mcResult.finalValues.p25, color: "text-amber-600" },
-                          { label: "Median (P50)", value: mcResult.finalValues.p50, color: "text-indigo-600" },
-                          { label: "P75", value: mcResult.finalValues.p75, color: "text-emerald-600" },
-                          { label: "Best Case (P90)", value: mcResult.finalValues.p90, color: "text-emerald-700" },
+                          { label: "Worst Case (P10)", value: mcResult.finalValues.p10, color: "text-rose-600 dark:text-rose-400" },
+                          { label: "P25", value: mcResult.finalValues.p25, color: "text-amber-600 dark:text-amber-400" },
+                          { label: "Median (P50)", value: mcResult.finalValues.p50, color: "text-primary" },
+                          { label: "P75", value: mcResult.finalValues.p75, color: "text-emerald-600 dark:text-emerald-400" },
+                          { label: "Best Case (P90)", value: mcResult.finalValues.p90, color: "text-emerald-700 dark:text-emerald-300" },
                         ]).map((item) => (
                           <div key={item.label} className="space-y-1">
                             <p className="text-xs text-muted-foreground">{item.label}</p>
@@ -570,12 +570,12 @@ function FirePageContent() {
                                   key={s}
                                   className={`text-center font-mono ${
                                     isCurrentScenario
-                                      ? "bg-indigo-100 font-bold text-indigo-700"
+                                      ? "bg-primary/10 font-bold text-primary"
                                       : years === -1
                                       ? "text-muted-foreground"
                                       : years <= result.yearsToFire
-                                      ? "text-emerald-600"
-                                      : "text-amber-600"
+                                      ? "text-emerald-600 dark:text-emerald-400"
+                                      : "text-amber-600 dark:text-amber-400"
                                   }`}
                                 >
                                   {years === -1 ? "50+" : `${years} yr`}

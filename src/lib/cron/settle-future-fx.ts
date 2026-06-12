@@ -18,8 +18,9 @@
  */
 
 import { db, schema } from "@/db";
-import { sql, and, eq, lt, gt, isNotNull, isNull, or } from "drizzle-orm";
+import { sql, and, eq, lt, isNotNull } from "drizzle-orm";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
+import { todayISO } from "@/lib/utils/date";
 import { computeReportingFields } from "@/lib/fx/reporting-amount";
 import { getDisplayCurrency } from "@/lib/fx-service";
 
@@ -30,7 +31,7 @@ export type SettleResult = { settled: number; failed: number; errors: string[] }
  * a failure on one row doesn't stop the rest.
  */
 export async function settleFutureFxRates(): Promise<SettleResult> {
-  const today = new Date().toISOString().split("T")[0];
+  const today = todayISO();
 
   // Find candidate rows. The (date <= today AND date > entered_at::date)
   // pair narrows to rows whose date has passed but was forward-dated at entry.
@@ -113,7 +114,7 @@ export async function settleFutureFxRates(): Promise<SettleResult> {
  * rate hasn't materially changed).
  */
 export async function settleFutureReportingRates(): Promise<SettleResult> {
-  const today = new Date().toISOString().split("T")[0];
+  const today = todayISO();
 
   const candidates = await db
     .select({
@@ -189,11 +190,11 @@ export function startSettleFutureFxTimer(): void {
   const ONE_DAY = 24 * 60 * 60 * 1000;
   timer = setInterval(() => {
     settleFutureFxRates().catch((err) => {
-      // eslint-disable-next-line no-console
+
       console.error("[settle-future-fx] sweep failed:", err);
     });
     settleFutureReportingRates().catch((err) => {
-      // eslint-disable-next-line no-console
+
       console.error("[settle-future-fx] reporting sweep failed:", err);
     });
   }, ONE_DAY);

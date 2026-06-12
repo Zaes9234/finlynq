@@ -59,6 +59,7 @@ import {
 } from "@/lib/rules/schema";
 import { applyRulesToStagedBatch } from "@/lib/rules/apply-to-staged-batch";
 import { encryptRuleFields } from "@/lib/rules/crypto";
+import { todayISO } from "@/lib/utils/date";
 
 export const dynamic = "force-dynamic";
 
@@ -243,8 +244,6 @@ export async function POST(
     return `Rule (${conditions.all.length} cond / ${actions.length} action)`.slice(0, 200);
   })();
 
-  const todayISO = new Date().toISOString().split("T")[0];
-
   // Encrypt sensitive free-text (name + payee/note/tags condition values +
   // rename_payee.to + set_tags.tags) AFTER the FK guards above (2026-06-01).
   // The applyRulesToStagedBatch call below re-loads + decrypts the rule before
@@ -260,7 +259,7 @@ export async function POST(
       actions: enc.actions as unknown as object,
       isActive: true,
       priority: 0,
-      createdAt: todayISO,
+      createdAt: todayISO(),
     })
     .returning({ id: schema.transactionRules.id });
   const ruleId = inserted[0]?.id;
@@ -284,7 +283,7 @@ export async function POST(
       );
       updatedRowIds = applyResult.matches.map((m) => m.rowId);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.error("[create-rule] applyRulesToStagedBatch threw", {
         userId,
         stagedImportId: id,

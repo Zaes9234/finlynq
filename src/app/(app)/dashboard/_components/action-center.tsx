@@ -35,7 +35,19 @@ export function ActionCenter() {
   });
 
   useEffect(() => {
-    fetch("/api/spotlight").then((r) => r.json()).then((d) => setItems(d.items));
+    let cancelled = false;
+    fetch("/api/spotlight")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled) return;
+        setItems(d && Array.isArray(d.items) ? d.items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setItems([]);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const dismiss = (id: string) => {
@@ -122,6 +134,7 @@ export function ActionCenter() {
                           onClick={() => dismiss(item.id)}
                           className="p-1 rounded-md opacity-0 group-hover:opacity-100 hover:bg-muted/80 transition-all"
                           title="Dismiss"
+                          aria-label="Dismiss alert"
                         >
                           <X className="h-3.5 w-3.5 text-muted-foreground" />
                         </button>

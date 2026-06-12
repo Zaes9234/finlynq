@@ -1,4 +1,4 @@
-/* eslint-disable no-console */
+
 /**
  * One-shot migration: hash any plaintext API keys sitting in `settings.value`
  * (key='api_key') in place. Idempotent — rows already prefixed with `sha256:`

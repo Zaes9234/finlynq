@@ -15,7 +15,6 @@ Thank you for your interest in contributing! Finlynq is a community project and 
 ## Branch Strategy
 
 - `main` — production, never target this directly
-- `staging` — pre-production/demo, never target this directly
 - `dev` — **all PRs must target `dev`**
 
 Always branch from `dev`:
@@ -69,7 +68,7 @@ without splitting the codebase or gating features. Full text: [CLA.md](CLA.md).
 ## Code Conventions
 
 - TypeScript throughout — avoid `any`
-- Follow patterns already established in the codebase (see `CLAUDE.md`)
+- Follow patterns already established in the codebase
 - Use the shared color palette from `src/lib/chart-colors.ts`
 - shadcn/ui v4 uses `@base-ui/react` — use the `render` prop pattern, not `asChild`
 - Form validation: use `useState<Record<string, string>>({})` for errors

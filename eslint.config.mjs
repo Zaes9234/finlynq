@@ -41,18 +41,36 @@ const eslintConfig = defineConfig([
     //   prefer-const, react-hooks/rules-of-hooks, react-hooks/use-memo,
     //   react-hooks/immutability, react-hooks/static-components,
     //   @typescript-eslint/ban-ts-comment, @next/next/no-html-link-for-pages.
-    // The 5 large backlogs below + preserve-manual-memoization stay `warn`
+    //
+    // FINLYNQ-145 (2026-06-12) re-promoted 3 MORE rules — removed from this
+    // block so they gate at their default `error` severity (zero violations
+    // repo-wide today):
+    //   @typescript-eslint/no-require-imports (the lone pg-shim require carries
+    //     a justified file-scoped disable),
+    //   react/display-name (never had a violation),
+    //   react/no-unescaped-entities (last escapes landed in FINLYNQ-143/144).
+    // It also gave @typescript-eslint/no-unused-vars an `^_` ignore contract so
+    // intentionally-unused args/vars/caught-errors are silenced at source.
+    // The 3 large backlogs below + preserve-manual-memoization stay `warn`
     // (each is its own follow-up PR).
     rules: {
-      "@typescript-eslint/no-require-imports": "warn",
       "react-hooks/set-state-in-effect": "warn",
       "@typescript-eslint/no-explicit-any": "warn",
-      "react/display-name": "warn",
-      "react/no-unescaped-entities": "warn",
+      // Intentionally-unused identifiers prefixed with `_` are silenced (kills
+      // ~51 noise warnings from placeholder args / destructured-but-unused vars
+      // / caught-but-unused errors). Genuinely-dead bindings still warn.
+      "@typescript-eslint/no-unused-vars": [
+        "warn",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          caughtErrorsIgnorePattern: "^_",
+        },
+      ],
       // eslint-plugin-react-hooks 7.1.1 (lockfile) errors on this React
-      // Compiler diagnostic ("Existing memoization could not be preserved") in
-      // 3 web components (inbox-to-approve-tab, inbox-to-categorize-tab,
-      // sankey-chart). It surfaced on the dev→main promotion PR — the blocking
+      // Compiler diagnostic ("Existing memoization could not be preserved").
+      // All 12 current warnings are in src/components/inbox/upload-drawer.tsx
+      // (~308 / ~505). It surfaced on the dev→main promotion PR — the blocking
       // lint is PR-only and these reached `dev` via direct pushes, so it was
       // never gated. Baselined to `warn` per the policy above; burn down + re-
       // promote to `error`. (An optimization hint, not a correctness bug.)

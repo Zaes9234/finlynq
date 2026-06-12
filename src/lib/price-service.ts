@@ -15,6 +15,7 @@
 
 import { db, schema } from "@/db";
 import { and, eq, inArray } from "drizzle-orm";
+import { todayISO } from "@/lib/utils/date";
 
 // ETF metadata now comes from the hardcoded registry in this file; the
 // earlier SQLite-backed ETF database was removed in the open-source/PG pivot.
@@ -35,10 +36,6 @@ type QuoteResult = {
   // reference) and on rows written before the 20260522 migration.
   previousClose?: number | null;
 };
-
-function todayISO(): string {
-  return new Date().toISOString().split("T")[0];
-}
 
 // ── Quote-fetch timeout + negative cache ────────────────────────────────────
 // A Yahoo symbol that returns no data (delisted/wrong/foreign ticker) is NEVER
@@ -66,7 +63,7 @@ function isQuoteNegativelyCached(symbol: string): boolean {
 
 function markQuoteMiss(symbol: string, reason: string): void {
   negativeQuoteCache.set(symbol, Date.now() + NEGATIVE_QUOTE_TTL_MS);
-  // eslint-disable-next-line no-console
+
   console.warn(
     `[price-service] no live quote for "${symbol}" (${reason}) — negative-cached for ${NEGATIVE_QUOTE_TTL_MS / 60000}m`,
   );
@@ -337,7 +334,7 @@ export async function fetchMultipleQuotesAtDate(
 
 // Cache prices in DB
 export async function cachePrice(symbol: string, price: number, currency: string) {
-  const today = new Date().toISOString().split("T")[0];
+  const today = todayISO();
   const existing = await db
     .select()
     .from(schema.priceCache)

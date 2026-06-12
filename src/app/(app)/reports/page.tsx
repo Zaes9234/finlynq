@@ -16,6 +16,8 @@ import { Separator } from "@/components/ui/separator";
 import { formatCurrency } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { CHART_COLORS } from "@/lib/chart-colors";
+import { todayISO } from "@/lib/utils/date";
+import { PageSkeleton } from "@/components/page-skeleton";
 import { SankeyChart } from "@/components/sankey-chart";
 import {
   Download,
@@ -130,7 +132,7 @@ type UnrealizedData = {
 
 function getPresetRange(preset: string): { start: string; end: string } {
   const now = new Date();
-  const end = now.toISOString().split("T")[0];
+  const end = todayISO();
   const y = now.getFullYear();
   const m = now.getMonth();
 
@@ -183,7 +185,7 @@ export default function ReportsPage() {
 
   // Shared filters
   const [startDate, setStartDate] = useState(`${currentYear}-01-01`);
-  const [endDate, setEndDate] = useState(new Date().toISOString().split("T")[0]);
+  const [endDate, setEndDate] = useState(todayISO());
   const [isBusiness, setIsBusiness] = useState(false);
   const [period, setPeriod] = useState<Period>("monthly");
   const [groupBy, setGroupBy] = useState<GroupByOption>("category");
@@ -194,6 +196,9 @@ export default function ReportsPage() {
   const [balanceSheet, setBalanceSheet] = useState<BalanceSheet | null>(null);
   const [yoyData, setYoyData] = useState<YoYData | null>(null);
   const [unrealizedData, setUnrealizedData] = useState<UnrealizedData | null>(null);
+  // First-paint gate: the page is full of charts that render blank axes against
+  // null data. Show a skeleton until the primary (trends) fetch resolves once.
+  const [loading, setLoading] = useState(true);
   const [yoyYear1, setYoyYear1] = useState(currentYear - 1);
   const [yoyYear2, setYoyYear2] = useState(currentYear);
 
@@ -216,17 +221,38 @@ export default function ReportsPage() {
 
   // Fetch trends data
   useEffect(() => {
+    let cancelled = false;
     const biz = isBusiness ? "&business=true" : "";
     fetch(`/api/reports/trends?startDate=${startDate}&endDate=${endDate}&period=${period}&groupBy=${groupBy}${biz}&currency=${encodeURIComponent(displayCurrency)}`)
-      .then((r) => r.json())
-      .then(setTrendsData);
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setTrendsData(d && typeof d === "object" ? (d as TrendsData) : null);
+      })
+      .catch(() => {
+        if (!cancelled) setTrendsData(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [startDate, endDate, period, groupBy, isBusiness, displayCurrency]);
 
   // Fetch balance sheet
   useEffect(() => {
+    let cancelled = false;
     fetch(`/api/reports?type=balance-sheet&endDate=${endDate}&currency=${encodeURIComponent(displayCurrency)}`)
-      .then((r) => r.json())
-      .then(setBalanceSheet);
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setBalanceSheet(d && typeof d === "object" ? (d as BalanceSheet) : null);
+      })
+      .catch(() => {
+        if (!cancelled) setBalanceSheet(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [endDate, displayCurrency]);
 
   // Fetch unrealized P&L (computed inside the income-statement endpoint).
@@ -242,9 +268,18 @@ export default function ReportsPage() {
   // Fetch YoY (dev mode only)
   useEffect(() => {
     if (!devMode) return;
+    let cancelled = false;
     fetch(`/api/reports/yoy?year1=${yoyYear1}&year2=${yoyYear2}&currency=${encodeURIComponent(displayCurrency)}`)
-      .then((r) => r.json())
-      .then(setYoyData);
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setYoyData(d && typeof d === "object" ? (d as YoYData) : null);
+      })
+      .catch(() => {
+        if (!cancelled) setYoyData(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [yoyYear1, yoyYear2, devMode, displayCurrency]);
 
   // Sankey data
@@ -309,6 +344,12 @@ export default function ReportsPage() {
     monthly: "Monthly",
     quarterly: "Quarterly",
   };
+
+  // Hold the first paint until trends resolves so the charts never flash blank
+  // axes against null data.
+  if (loading && !trendsData) {
+    return <PageSkeleton variant="cards" rows={6} />;
+  }
 
   return (
     <div className="space-y-6">
@@ -777,7 +818,7 @@ export default function ReportsPage() {
                     <CardDescription>
                       How asset valuations and FX translation moved during the
                       selected period. Computed as snapshot at period end −
-                      snapshot at period start, so the totals match what you'd
+                      snapshot at period start, so the totals match what you&apos;d
                       get reporting monthly, quarterly, or annually.
                     </CardDescription>
                   </CardHeader>

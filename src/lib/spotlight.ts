@@ -9,6 +9,7 @@ import { db, schema } from "@/db";
 import { eq, and, gte, lte, sql } from "drizzle-orm";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
+import { todayISO } from "@/lib/utils/date";
 
 const { accounts, categories, transactions, budgets, goals, subscriptions } = schema;
 
@@ -28,17 +29,13 @@ const SEVERITY_ORDER: Record<SpotlightSeverity, number> = { critical: 0, warning
 
 type RateCtx = { displayCurrency: string; rateMap: Map<string, number> };
 
-function today(): string {
-  return new Date().toISOString().split("T")[0];
-}
-
 function currentMonth(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
 }
 
 function daysFromNow(dateStr: string): number {
-  const t = new Date(today() + "T00:00:00").getTime();
+  const t = new Date(todayISO() + "T00:00:00").getTime();
   const d = new Date(dateStr + "T00:00:00").getTime();
   return Math.round((d - t) / 86400000);
 }
@@ -85,7 +82,7 @@ async function getOverspentBudgets(userId: string, dek: Buffer | null): Promise<
 
 // 2. Upcoming large bills (>$100 in next 7 days)
 async function getUpcomingLargeBills(userId: string, dek: Buffer | null): Promise<SpotlightItem[]> {
-  const todayStr = today();
+  const todayStr = todayISO();
   const weekAhead = new Date(new Date(todayStr + "T00:00:00").getTime() + 7 * 86400000)
     .toISOString()
     .split("T")[0];
@@ -321,7 +318,7 @@ async function getLowBalances(userId: string, dek: Buffer | null, fx: RateCtx): 
 
 // 7. Subscription renewals (next 7 days)
 async function getUpcomingSubscriptions(userId: string, dek: Buffer | null): Promise<SpotlightItem[]> {
-  const todayStr = today();
+  const todayStr = todayISO();
   const weekAhead = new Date(new Date(todayStr + "T00:00:00").getTime() + 7 * 86400000)
     .toISOString()
     .split("T")[0];

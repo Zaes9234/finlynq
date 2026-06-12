@@ -9,7 +9,8 @@ import crypto from "crypto";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { wrapDEKForSecret, unwrapDEKForSecret, authLookupHash } from "@/lib/api-auth";
-import { DEFAULT_SCOPE, normalizeRequestedScope, InvalidScopeError } from "@/lib/oauth-scopes";
+import { normalizeDbRows } from "@/lib/db-utils";
+import { DEFAULT_SCOPE, normalizeRequestedScope } from "@/lib/oauth-scopes";
 
 export { DEFAULT_SCOPE, InvalidScopeError } from "@/lib/oauth-scopes";
 
@@ -31,9 +32,26 @@ export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
  * (dev / staging / prod / mobile / desktop) and keeps the DB row small. */
 export const MAX_REDIRECT_URIS_PER_CLIENT = 5;
 
-/** The issuer / base URL for OAuth metadata. */
+/** The issuer / base URL for OAuth metadata.
+ *
+ * `APP_URL` is the single source of truth (self-hosters set it; docker-compose
+ * defaults it to http://localhost:3000). When it's unset we fall back to
+ * localhost so a fresh self-host still produces *working* metadata — and we
+ * warn in production, where an unset APP_URL means MCP connector setup will
+ * advertise localhost to clients that can't reach it. */
 export function getIssuer(): string {
-  return (process.env.APP_URL ?? "https://finance.nextsoftwareconsulting.com").replace(/\/$/, "");
+  const appUrl = process.env.APP_URL;
+  if (!appUrl) {
+    if (process.env.NODE_ENV === "production") {
+      console.warn(
+        "[oauth] APP_URL is not set — OAuth issuer metadata is falling back to " +
+          "http://localhost:3000. Set APP_URL to your public origin so MCP " +
+          "connector setup advertises the right URL."
+      );
+    }
+    return "http://localhost:3000";
+  }
+  return appUrl.replace(/\/$/, "");
 }
 
 // Typed shorthand for the raw PG executor
@@ -170,7 +188,7 @@ export async function consumeAuthCode(opts: {
   const result = await pgDb.execute(sql`
     DELETE FROM oauth_authorization_codes WHERE code = ${codeHash} RETURNING *
   `);
-  const rows: AuthCodeRow[] = result.rows ?? result ?? [];
+  const rows = normalizeDbRows<AuthCodeRow>(result);
   if (!rows.length) return null;
   const row = rows[0];
 
@@ -270,7 +288,7 @@ export async function validateOauthToken(token: string): Promise<{ userId: strin
        AND revoked_at IS NULL
      LIMIT 1
   `);
-  const rows: Pick<TokenRow, "user_id" | "expires_at" | "dek_wrapped" | "scope">[] = result.rows ?? result ?? [];
+  const rows = normalizeDbRows<Pick<TokenRow, "user_id" | "expires_at" | "dek_wrapped" | "scope">>(result);
   if (!rows.length) return null;
   if (new Date(rows[0].expires_at) < new Date()) return null;
 
@@ -550,7 +568,7 @@ export async function getClient(clientId: string): Promise<RegisteredClient | nu
   const result = await pgDb.execute(sql`
     SELECT * FROM oauth_clients WHERE client_id = ${clientId} LIMIT 1
   `);
-  const rows: ClientRow[] = result.rows ?? result ?? [];
+  const rows = normalizeDbRows<ClientRow>(result);
   if (!rows.length) return null;
   const r = rows[0];
   return {

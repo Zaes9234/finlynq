@@ -12,6 +12,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { sql, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { stagedTransactions } from "../src/db/schema-pg";
+// Drizzle proxy (the `@/db` singleton). The `db` passed to registerPgTools is
+// the pg-compat shim (.execute only); libs like applyRulesToStagedBatch need
+// the full Drizzle query-builder, so we import it directly (FINLYNQ-150).
+import { db as drizzleDb } from "../src/db";
 import { normalizeDbRows } from "../src/lib/db-utils";
 import { decryptField, encryptField } from "../src/lib/crypto/envelope";
 import { maybeDecryptFileBytes } from "../src/lib/crypto/file-envelope";
@@ -119,6 +123,7 @@ import {
 import { decryptStaged, encryptStaged } from "../src/lib/crypto/staging-envelope";
 import { calculateFinancialHealth } from "../src/lib/financial-health";
 import { getHoldingsValueByAccount } from "../src/lib/holdings-value";
+import { applyInvestmentMarketOverlay } from "./investment-balance-overlay";
 import { isCashLegRow } from "../src/lib/portfolio/aggregation-predicates";
 import { computeGoalProgress } from "../src/lib/goals-progress";
 import { sourceTagFor, isFormatTag, type FormatTag } from "../src/lib/tx-source";
@@ -130,6 +135,23 @@ import {
   STALENESS_THRESHOLD_MULTIPLIER,
   type RecurringDropReason,
 } from "../src/lib/recurring-detection";
+// FINLYNQ-150 — bank-ledger reconciliation + rule-application surface. These
+// 7 HTTP-only tools reuse the EXACT web lib functions so MCP and the /import
+// page stay behavior-identical.
+import {
+  computeReconcileForAccount,
+  RECONCILE_DEFAULT_THRESHOLDS,
+  applyRulesToBankRows,
+  type ReconcileThresholds,
+} from "../src/lib/reconcile/match-engine";
+import { materializeBankRowAsTransaction } from "../src/lib/reconcile/materialize-transaction";
+import { materializeBankRowAsTransfer } from "../src/lib/reconcile/materialize-transfer";
+import {
+  linkTransactionToBank,
+  unlinkTransactionFromBank,
+  LinkError,
+} from "../src/lib/reconcile/links";
+import { applyRulesToStagedBatch } from "../src/lib/rules/apply-to-staged-batch";
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -1232,7 +1254,7 @@ export function registerPgTools(
   // ── get_account_balances ───────────────────────────────────────────────────
   server.tool(
     "get_account_balances",
-    "Get current balances for all accounts. Each account's balance is in its own (account) currency. When reportingCurrency is set, also returns a unified total converted to that currency. Default reporting = user's display currency.",
+    "Get current balances for all accounts. Each account's balance is in its own (account) currency. INVESTMENT accounts are valued at MARKET (current `holdings.value`, cash sleeve included), matching the web dashboard — but only on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key (no key) investment accounts fall back to ledger (net contributions = SUM(transactions.amount)) and a top-level `note` explains the fallback. Each account row carries `isInvestment` and `balanceBasis` ('market'|'ledger'); market-valued rows also carry `costBasis` and `cashFlowBasis` (the underlying tx-sum). When reportingCurrency is set, also returns a unified total converted to that currency. Default reporting = user's display currency.",
     {
       currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter rows by currency"),
       reportingCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) — if set, response includes per-account converted balance + a grand total in this currency. Defaults to user's display currency."),
@@ -1240,21 +1262,40 @@ export function registerPgTools(
     async ({ currency, reportingCurrency }) => {
       const raw = await q(db, sql`
         SELECT a.id, a.name_ct, a.alias_ct, a.type, a."group", a.currency,
+               a.is_investment,
                COALESCE(SUM(t.amount), 0) AS balance
         FROM accounts a
         LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
         WHERE a.user_id = ${userId}
           ${currency && currency !== "all" ? sql`AND a.currency = ${currency}` : sql``}
-        GROUP BY a.id, a.name_ct, a.alias_ct, a.type, a."group", a.currency
-        ORDER BY a.type, a."group"
+        GROUP BY a.id, a.name_ct, a.alias_ct, a.type, a."group", a.currency, a.is_investment
+        ORDER BY a.type, a."group", a.id
       `);
       // Stream D: decrypt name + alias before returning. Drop the internal
-      // _ct columns from the response so Claude doesn't see them.
-      const rows = decryptNameish(raw, dek).map((r) => {
-        const { name_ct, alias_ct, ...rest } = r;
-        void name_ct; void alias_ct;
+      // _ct columns AND the raw is_investment flag from the response (the
+      // overlay re-surfaces a typed `isInvestment` instead).
+      const decrypted = decryptNameish(raw, dek).map((r) => {
+        const { name_ct, alias_ct, is_investment, ...rest } = r;
+        void name_ct; void alias_ct; void is_investment;
         return rest;
       });
+
+      // FINLYNQ-151 — value investment accounts at market (matching the web
+      // "account with holdings = holdings.value" invariant). DEK-gated: the
+      // overlay never prices when `dek == null` (qty×1 hazard) and yields
+      // ledger numbers + a note instead. The Issue #210 `items` array MUST be
+      // fed from the OVERLAID balances so `totalReporting` ties to
+      // `get_net_worth.total.net.amount` on identical state.
+      const overlay = await applyInvestmentMarketOverlay(
+        raw.map((r, i) => ({
+          id: Number(r.id),
+          currency: String(decrypted[i].currency),
+          isInvestment: r.is_investment === true,
+          ledgerBalance: Number(r.balance),
+        })),
+        dek,
+        () => getHoldingsValueByAccount(userId, dek),
+      );
 
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const today = new Date().toISOString().split("T")[0];
@@ -1262,10 +1303,10 @@ export function registerPgTools(
       // Issue #210 — round-once aggregation. Callers MUST NOT round per-item
       // before summing or `totalReporting` will drift 1c from `get_net_worth`
       // for users with many multi-currency accounts. Aggregate the raw
-      // (unrounded) balance/currency tuples; render per-row display values
-      // separately from the inputs we pass to the helper.
-      const items = rows.map((r) => ({
-        amount: Number(r.balance),
+      // (unrounded) overlaid balance/currency tuples; render per-row display
+      // values separately from the inputs we pass to the helper.
+      const items = overlay.rows.map((r) => ({
+        amount: r.balance,
         currency: String(r.currency),
       }));
       const agg = await aggregateInReporting(
@@ -1274,25 +1315,38 @@ export function registerPgTools(
         (from, to) => getRate(from, to, today, userId),
       );
 
-      const enriched = rows.map((r, i) => {
+      const enriched = decrypted.map((r, i) => {
+        const ov = overlay.rows[i];
         const ccy = String(r.currency);
         // Issue #208 — round the raw `balance` to crush IEEE-754 leaks
         // (`-3.6e-11`-class noise from SUM(t.amount)). `tagAmount` already
         // 2dp-rounds the tagged variants; this fixes the bypassed field.
-        const rawBalance = roundMoney(Number(r.balance), ccy);
+        const rawBalance = roundMoney(ov.balance, ccy);
         const reportingAmount = agg.perItem[i].reportingAmount;
-        return {
+        const out: Row = {
           ...r,
           balance: rawBalance,
           balanceTagged: tagAmount(rawBalance, ccy, "account"),
           balanceReporting: tagAmount(reportingAmount, reporting, "reporting"),
+          isInvestment: ov.isInvestment,
+          balanceBasis: ov.balanceBasis,
         };
+        if (ov.balanceBasis === "market") {
+          // Market-valued investment rows: surface the remaining cost basis
+          // and the net-contribution figure (the underlying tx-sum) so the
+          // contribution number stays reachable. Field name mirrors the
+          // dashboard's `cashFlowBasis`.
+          out.costBasis = tagAmount(ov.costBasis ?? 0, ccy, "account");
+          out.cashFlowBasis = tagAmount(roundMoney(ov.ledgerBalance, ccy), ccy, "account");
+        }
+        return out;
       });
 
       return dataResponse({
         accounts: enriched,
         reportingCurrency: reporting,
         totalReporting: tagAmount(agg.totalReporting, reporting, "reporting"),
+        ...(overlay.note ? { note: overlay.note } : {}),
       });
     }
   );
@@ -1455,7 +1509,7 @@ export function registerPgTools(
     async ({ period, priorMonths, months, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       if (months !== undefined && priorMonths === undefined) {
-        // eslint-disable-next-line no-console
+
         console.warn("[mcp] get_spending_trends: `months` is deprecated (issue #210); use `priorMonths`.");
       }
       const lookback = priorMonths ?? months ?? 12;
@@ -1603,7 +1657,7 @@ export function registerPgTools(
   // ── get_net_worth ──────────────────────────────────────────────────────────
   server.tool(
     "get_net_worth",
-    "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). Pass `priorMonths` > 0 for a month-by-month trend (returns the current month plus N priors, with `currentMonth` flagged separately); omit for current totals only. Issue #210: legacy `months` param is accepted as a deprecated alias.",
+    "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). INVESTMENT accounts are valued at MARKET (current holdings value, cash sleeve included), matching the web dashboard and get_account_balances, on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key they fall back to ledger (net contributions) and a top-level `note` explains it. The current-totals response carries `basis` ('market'|'ledger'); `total.net.amount` equals `get_account_balances.totalReporting.amount` on identical state. Pass `priorMonths` > 0 for a month-by-month trend (returns the current month plus N priors, with `currentMonth` flagged separately) — the trend is ALWAYS contribution-basis (`basis: 'ledger'`; marking history to market needs daily snapshots and is out of scope), so the current-month trend row won't match a market-valued current-totals call. Omit `priorMonths` for current totals only. Issue #210: legacy `months` param is accepted as a deprecated alias.",
     {
       currency: z.enum(["CAD", "USD", "all"]).optional().describe("Filter by currency (per-row)"),
       priorMonths: z.number().optional().describe("If set, return a trend covering the current (partial) month plus N prior months. Omit or set to 0 for current totals."),
@@ -1620,35 +1674,68 @@ export function registerPgTools(
       // what callers asked for, and `months: 3` keeps the legacy behavior.
       const lookback = priorMonths ?? months;
       if (months !== undefined && priorMonths === undefined) {
-        // eslint-disable-next-line no-console
+
         console.warn("[mcp] get_net_worth: `months` is deprecated (issue #210); use `priorMonths`.");
       }
       if (!lookback || lookback <= 0) {
-        const rows = await q(db, sql`
-          SELECT a.type, a.currency, COALESCE(SUM(t.amount), 0) AS total
+        // FINLYNQ-151 — restructure to PER-ACCOUNT grain (was grouped by
+        // type+currency) with the SAME ordering as get_account_balances'
+        // query so the two tools' overlaid item arrays line up. This lets the
+        // market overlay run per account and makes Issue #210 parity
+        // STRUCTURAL (see the parity comment below).
+        const acctRows = await q(db, sql`
+          SELECT a.id, a.type, a.currency, a."group", a.is_investment,
+                 COALESCE(SUM(t.amount), 0) AS total
           FROM accounts a
           LEFT JOIN transactions t ON a.id = t.account_id AND t.user_id = ${userId}
           WHERE a.user_id = ${userId}
             ${currency && currency !== "all" ? sql`AND a.currency = ${currency}` : sql``}
-          GROUP BY a.type, a.currency
-        `) as { type: string; currency: string; total: number }[];
+          GROUP BY a.id, a.type, a.currency, a."group", a.is_investment
+          ORDER BY a.type, a."group", a.id
+        `) as { id: number; type: string; currency: string; group: string; is_investment: boolean; total: number }[];
 
+        // Apply the identical market overlay get_account_balances uses. With a
+        // DEK, investment accounts are valued at market; without one (pf_ API
+        // key) they stay at ledger and `overlay.note` explains the fallback.
+        const overlay = await applyInvestmentMarketOverlay(
+          acctRows.map((r) => ({
+            id: Number(r.id),
+            currency: r.currency ?? "CAD",
+            isInvestment: r.is_investment === true,
+            ledgerBalance: Number(r.total),
+          })),
+          dek,
+          () => getHoldingsValueByAccount(userId, dek),
+        );
+
+        // Roll up per-currency assets/liabilities/net from the OVERLAID
+        // per-account balances (+= so multiple accounts per currency sum).
         const summary: Record<string, { assets: number; liabilities: number; net: number }> = {};
-        for (const row of rows) {
-          const c = row.currency ?? "CAD";
+        overlay.rows.forEach((ov, i) => {
+          const c = acctRows[i].currency ?? "CAD";
           if (!summary[c]) summary[c] = { assets: 0, liabilities: 0, net: 0 };
-          if (row.type === "A") summary[c].assets = Number(row.total);
-          else summary[c].liabilities = Number(row.total);
+          if (acctRows[i].type === "A") summary[c].assets += ov.balance;
+          else summary[c].liabilities += ov.balance;
           summary[c].net = summary[c].assets + summary[c].liabilities;
-        }
+        });
 
-        // Issue #210 — round-once aggregation. Same helper as
-        // `get_account_balances` so `total.net.amount` agrees byte-for-byte
-        // with `get_account_balances.totalReporting.amount` on the same state.
+        // Issue #210 parity is now STRUCTURAL. `netItems` is one item per
+        // account from the SAME overlaid rows, in the SAME grain + order +
+        // amounts as get_account_balances' `items` array. So
+        // `aggregateInReporting(netItems)` accumulates the identical
+        // un-rounded reporting sum that get_account_balances' `totalReporting`
+        // does, and `total.net.amount === get_account_balances.totalReporting
+        // .amount` holds — in BOTH the dek-present case (both tools market)
+        // and the dek-null case (both tools ledger). `assetItems`/`liabItems`
+        // are the same per-account rows filtered by `type`.
         const fxLookup = (from: string, to: string) => getRate(from, to, today, userId);
-        const assetItems = Object.entries(summary).map(([ccy, v]) => ({ amount: v.assets, currency: ccy }));
-        const liabItems = Object.entries(summary).map(([ccy, v]) => ({ amount: v.liabilities, currency: ccy }));
-        const netItems = Object.entries(summary).map(([ccy, v]) => ({ amount: v.net, currency: ccy }));
+        const assetItems = overlay.rows
+          .map((ov, i) => ({ amount: ov.balance, currency: acctRows[i].currency ?? "CAD", type: acctRows[i].type }))
+          .filter((it) => it.type === "A");
+        const liabItems = overlay.rows
+          .map((ov, i) => ({ amount: ov.balance, currency: acctRows[i].currency ?? "CAD", type: acctRows[i].type }))
+          .filter((it) => it.type !== "A");
+        const netItems = overlay.rows.map((ov, i) => ({ amount: ov.balance, currency: acctRows[i].currency ?? "CAD" }));
         const aggAssets = await aggregateInReporting(assetItems, reporting, fxLookup);
         const aggLiab = await aggregateInReporting(liabItems, reporting, fxLookup);
         const aggNet = await aggregateInReporting(netItems, reporting, fxLookup);
@@ -1667,11 +1754,17 @@ export function registerPgTools(
         return dataResponse({
           byCurrency: roundedSummary,
           reportingCurrency: reporting,
+          // FINLYNQ-151 — discloses whether investment accounts were market-
+          // valued ('market', DEK present) or fell back to ledger / net-
+          // contributions ('ledger', pf_ API key). `note` mirrors
+          // get_account_balances.
+          basis: overlay.marketApplied ? "market" : "ledger",
           total: {
             assets: tagAmount(aggAssets.totalReporting, reporting, "reporting"),
             liabilities: tagAmount(aggLiab.totalReporting, reporting, "reporting"),
             net: tagAmount(aggNet.totalReporting, reporting, "reporting"),
           },
+          ...(overlay.note ? { note: overlay.note } : {}),
         });
       }
 
@@ -1738,6 +1831,13 @@ export function registerPgTools(
         months: lookback,
         currentMonth: currentMonthStr,
         reportingCurrency: reporting,
+        // FINLYNQ-151 — the trend is ALWAYS contribution-basis: each row is a
+        // running `SUM(t.amount)`, and marking the monthly history to market
+        // would need daily `portfolio_snapshots` (out of scope, candidate
+        // follow-up). So the current-month trend row will NOT match a market-
+        // valued current-totals call for users with investment accounts.
+        basis: "ledger",
+        note: "Trend rows are net-contribution (ledger) basis, NOT market value — the current-month row may differ from a market-valued get_net_worth() current-totals call for portfolios with investment accounts.",
         trend,
       });
     }
@@ -3103,7 +3203,7 @@ export function registerPgTools(
           // Lookup failure must not block the live write path — log and fall
           // through. Worst case: the caller's retry double-inserts on the
           // racing pair, strictly no worse than no idempotency.
-          // eslint-disable-next-line no-console
+
           console.warn("[bulk_record_transactions] idempotency lookup failed:", e);
         }
         return null;
@@ -3573,7 +3673,7 @@ export function registerPgTools(
         } catch (e) {
           // Scan must never fail the response. Log and surface an empty
           // hints array so the caller still sees the imported counts.
-          // eslint-disable-next-line no-console
+
           console.warn("[bulk_record_transactions] duplicate-hint scan failed:", e);
           possibleDuplicates = [];
         }
@@ -3633,7 +3733,7 @@ export function registerPgTools(
           `);
         } catch (e) {
           // Persist failure must not break the response — log and continue.
-          // eslint-disable-next-line no-console
+
           console.warn("[bulk_record_transactions] idempotency persist failed:", e);
         }
       }
@@ -5391,7 +5491,7 @@ export function registerPgTools(
     "finlynq_help",
     "Discover available tools, schema, and usage examples",
     {
-      topic: z.enum(["tools", "schema", "examples", "write", "portfolio"]).optional().describe("Help topic (default: tools)"),
+      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile"]).optional().describe("Help topic (default: tools)"),
       tool_name: z.string().optional().describe("Get help for a specific tool"),
     },
     async ({ topic, tool_name }) => {
@@ -5417,7 +5517,8 @@ export function registerPgTools(
           apply_rules_to_uncategorized: "apply_rules_to_uncategorized(dry_run?, limit?) — Batch-apply rules to uncategorized transactions.",
           get_portfolio_analysis: "get_portfolio_analysis(symbols?) — Holdings with full metrics; pass symbols[] to filter. Includes disclaimer.",
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark' (SP500|TSX|MSCI_WORLD|BONDS_CA).",
-          get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
+          get_account_balances: "get_account_balances(currency?, reportingCurrency?) — Current balance per account in its own currency, plus a unified total in reportingCurrency. INVESTMENT accounts are valued at MARKET (holdings.value, cash sleeve incl.) on OAuth/built-in-chat (DEK present); a pf_ API key falls back to ledger (SUM(amount)) + a top-level note. Each row carries isInvestment + balanceBasis; market rows also costBasis + cashFlowBasis (the net-contribution tx-sum).",
+          get_net_worth: "get_net_worth(currency?, priorMonths? [months? deprecated alias], reportingCurrency?) — Omit priorMonths for current totals; set priorMonths>0 for a month-by-month trend. Current totals value INVESTMENT accounts at MARKET (matching the web + get_account_balances) on OAuth/built-in-chat; a pf_ API key falls back to ledger + a note. Response carries basis ('market'|'ledger'); total.net.amount == get_account_balances.totalReporting.amount on identical state. The trend is ALWAYS contribution-basis (basis:'ledger').",
           record_transfer: "record_transfer(from_account_id? OR fromAccount, to_account_id? OR toAccount, amount, ...) — Atomic transfer pair between two accounts. PREFER from_account_id/to_account_id (exact); the name path is strict fuzzy with fail-loud ambiguity. Mismatched name+id pairs fail loud. Cross-currency: pass receivedAmount. In-kind: pass holding+quantity. Same-account forex (cash-sleeve ↔ cash-sleeve in different conceptual currencies inside one account, e.g. 'Cash - USD' → 'Cash - CAD'): receivedAmount is honored when both holding names carry divergent ISO-4217 suffixes — pass receivedAmount and the destination quantity is derived from it (cash sleeves track quantity = amount).",
           portfolio_buy: "portfolio_buy(account_id? OR account, holdingId? OR holding, qty, totalCost, date?, payee?, note?, tags?) — Buy shares in a brokerage account. Writes the canonical buy + buy_cash_leg pair (stock leg +, cash leg −, sum 0), opens a cost-basis lot, debits the cash sleeve. The cash sleeve for the holding's currency must already exist (add_portfolio_holding a 'Cash' holding first). Replaces the removed record_trade buy path.",
           portfolio_sell: "portfolio_sell(account_id? OR account, holdingId? OR holding, qty, totalProceeds, date?, lotSelection?, payee?, note?, tags?) — Sell shares. Writes sell + sell_cash_leg, closes lots (lotSelection.method FIFO|HIFO|SPECIFIC, default FIFO), credits the cash sleeve. Replaces the removed record_trade sell path.",
@@ -5445,7 +5546,8 @@ export function registerPgTools(
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
           trade_tools: ["record_transfer"],
-          tip: "Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts.",
+          reconcile_tools: ["get_reconcile_suggestions", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
+          tip: "Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools.",
         });
       }
 
@@ -5507,6 +5609,16 @@ export function registerPgTools(
           note_on_writes: "Investment activity MUST go through the portfolio_* write tools (record_transaction / bulk_record_transactions reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — add_portfolio_holding a 'Cash' holding for that currency first if missing.",
           disclaimer: PORTFOLIO_DISCLAIMER,
           note: "All portfolio read tools return a disclaimer field. Not financial advice.",
+        });
+      }
+
+      if (t === "reconcile") {
+        return dataResponse({
+          read_tools: ["get_reconcile_suggestions"],
+          write_tools: ["materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
+          bulk_tools: ["apply_rules_to_bank_rows"],
+          flow: "1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing. 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
+          note: "All reconcile tools are HTTP-only and need an unlocked DEK. apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
         });
       }
 
@@ -6308,7 +6420,7 @@ export function registerPgTools(
 
       return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "marketValue and unrealizedGain require live prices — not available in MCP. Use the portfolio page for full metrics. Results are per-holdingId — two holdings sharing a name across accounts return as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear in `holdings[]` with `status: 'cash_only'` and `totalReturnPct: null`.",
+        note: "Per-holding marketValue and unrealizedGain require live prices and are not surfaced here — use the portfolio page for full per-holding metrics. (Account-LEVEL market value IS available via get_account_balances / get_net_worth on OAuth/built-in-chat connections.) Results are per-holdingId — two holdings sharing a name across accounts return as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear in `holdings[]` with `status: 'cash_only'` and `totalReturnPct: null`.",
         totalHoldings: results.length,
         reportingCurrency: reporting,
         warnings,
@@ -6846,7 +6958,7 @@ export function registerPgTools(
 
       return dataResponse({
         disclaimer: PORTFOLIO_DISCLAIMER,
-        note: "unrealizedGain requires live prices — not available in MCP.",
+        note: "Per-holding unrealizedGain requires live prices and is not surfaced here. (Account-level market value IS available via get_account_balances / get_net_worth on OAuth/built-in-chat connections.)",
         // FK to portfolio_holdings.id — pass as portfolioHoldingId on
         // record_transaction / update_transaction to bind a transaction to
         // this position. Null when the matched rows are pure payee-fuzzy
@@ -10864,7 +10976,7 @@ export function registerPgTools(
         } catch (e) {
           // Fall through — better to re-execute than to break on a transient
           // SELECT failure.
-          // eslint-disable-next-line no-console
+
           console.warn("[approve_staged_rows] idempotency lookup failed:", e);
         }
       }
@@ -11420,7 +11532,7 @@ export function registerPgTools(
             ON CONFLICT (user_id, key) DO NOTHING
           `);
         } catch (e) {
-          // eslint-disable-next-line no-console
+
           console.warn("[approve_staged_rows] idempotency persist failed:", e);
         }
       }
@@ -11497,6 +11609,430 @@ export function registerPgTools(
       );
 
       return dataResponse({ stagedImportId });
+    },
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FINLYNQ-150 — Bank-ledger reconciliation + rule application (HTTP-only)
+  //
+  // 7 tools that give an AI assistant parity with the web /import page's
+  // bank-ledger reconcile layer. Every tool reuses the EXACT lib function the
+  // web route uses (no behavior drift); all need a DEK so they register here
+  // (HTTP transport) only, never on stdio. Canonical {success:true,data}
+  // envelope; cross-tenant ids resolve to err("Not found"); the wrapped libs
+  // already call invalidateUser after any `transactions` write, so only
+  // set_account_mode (which doesn't write transactions) skips it explicitly.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** Per-user reconcile thresholds from settings(key='reconcile_thresholds'),
+   *  falling back to RECONCILE_DEFAULT_THRESHOLDS. Mirrors the suggestions
+   *  route's loadThresholds (defense-in-depth on a malformed row). */
+  const loadReconcileThresholds = async (): Promise<ReconcileThresholds> => {
+    const rows = await q(
+      db,
+      sql`SELECT value FROM settings WHERE key = 'reconcile_thresholds' AND user_id = ${userId} LIMIT 1`,
+    );
+    if (!rows.length || rows[0].value == null) {
+      return { ...RECONCILE_DEFAULT_THRESHOLDS };
+    }
+    try {
+      const parsed =
+        typeof rows[0].value === "string"
+          ? JSON.parse(rows[0].value as string)
+          : (rows[0].value as Record<string, unknown>);
+      const numberOr = (v: unknown, fallback: number): number =>
+        typeof v === "number" && Number.isFinite(v) ? v : fallback;
+      return {
+        dateToleranceDays: numberOr(
+          parsed?.dateToleranceDays,
+          RECONCILE_DEFAULT_THRESHOLDS.dateToleranceDays,
+        ),
+        amountTolerancePct: numberOr(
+          parsed?.amountTolerancePct,
+          RECONCILE_DEFAULT_THRESHOLDS.amountTolerancePct,
+        ),
+        amountToleranceFloor: numberOr(
+          parsed?.amountToleranceFloor,
+          RECONCILE_DEFAULT_THRESHOLDS.amountToleranceFloor,
+        ),
+        scoreThreshold: numberOr(
+          parsed?.scoreThreshold,
+          RECONCILE_DEFAULT_THRESHOLDS.scoreThreshold,
+        ),
+      };
+    } catch {
+      return { ...RECONCILE_DEFAULT_THRESHOLDS };
+    }
+  };
+
+  // ── get_reconcile_suggestions ───────────────────────────────────────────────
+  server.tool(
+    "get_reconcile_suggestions",
+    "Reconcile snapshot for one account's bank ledger vs. its transactions (the /import page's three-layer match engine). Returns { linked, suggestions, bankOnly, txOnly, transactions, bankTransactions }. Each bankTransactions[id] carries suggestedCategoryId / suggestedTransferAccountId (rule-engine defaults for materialize) and duplicateOfTransactionId (strict possible-duplicate flag). Read-only. Requires an unlocked DEK (payees are decrypted to score fuzzy matches).",
+    {
+      accountId: z.number().int().positive().describe("accounts.id to reconcile."),
+      dateMin: z
+        .string()
+        .optional()
+        .describe("ISO YYYY-MM-DD floor on both tx + bank dates. Omit for no floor."),
+      dateMax: z
+        .string()
+        .optional()
+        .describe("ISO YYYY-MM-DD ceiling on both tx + bank dates. Omit for no ceiling."),
+      lookbackDays: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Legacy alternative to dateMin: last N days from today. dateMin wins when both set."),
+    },
+    async ({ accountId, dateMin, dateMax, lookbackDays }) => {
+      if (!dek) {
+        return err(
+          "get_reconcile_suggestions requires an unlocked DEK to decrypt payees for matching. Re-login to refresh your session.",
+        );
+      }
+      // Cross-tenant guard — 404-equivalent without leaking existence.
+      const acct = await q(
+        db,
+        sql`SELECT id FROM accounts WHERE id = ${accountId} AND user_id = ${userId} LIMIT 1`,
+      );
+      if (!acct.length) return err("Not found");
+
+      const thresholds = await loadReconcileThresholds();
+      const lookbackMin =
+        lookbackDays != null
+          ? new Date(Date.now() - lookbackDays * 86_400_000)
+              .toISOString()
+              .slice(0, 10)
+          : null;
+      const result = await computeReconcileForAccount({
+        userId,
+        dek,
+        accountId,
+        thresholds,
+        dateMin: dateMin ?? lookbackMin,
+        dateMax: dateMax ?? null,
+      });
+      return dataResponse({ ...result, thresholds });
+    },
+  );
+
+  // ── materialize_bank_row ────────────────────────────────────────────────────
+  // ONE tool, two modes. destAccountId set → transfer mode (outflow rows only,
+  // routes through createTransferPair via materializeBankRowAsTransfer). Else →
+  // category mode (the shared materializeBankRowAsTransaction chokepoint). Both
+  // wrapped libs invalidate the tx cache. Direct + reversible (delete the
+  // resulting tx / unlink to undo) so no confirmation token.
+  server.tool(
+    "materialize_bank_row",
+    "Create a real transaction from a bank-only ledger row. Category mode (set categoryId, or leave both unset for an uncategorized row) → {mode:'category', transactionId}. Transfer mode (set destAccountId; OUTFLOW rows only) → {mode:'transfer', fromTransactionId, toTransactionId, linkId}. Pass at most ONE of categoryId / destAccountId. Refuses investment accounts + sign-vs-category mismatch. Requires an unlocked DEK.",
+    {
+      bankTransactionId: z.string().uuid().describe("bank_transactions.id to materialize."),
+      categoryId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Category mode: stamp this category on the new tx (sign-vs-category enforced)."),
+      accountId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Category mode: target-account override (defaults to the bank row's account; never investment)."),
+      destAccountId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Transfer mode: destination account. Writes a transfer pair with the bank row as the source (outflow) leg."),
+    },
+    async ({ bankTransactionId, categoryId, accountId, destAccountId }) => {
+      if (!dek) {
+        return err(
+          "materialize_bank_row requires an unlocked DEK. Re-login to refresh your session.",
+        );
+      }
+      if (destAccountId != null && categoryId != null) {
+        return err(
+          "Pass at most one of destAccountId (transfer mode) or categoryId (category mode).",
+        );
+      }
+
+      // ── Transfer mode ──────────────────────────────────────────────────────
+      if (destAccountId != null) {
+        // Load + ownership-check the bank row; materializeBankRowAsTransfer
+        // needs the minimal {id, accountId, date, amount, currency} shape plus
+        // the decrypted payee for the pair note. Cross-tenant → "Not found".
+        const bankRows = await q(
+          db,
+          sql`
+            SELECT id, account_id, date, amount, currency, payee, encryption_tier
+            FROM bank_transactions
+            WHERE id = ${bankTransactionId} AND user_id = ${userId}
+            LIMIT 1
+          `,
+        );
+        if (!bankRows.length) return err("Not found");
+        const b = bankRows[0];
+        const tier = String(b.encryption_tier ?? "user");
+        const payeeRaw = b.payee as string | null;
+        let payeePlain: string | null = null;
+        if (payeeRaw != null && payeeRaw !== "") {
+          payeePlain =
+            tier === "user"
+              ? tryDecryptField(dek, payeeRaw, "bank_transactions")
+              : (() => {
+                  try {
+                    return decryptStaged(payeeRaw);
+                  } catch {
+                    return null;
+                  }
+                })();
+        }
+        const result = await materializeBankRowAsTransfer({
+          userId,
+          dek,
+          bank: {
+            id: String(b.id),
+            accountId: Number(b.account_id),
+            date: String(b.date),
+            amount: Number(b.amount),
+            currency: String(b.currency),
+          },
+          payeePlain,
+          destAccountId,
+          txSource: "reconcile_link",
+        });
+        if (!result.ok) {
+          if (result.code === "transfer_dest_not_found") return err("Not found");
+          return err(result.message);
+        }
+        return dataResponse({
+          mode: "transfer",
+          fromTransactionId: result.fromTransactionId,
+          toTransactionId: result.toTransactionId,
+          linkId: result.linkId,
+        });
+      }
+
+      // ── Category mode ──────────────────────────────────────────────────────
+      const result = await materializeBankRowAsTransaction({
+        userId,
+        dek,
+        bankTransactionId,
+        categoryId: categoryId ?? null,
+        accountId: accountId ?? null,
+      });
+      if (!result.ok) {
+        if (
+          result.code === "bank_not_found" ||
+          result.code === "account_not_found" ||
+          result.code === "category_not_found"
+        ) {
+          return err("Not found");
+        }
+        return err(result.message);
+      }
+      return dataResponse({ mode: "category", transactionId: result.transactionId });
+    },
+  );
+
+  // ── accept_reconcile_suggestion ─────────────────────────────────────────────
+  server.tool(
+    "accept_reconcile_suggestion",
+    "Link an existing transaction to a bank-ledger row (accept a reconcile suggestion). linkType 'primary' also sets transactions.bank_transaction_id when it's currently NULL; 'extra' just adds the join row. Idempotent. Returns {linkId, setPrimaryFk, alreadyLinked}. Reverse with unlink_reconcile.",
+    {
+      transactionId: z.number().int().positive().describe("transactions.id to link."),
+      bankTransactionId: z.string().uuid().describe("bank_transactions.id to link to."),
+      linkType: z
+        .enum(["primary", "extra"])
+        .default("extra")
+        .describe("'primary' sets the lineage FK if unset; 'extra' is an additional link."),
+    },
+    async ({ transactionId, bankTransactionId, linkType }) => {
+      try {
+        const result = await linkTransactionToBank({
+          userId,
+          transactionId,
+          bankTransactionId,
+          linkType,
+          source: "manual",
+        });
+        return dataResponse(result);
+      } catch (e) {
+        if (e instanceof LinkError) return err("Not found");
+        throw e;
+      }
+    },
+  );
+
+  // ── unlink_reconcile ────────────────────────────────────────────────────────
+  server.tool(
+    "unlink_reconcile",
+    "Remove a transaction ↔ bank-ledger link. If the removed link was 'primary' and the FK still pointed at this bank row, also clears transactions.bank_transaction_id. Idempotent (unlinking a never-linked pair returns {unlinked:false, clearedFk:false}). Returns {unlinked, clearedFk}.",
+    {
+      transactionId: z.number().int().positive().describe("transactions.id."),
+      bankTransactionId: z.string().uuid().describe("bank_transactions.id."),
+    },
+    async ({ transactionId, bankTransactionId }) => {
+      const result = await unlinkTransactionFromBank({
+        userId,
+        transactionId,
+        bankTransactionId,
+      });
+      return dataResponse(result);
+    },
+  );
+
+  // ── set_account_mode ────────────────────────────────────────────────────────
+  // Owner-scoped UPDATE of the per-account pipeline policy. NOT a transactions
+  // write → no invalidateUser. 0 rows (cross-tenant / missing) → "Not found".
+  server.tool(
+    "set_account_mode",
+    "Set an account's import pipeline mode: 'auto' (rules fire at upload), 'approve' (review each), or 'manual' (rules fire at materialize). Returns {id, mode}. Cross-tenant / missing id → Not found.",
+    {
+      accountId: z.number().int().positive().describe("accounts.id."),
+      mode: z
+        .enum(["auto", "approve", "manual"])
+        .describe("New pipeline mode for this account."),
+    },
+    async ({ accountId, mode }) => {
+      const rows = await q(
+        db,
+        sql`
+          UPDATE accounts SET mode = ${mode}
+          WHERE id = ${accountId} AND user_id = ${userId}
+          RETURNING id, mode
+        `,
+      );
+      if (!rows.length) return err("Not found");
+      return dataResponse({ id: Number(rows[0].id), mode: String(rows[0].mode) });
+    },
+  );
+
+  // ── apply_rules_to_staged_import ────────────────────────────────────────────
+  // Re-fire active rules over a pending staged import (the /import/pending
+  // "Re-apply rules" button). Mutates staged_transactions only → no
+  // invalidateUser. Requires a non-null DEK (the lib decrypts rule + row text).
+  server.tool(
+    "apply_rules_to_staged_import",
+    "Re-apply active transaction rules to a PENDING staged import in place (renames payees, flips tx_type to transfer, sets category/account, etc.) so the review surface reflects rule effects before approval. Optional rowIds = subset; optional onlyRuleId = a single rule. Returns {rowsTouched, matches}. Requires an unlocked DEK; staged import must be pending.",
+    {
+      stagedImportId: z.string().describe("staged_imports.id (must be status='pending')."),
+      rowIds: z
+        .array(z.string())
+        .optional()
+        .describe("Subset of staged_transactions.id to apply to. Omit for the whole batch."),
+      onlyRuleId: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Restrict to a single transaction_rules.id (e.g. a just-created rule)."),
+    },
+    async ({ stagedImportId, rowIds, onlyRuleId }) => {
+      if (!dek) {
+        return err(
+          "apply_rules_to_staged_import requires an unlocked DEK to decrypt rules + staged rows. Re-login to refresh your session.",
+        );
+      }
+      // Ownership + pending-status pre-check (cross-tenant → Not found).
+      const staged = await q(
+        db,
+        sql`SELECT id, status FROM staged_imports WHERE id = ${stagedImportId} AND user_id = ${userId} LIMIT 1`,
+      );
+      if (!staged.length) return err("Not found");
+      if (String(staged[0].status) !== "pending") {
+        return err("Staged import is not pending — already processed.");
+      }
+      // The lib uses the Drizzle `@/db` proxy (same singleton the staging tools
+      // use); pass it directly so the in-tier re-encrypt path runs as on web.
+      const result = await applyRulesToStagedBatch(
+        drizzleDb,
+        userId,
+        dek,
+        stagedImportId,
+        { rowIds, onlyRuleId },
+      );
+      return dataResponse(result);
+    },
+  );
+
+  // ── apply_rules_to_bank_rows ────────────────────────────────────────────────
+  // Auto-pilot bulk: fire rules over a batch of bank rows and (on confirm)
+  // auto-materialize matched rows into transactions. Two-step confirmation
+  // token (precedent: approve_staged_rows) because this is a bulk ledger write.
+  // The lib invalidates the cache when it materializes anything.
+  server.tool(
+    "apply_rules_to_bank_rows",
+    "Auto-pilot bulk: fire active rules over a batch of bank-ledger rows and (on confirm) auto-materialize matched rows into transactions. Two-step: first call (no confirmation_token) runs a PREVIEW pass (autoMaterialize=false — no writes) and returns a summary + confirmationToken (5-min TTL); second call with the token + autoMaterialize:true commits. Returns {materialized, rulesFired, possibleDuplicates, perRow}. Requires an unlocked DEK when materializing.",
+    {
+      bankRowIds: z
+        .array(z.string().uuid())
+        .min(1)
+        .describe("bank_transactions.id UUIDs to run rules over."),
+      autoMaterialize: z
+        .boolean()
+        .optional()
+        .describe("Write matched rows to transactions. Only honored on the confirmed (token) call."),
+      confirmation_token: z
+        .string()
+        .optional()
+        .describe("Token from the preview call. Omit to preview; pass to commit."),
+    },
+    async ({ bankRowIds, autoMaterialize, confirmation_token }) => {
+      // Canonical payload — sort ids so preview/execute hash identically.
+      const canonicalIds = [...bankRowIds].sort();
+      const tokenPayload = { bankRowIds: canonicalIds };
+
+      // ── Preview branch (no writes) ─────────────────────────────────────────
+      if (!confirmation_token) {
+        // Planning pass: autoMaterialize=false never writes, so a null DEK
+        // still works (rules just won't match ciphertext payees).
+        const preview = await applyRulesToBankRows(userId, canonicalIds, dek, {
+          autoMaterialize: false,
+        });
+        const token = signConfirmationToken(
+          userId,
+          "apply_rules_to_bank_rows",
+          tokenPayload,
+        );
+        return dataResponse({
+          preview: true,
+          summary: {
+            bankRowCount: canonicalIds.length,
+            rulesFired: preview.rulesFired,
+            perRow: preview.perRow,
+          },
+          confirmationToken: token,
+        });
+      }
+
+      // ── Execute branch ─────────────────────────────────────────────────────
+      const check = verifyConfirmationToken(
+        confirmation_token,
+        userId,
+        "apply_rules_to_bank_rows",
+        tokenPayload,
+      );
+      if (!check.valid) {
+        return err(
+          `Confirmation token invalid: ${check.reason}. Re-call without confirmation_token to refresh.`,
+        );
+      }
+      const doMaterialize = autoMaterialize !== false; // default true on commit
+      if (doMaterialize && !dek) {
+        return err(
+          "apply_rules_to_bank_rows requires an unlocked DEK to materialize rows. Re-login to refresh your session.",
+        );
+      }
+      // The lib invalidates the per-user tx cache itself when materialized > 0.
+      const result = await applyRulesToBankRows(userId, canonicalIds, dek, {
+        autoMaterialize: doMaterialize,
+      });
+      return dataResponse(result);
     },
   );
 }

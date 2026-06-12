@@ -40,6 +40,7 @@
 
 import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
 import { db, schema } from "@/db";
+import { round2 } from "@/lib/utils/number";
 import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { applyRules, type TransactionRule } from "@/lib/auto-categorize";
@@ -815,9 +816,8 @@ function payeeSimilarity(a: string | null, b: string | null): number {
   return union === 0 ? 0 : intersect / union;
 }
 
-function roundScore(s: number): number {
-  return Math.round(s * 100) / 100;
-}
+// 2-decimal score rounding (FINLYNQ-145 — delegates to the shared round2).
+const roundScore = round2;
 
 function roundDelta(d: number): number {
   return Math.round(d * 10000) / 10000;
@@ -1047,7 +1047,7 @@ export async function applyRulesToBankRows(
       } catch (err) {
         // Defensive: a dup-scan failure must never block the upload. Worst
         // case we fall back to today's behavior (no ledger-dup flag).
-        // eslint-disable-next-line no-console
+
         console.error("[applyRulesToBankRows] ledger-dup scan failed", {
           accountId: acctId,
           err,
@@ -1063,7 +1063,7 @@ export async function applyRulesToBankRows(
   // payees before they reached the matcher; keeping this trace makes a
   // future similar issue debuggable without rebuilding the helper.
   if (autoMaterialize) {
-    // eslint-disable-next-line no-console
+
     console.log("[applyRulesToBankRows] start", {
       userId,
       bankRowCount: bankRows.length,
@@ -1112,7 +1112,7 @@ export async function applyRulesToBankRows(
         // string (the 2026-05-27 CSV-parser bug). Bounded — only when
         // payee is actually empty, so the journal stays readable for
         // healthy uploads.
-        // eslint-disable-next-line no-console
+
         console.warn("[applyRulesToBankRows] empty-payee skip", {
           bankRowId: bank.id,
           amount: bank.amount,
@@ -1286,7 +1286,7 @@ export async function applyRulesToBankRows(
         transactionId: inserted,
       });
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.error("[applyRulesToBankRows] materialize failed", {
         bankRowId: bank.id,
         err,

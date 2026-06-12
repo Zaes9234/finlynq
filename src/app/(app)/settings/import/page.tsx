@@ -47,6 +47,7 @@ import { TemplateManager } from "@/app/(app)/import/components/template-manager"
 import { ConnectorTab } from "@/app/(app)/import/components/connector-tab";
 import { InvestmentStatementImporter } from "@/app/(app)/import/components/investment-statement-importer";
 import { EmailRulesManager } from "@/components/inbox/email-rules-manager";
+import { ReconcileHideAccountsCard } from "@/components/inbox/reconcile-hide-accounts-card";
 import type { ImportTemplate } from "@/lib/import-templates";
 
 export default function ImportSettingsPage() {
@@ -252,6 +253,9 @@ export default function ImportSettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* FINLYNQ-147 — hide accounts from the /import reconcile dropdown. */}
+      <ReconcileHideAccountsCard />
 
       <Tabs defaultValue="templates">
         <TabsList>

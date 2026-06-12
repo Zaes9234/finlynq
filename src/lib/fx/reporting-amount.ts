@@ -18,8 +18,7 @@
 import { db, schema } from "@/db";
 import { and, eq, sql } from "drizzle-orm";
 import { getRateToUsdDetailed, convertWithRateMap } from "@/lib/fx-service";
-
-const round2 = (n: number): number => Math.round(n * 100) / 100;
+import { round2 } from "@/lib/utils/number";
 
 /**
  * Flow-figure conversion (FINLYNQ-123) — single source of truth for converting
@@ -275,11 +274,11 @@ export async function selfHealReportingAmounts(userId: string, displayCurrency: 
 
     // Detached — never block the report response.
     void recomputeReportingAmounts(userId, target).catch((err) => {
-      // eslint-disable-next-line no-console
+
       console.error("[reporting-amount] self-heal recompute failed for", userId, err);
     });
   } catch (err) {
-    // eslint-disable-next-line no-console
+
     console.error("[reporting-amount] self-heal probe failed for", userId, err);
   }
 }

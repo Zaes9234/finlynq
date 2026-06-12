@@ -32,7 +32,7 @@ export async function POST(request: NextRequest) {
           tx.amount,
           plainPayee,
         );
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
         db.update(schema.transactions)
           // Issue #28: row mutation → bump audit timestamp.
           .set({ importHash: hash, updatedAt: sql`NOW()` } as any)

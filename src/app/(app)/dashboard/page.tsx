@@ -254,7 +254,7 @@ export default function DashboardPage() {
       value: totalNetWorth,
       sub: `Assets ${formatCurrency(totalAssets, apiDisplayCurrency)}`,
       icon: DollarSign,
-      iconBg: "bg-indigo-100 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400",
+      iconBg: "bg-primary/10 text-primary",
       sparkColor: "#6366f1",
       sparkData: nwSparkline,
       href: "/accounts",
