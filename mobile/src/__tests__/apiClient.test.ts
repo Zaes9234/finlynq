@@ -616,6 +616,80 @@ describe("API Client", () => {
       expect(result).toEqual({ success: false, error: "Unauthorized" });
     });
 
+    // session-locked recovery — a 423 `session_locked` (valid JWT, lost DEK) is
+    // recoverable, and a successful recovery retries the original request once.
+    it("fires recovery on a 423 session_locked and retries once when recovery succeeds", async () => {
+      const onAuthFailure = jest.fn().mockResolvedValue(true);
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 423,
+          json: () => Promise.resolve({ error: "session_locked" }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve([{ id: 7 }]),
+        });
+
+      const result = await api.get("/api/transactions");
+
+      expect(onAuthFailure).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledTimes(2); // original + one retry
+      expect(result).toEqual({ success: true, data: [{ id: 7 }] });
+    });
+
+    it("does NOT retry when recovery fails — returns the error, no loop", async () => {
+      const onAuthFailure = jest.fn().mockResolvedValue(false);
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 423,
+        json: () => Promise.resolve({ error: "session_locked" }),
+      });
+
+      const result = await api.post("/api/transactions", { amount: 1 });
+
+      expect(onAuthFailure).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledTimes(1); // no retry
+      expect(result).toEqual({ success: false, error: "session_locked" });
+    });
+
+    it("does NOT fire recovery on a 423 that is not session_locked", async () => {
+      const onAuthFailure = jest.fn().mockResolvedValue(true);
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 423,
+        json: () => Promise.resolve({ error: "resource_locked" }),
+      });
+
+      await api.get("/api/accounts");
+      expect(onAuthFailure).not.toHaveBeenCalled();
+    });
+
+    it("retries once after a recovered 401 too", async () => {
+      const onAuthFailure = jest.fn().mockResolvedValue(true);
+      setAuthFailureHandler(onAuthFailure);
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 401,
+          json: () => Promise.resolve({ error: "Unauthorized" }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ ok: true }),
+        });
+
+      const result = await api.get("/api/accounts");
+      expect(onAuthFailure).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(result).toEqual({ success: true, data: { ok: true } });
+    });
+
     // tc-2 (no redirect loop) — auth endpoints are exempt. authRequest()
     // (login/register) bypasses request() entirely, AND request() defensively
     // skips the handler for any /api/auth/ path.

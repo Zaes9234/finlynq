@@ -507,18 +507,41 @@ function useAuthEngine() {
   }, []);
 
   /**
-   * FINLYNQ-135 — handle a mid-session auth failure (a 401 on an authed request,
-   * e.g. an expired / deploy-rotated DEPLOY_GENERATION JWT). Clears the session
-   * token (`clearSessionToken`, which PRESERVES the FINLYNQ-134 biometric stored
-   * credentials so next-launch silent re-login still works — NOT `signOut`,
-   * which would purge them) and flips auth state to logged-out so RootNavigator
-   * unmounts the authed tree and renders LoginScreen. The state flip IS the
-   * navigation reset under the declarative navigator — there is no authed route
-   * left to back-navigate into. Idempotent: a burst of parallel 401s collapses
-   * to the same logged-out state.
+   * FINLYNQ-135 + session-locked recovery — handle a mid-session auth failure: a
+   * 401 (expired / deploy-rotated JWT) OR a 423 `session_locked` (valid JWT but
+   * the server lost the DEK session — e.g. it restarted since login, so reads
+   * return ciphertext and writes are refused). Resolves to whether the session
+   * was recovered IN PLACE.
+   *
+   * First it attempts a FINLYNQ-134 silent biometric re-login — a full
+   * `endpoints.login` re-derives BOTH a fresh JWT and the server-side DEK, which
+   * heals either failure without dropping the user to the login screen. The
+   * caller (`client.ts`) retries the failed request on a `true` return.
+   *
+   * If silent re-login can't run (no biometric / no stored credentials / OS auth
+   * declined) it clears the session token (`clearSessionToken`, which PRESERVES
+   * the stored credentials — NOT `signOut`, which purges them) and flips to
+   * logged-out so RootNavigator resets to LoginScreen, returning `false`.
+   * Idempotent + de-duped by the client so a burst of failures = one prompt.
    */
-  const handleAuthFailure = useCallback(() => {
-    logger.warn("auth", "auth failure (401) — clearing session, redirecting to login");
+  const handleAuthFailure = useCallback(async (): Promise<boolean> => {
+    logger.warn("auth", "auth failure (401 / session_locked) — attempting silent re-login");
+    const biometricHw = await LocalAuthentication.hasHardwareAsync().catch(() => false);
+    const relogin = await attemptSilentRelogin({
+      biometricHw,
+      biometricEnabled: biometricEnabledRef.current,
+    });
+    if (relogin.restored) {
+      logger.info("auth", "auth failure healed in place via silent re-login");
+      setState((s) => ({
+        ...s,
+        hasSession: true,
+        isUnlocked: true,
+        isAdmin: relogin.isAdmin,
+      }));
+      return true;
+    }
+    logger.warn("auth", "silent re-login unavailable — clearing session, redirecting to login");
     void clearSessionToken();
     setState((s) => ({
       ...s,
@@ -527,6 +550,7 @@ function useAuthEngine() {
       isAdmin: false,
       pendingOnboarding: false,
     }));
+    return false;
   }, [clearSessionToken]);
 
   // Register the central 401 interceptor handler with the API client. The

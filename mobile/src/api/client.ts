@@ -14,23 +14,56 @@ import { logger, describeShape } from "../lib/logger";
 let _serverUrl = "https://finlynq.com";
 let _authToken: string | null = null;
 
-// FINLYNQ-135 — central auth-failure (401) interceptor seam. `request()` invokes
-// this handler exactly once when an AUTHED endpoint returns 401 (expired /
-// deploy-rotated DEPLOY_GENERATION JWT). useAuth registers it to clear the
-// session token + flip auth state to logged-out (RootNavigator → LoginScreen),
-// while PRESERVING FINLYNQ-134's biometric stored credentials so next-launch
-// silent re-login still works. Requests to /api/auth/* are EXEMPT (a failed
-// sign-in must not re-trigger the redirect — no loop). Best-effort: a throwing
-// handler must never break the request's error return.
-let _onAuthFailure: (() => void) | null = null;
+// FINLYNQ-135 + session-locked recovery — central auth-failure interceptor seam.
+// `request()` invokes this when an AUTHED endpoint returns a RECOVERABLE auth
+// failure:
+//   • 401            — the JWT is dead (expired / deploy-rotated DEPLOY_GENERATION).
+//   • 423 session_locked — the JWT is still valid but the server lost the in-memory
+//     DEK session (it restarted since login), so reads come back as ciphertext and
+//     writes are refused. A 401-only interceptor never caught this state.
+// The handler attempts FINLYNQ-134 silent biometric re-login — a full login
+// re-derives BOTH a fresh JWT and the DEK, healing either case IN PLACE — and
+// returns `true` when the session was restored. On `true`, `request()` retries the
+// original call ONCE (safe: a 401/423 is refused BEFORE any mutation, so no
+// double-write). On `false` the handler has already flipped state to logged-out
+// (RootNavigator → LoginScreen). It PRESERVES the stored credentials either way.
+// Requests to /api/auth/* are EXEMPT (a failed sign-in must not loop the redirect).
+let _onAuthFailure: (() => Promise<boolean>) | null = null;
+
+// Collapses a burst of concurrent recoverable failures into ONE recovery attempt
+// (a single biometric prompt) — every caller awaits the same in-flight promise.
+let _recoveryInFlight: Promise<boolean> | null = null;
 
 /**
- * Register (or clear, with `null`) the central 401 auth-failure handler.
- * Called once from useAuth. The handler fires on a 401 from any authed
- * (non-/api/auth/) request routed through `request()`.
+ * Register (or clear, with `null`) the central auth-failure handler. Called once
+ * from useAuth. The handler fires on a 401 OR a 423 `session_locked` from any
+ * authed (non-/api/auth/) request routed through `request()`, and resolves to
+ * whether the session was recovered in place.
  */
-export function setAuthFailureHandler(fn: (() => void) | null) {
+export function setAuthFailureHandler(fn: (() => Promise<boolean>) | null) {
   _onAuthFailure = fn;
+  _recoveryInFlight = null;
+}
+
+/** Run the registered recovery handler, de-duped so concurrent failures share a
+ *  single attempt. Never throws — a throwing handler resolves to `false`. */
+function runRecovery(): Promise<boolean> {
+  const handler = _onAuthFailure;
+  if (!handler) return Promise.resolve(false);
+  if (!_recoveryInFlight) {
+    _recoveryInFlight = (async () => {
+      try {
+        return await handler();
+      } catch (e) {
+        const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+        logger.error("api", "auth recovery handler threw", { detail });
+        return false;
+      } finally {
+        _recoveryInFlight = null;
+      }
+    })();
+  }
+  return _recoveryInFlight;
 }
 
 export function setServerUrl(url: string) {
@@ -68,7 +101,8 @@ function extractError(body: unknown, status: number): string {
 
 async function request<T>(
   path: string,
-  options: RequestInit = {}
+  options: RequestInit = {},
+  _retried = false
 ): Promise<ApiResponse<T>> {
   const url = `${_serverUrl}${path}`;
   const method = (options.method ?? "GET").toUpperCase();
@@ -102,21 +136,22 @@ async function request<T>(
       error,
       authToken: _authToken ? "present" : "absent",
     });
-    // FINLYNQ-135 — a 401 on an AUTHED endpoint means the session is dead
-    // (expired / deploy-rotated DEPLOY_GENERATION JWT). Fire the central
-    // auth-failure handler exactly once so the app clears the session and
-    // resets to login. EXEMPT /api/auth/* (login/register/session) so a failed
-    // sign-in can surface its own error on the login screen without looping.
-    // authRequest()/getSession() bypass request() entirely; this path guard is
-    // the defensive belt-and-suspenders for any future authed wrapper around
-    // an /api/auth/ route. The handler is best-effort — never let it break the
-    // error return the caller expects.
-    if (res.status === 401 && _onAuthFailure && !path.startsWith("/api/auth/")) {
-      try {
-        _onAuthFailure();
-      } catch (e) {
-        const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-        logger.error("api", "auth-failure handler threw", { detail });
+    // FINLYNQ-135 + session-locked recovery — a 401 (dead JWT) OR a 423
+    // `session_locked` (valid JWT but the server lost the DEK session, e.g. it
+    // restarted since login) on an AUTHED endpoint is recoverable. Run the
+    // central recovery handler (silent biometric re-login → re-derives JWT+DEK);
+    // if it restores the session, retry THIS request once (a 401/423 is refused
+    // before any mutation, so the retry can't double-write). EXEMPT /api/auth/*
+    // so a failed sign-in surfaces its own error without looping. `_retried`
+    // guards against an infinite loop if the retry fails again.
+    const recoverable =
+      !path.startsWith("/api/auth/") &&
+      (res.status === 401 || (res.status === 423 && error === "session_locked"));
+    if (recoverable && _onAuthFailure && !_retried) {
+      const recovered = await runRecovery();
+      if (recovered) {
+        logger.info("api", `${method} ${path} — retrying after auth recovery`);
+        return request<T>(path, options, true);
       }
     }
     return { success: false, error };

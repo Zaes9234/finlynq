@@ -262,15 +262,22 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
       expect(typeof registered).toBe("function");
     });
 
-    it("clears the Bearer token, deletes the SecureStore session token, and flips to logged-out", async () => {
+    it("clears the Bearer token, deletes the SecureStore session token, and flips to logged-out when silent re-login is unavailable", async () => {
       const { result } = await mountSignedIn();
+      // No stored credentials are readable → silent re-login can't run.
+      SECURE.getItemAsync.mockResolvedValue(null);
       mockSetAuthToken.mockClear();
       SECURE.deleteItemAsync.mockClear();
+      mockLogin.mockClear();
 
+      let restored: boolean | undefined;
       await act(async () => {
-        result.current.handleAuthFailure();
+        restored = await result.current.handleAuthFailure();
       });
 
+      // No silent re-login happened (no creds) → not restored.
+      expect(restored).toBe(false);
+      expect(mockLogin).not.toHaveBeenCalled();
       // Bearer token cleared.
       expect(mockSetAuthToken).toHaveBeenCalledWith(null);
       // SecureStore session token deleted...
@@ -284,6 +291,45 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
       await waitFor(() => expect(result.current.hasSession).toBe(false));
       expect(result.current.isUnlocked).toBe(false);
       expect(result.current.isAdmin).toBe(false);
+    });
+
+    // session-locked recovery — when biometric creds ARE stored, a mid-session
+    // auth failure (401 / 423 session_locked) heals IN PLACE via silent
+    // re-login instead of bouncing the user to the login screen.
+    it("restores the session in place via silent re-login when biometric creds are stored", async () => {
+      const { result } = await mountSignedIn();
+      // The OS-auth-gated credential read returns the stored creds.
+      SECURE.getItemAsync.mockImplementation(async (key: string) =>
+        key === STORED_CREDENTIALS_KEY
+          ? JSON.stringify({ identifier: "alice", password: "hunter2hunter2" })
+          : key === SESSION_TOKEN_KEY
+            ? "jwt"
+            : null
+      );
+      mockGetSession.mockResolvedValue({ authenticated: true, isAdmin: true });
+      mockSetAuthToken.mockClear();
+      SECURE.deleteItemAsync.mockClear();
+      mockLogin.mockClear();
+      mockLogin.mockResolvedValue({ ok: true, status: 200, data: {}, token: "fresh-jwt" });
+
+      let restored: boolean | undefined;
+      await act(async () => {
+        restored = await result.current.handleAuthFailure();
+      });
+
+      // Healed in place: a full re-login ran (re-derives JWT + DEK server-side)...
+      expect(restored).toBe(true);
+      expect(mockLogin).toHaveBeenCalledTimes(1);
+      expect(mockLogin).toHaveBeenCalledWith("alice", "hunter2hunter2");
+      // ...the credential read was OS-auth-gated...
+      expect(SECURE.getItemAsync).toHaveBeenCalledWith(
+        STORED_CREDENTIALS_KEY,
+        expect.objectContaining({ requireAuthentication: true })
+      );
+      // ...and the session was NOT torn down (user stays in the app).
+      expect(result.current.hasSession).toBe(true);
+      expect(result.current.isUnlocked).toBe(true);
+      expect(SECURE.deleteItemAsync).not.toHaveBeenCalledWith(SESSION_TOKEN_KEY);
     });
   });
 
