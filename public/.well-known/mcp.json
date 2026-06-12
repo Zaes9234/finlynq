@@ -116,7 +116,7 @@
         "description": "Records a net worth snapshot for historical tracking. Useful for accounts without automatic balance updates."
       }
     ],
-    "note": "This card highlights the most-used read and write tools. The HTTP endpoint exposes 78 tools total including loans, FX, subscriptions CRUD, rules CRUD, splits, portfolio holdings CRUD, bulk edit (preview/execute), and file import."
+    "note": "This card highlights the most-used read and write tools. The HTTP endpoint exposes 109 tools total including reconciliation, rule application, loans, FX, subscriptions CRUD, rules CRUD, splits, portfolio holdings CRUD, bulk edit (preview/execute), and file import."
   },
   "security": {
     "model": "authenticated",
