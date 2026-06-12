@@ -70,7 +70,6 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
         key === BIOMETRIC_KEY ? "true" : null
       );
       LOCAL.hasHardwareAsync.mockResolvedValue(true);
-      LOCAL.authenticateAsync.mockResolvedValue({ success: true } as never);
 
       // The stale token is rejected; the re-login then succeeds.
       mockGetSession
@@ -85,25 +84,29 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
       // endpoints.login called EXACTLY once with the stored identifier+password.
       expect(mockLogin).toHaveBeenCalledTimes(1);
       expect(mockLogin).toHaveBeenCalledWith("alice", "hunter2hunter2");
-      // Biometric prompt was shown before the silent login.
-      expect(LOCAL.authenticateAsync).toHaveBeenCalled();
+      // The credential was read through the OS-auth-gated secure store — the
+      // requireAuthentication read IS the biometric gate (no separate prompt).
+      expect(SECURE.getItemAsync).toHaveBeenCalledWith(
+        STORED_CREDENTIALS_KEY,
+        expect.objectContaining({ requireAuthentication: true })
+      );
       // Session restored straight to the app — no manual login form.
       expect(result.current.hasSession).toBe(true);
       expect(result.current.isUnlocked).toBe(true);
     });
 
-    it("falls back to manual login (no silent login) when the biometric prompt fails", async () => {
+    it("falls back to manual login when the OS-auth-gated credential read is denied", async () => {
       SECURE.getItemAsync.mockImplementation(async (key: string) => {
         if (key === SESSION_TOKEN_KEY) return "stale-jwt";
-        if (key === STORED_CREDENTIALS_KEY)
-          return JSON.stringify({ identifier: "alice", password: "pw" });
+        // The secured credential read throws when the OS biometric/passcode is
+        // cancelled or the Keystore key was invalidated by an enrollment change.
+        if (key === STORED_CREDENTIALS_KEY) throw new Error("UserCanceled");
         return null;
       });
       ASYNC.getItem.mockImplementation(async (key: string) =>
         key === BIOMETRIC_KEY ? "true" : null
       );
       LOCAL.hasHardwareAsync.mockResolvedValue(true);
-      LOCAL.authenticateAsync.mockResolvedValue({ success: false } as never); // declined
       mockGetSession.mockResolvedValueOnce({ authenticated: false });
 
       const { result } = renderHook(() => useAuth(), { wrapper });
@@ -140,6 +143,10 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
       expect(credWrite).toBeDefined();
       expect(credWrite![1]).toBe(
         JSON.stringify({ identifier: "alice", password: "hunter2hunter2" })
+      );
+      // ...and the write is bound to an OS auth gate (requireAuthentication).
+      expect(credWrite![2]).toEqual(
+        expect.objectContaining({ requireAuthentication: true })
       );
 
       // No AsyncStorage.setItem call carried the password value.
@@ -370,17 +377,20 @@ describe("useAuth — FINLYNQ-134 biometric silent re-login + secure credential 
         key === BIOMETRIC_KEY ? "true" : null
       );
       LOCAL.hasHardwareAsync.mockResolvedValue(true);
-      LOCAL.authenticateAsync.mockResolvedValue({ success: true } as never);
       mockLogin.mockResolvedValue({ ok: true, status: 200, data: {}, token: "fresh-jwt" });
       mockGetSession.mockResolvedValue({ authenticated: true, isAdmin: false });
 
       const { result } = renderHook(() => useAuth(), { wrapper });
       await waitFor(() => expect(result.current.isLoading).toBe(false));
 
-      // Re-login fired once from the stored creds despite there being no token.
+      // Re-login fired once from the stored creds despite there being no token,
+      // gated by the OS-auth-bound secured read.
       expect(mockLogin).toHaveBeenCalledTimes(1);
       expect(mockLogin).toHaveBeenCalledWith("alice", "hunter2hunter2");
-      expect(LOCAL.authenticateAsync).toHaveBeenCalled();
+      expect(SECURE.getItemAsync).toHaveBeenCalledWith(
+        STORED_CREDENTIALS_KEY,
+        expect.objectContaining({ requireAuthentication: true })
+      );
       expect(result.current.hasSession).toBe(true);
       expect(result.current.isUnlocked).toBe(true);
     });

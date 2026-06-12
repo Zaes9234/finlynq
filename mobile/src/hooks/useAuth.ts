@@ -42,16 +42,41 @@ interface StoredCredentials {
   password: string;
 }
 
-/** Persist identifier+password to hardware-backed SecureStore (biometric-gated
- *  silent re-login). JSON-encoded; SecureStore is the ONLY sink — never write
- *  these to AsyncStorage. */
+// FINLYNQ-134 — bind RELEASE of the stored credential to an OS-level auth check
+// (Keychain access control on iOS, a user-auth-required Keystore key on Android),
+// so the device itself refuses to return the password without a fresh biometric /
+// device-passcode. This makes the biometric gate cryptographic rather than just
+// app-level: READING the value triggers the OS prompt, which REPLACES the
+// explicit LocalAuthentication call in silent re-login (keeping both would
+// double-prompt). The write and every read MUST pass the same options or the
+// read fails.
+const CREDENTIAL_STORE_OPTS: SecureStore.SecureStoreOptions = {
+  requireAuthentication: true,
+  authenticationPrompt: "Sign in to Finlynq",
+};
+
+/** Persist identifier+password to hardware-backed SecureStore behind an OS auth
+ *  gate (see `CREDENTIAL_STORE_OPTS`). JSON-encoded; SecureStore is the ONLY
+ *  sink — never write these to AsyncStorage. */
 async function persistCredentials(creds: StoredCredentials): Promise<void> {
-  await SecureStore.setItemAsync(STORED_CREDENTIALS_KEY, JSON.stringify(creds));
+  await SecureStore.setItemAsync(
+    STORED_CREDENTIALS_KEY,
+    JSON.stringify(creds),
+    CREDENTIAL_STORE_OPTS
+  );
 }
 
-/** Read + parse stored credentials. Returns null if absent or unparseable. */
+/** Read + parse stored credentials. The read triggers the OS auth prompt (the
+ *  store requires authentication). Returns null if absent, unparseable, or the
+ *  OS auth was cancelled/denied or the Keystore key was invalidated by a
+ *  biometric-enrollment change — all of which degrade safely to manual login. */
 async function readStoredCredentials(): Promise<StoredCredentials | null> {
-  const raw = await SecureStore.getItemAsync(STORED_CREDENTIALS_KEY);
+  let raw: string | null;
+  try {
+    raw = await SecureStore.getItemAsync(STORED_CREDENTIALS_KEY, CREDENTIAL_STORE_OPTS);
+  } catch {
+    return null;
+  }
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<StoredCredentials>;
@@ -90,14 +115,16 @@ export type BiometricEnableResult =
   | { ok: false; error: string };
 
 /**
- * FINLYNQ-134 — silent re-authentication from stored credentials, gated behind
- * a biometric prompt. Called from bootstrap when a stored session token has
- * been rejected. No-ops (returns `restored:false`) unless biometric hardware is
- * present AND biometrics are enabled AND stored credentials exist. On a
- * successful biometric + login it stores the fresh token and reports the admin
- * flag from the session. Any failure (biometric cancel/fail, login reject,
- * network) degrades to `restored:false` so the caller falls back to the manual
- * login screen. Calls `endpoints.login` AT MOST once.
+ * FINLYNQ-134 — silent re-authentication from stored credentials. Called from
+ * bootstrap when there's no live session. No-ops (returns `restored:false`)
+ * unless biometric hardware is present AND biometrics are enabled AND stored
+ * credentials exist. The biometric/passcode gate is the OS auth prompt that the
+ * secured credential read (`readStoredCredentials`, requireAuthentication)
+ * triggers — there is NO separate LocalAuthentication call (that would
+ * double-prompt). On a successful read + login it stores the fresh token and
+ * reports the admin flag from the session. Any failure (OS auth cancel/deny,
+ * login reject, network) degrades to `restored:false` so the caller falls back
+ * to the manual login screen. Calls `endpoints.login` AT MOST once.
  */
 async function attemptSilentRelogin(opts: {
   biometricHw: boolean;
@@ -106,26 +133,10 @@ async function attemptSilentRelogin(opts: {
   const noRestore: SilentReloginResult = { restored: false, isAdmin: false };
   if (!opts.biometricHw || !opts.biometricEnabled) return noRestore;
 
+  // Reading the credential triggers the OS biometric/passcode prompt and returns
+  // null if that auth is cancelled/denied — so the read IS the gate.
   const creds = await readStoredCredentials();
   if (!creds) return noRestore;
-
-  // Gate the silent re-login behind a successful biometric prompt.
-  let bio: { success: boolean };
-  try {
-    bio = await LocalAuthentication.authenticateAsync({
-      promptMessage: "Sign in to Finlynq",
-      fallbackLabel: "Use Password",
-      disableDeviceFallback: false,
-    });
-  } catch (e) {
-    const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-    logger.warn("auth", "silent re-login: biometric prompt threw", { detail });
-    return noRestore;
-  }
-  if (!bio.success) {
-    logger.info("auth", "silent re-login: biometric declined — falling back to manual login");
-    return noRestore;
-  }
 
   // Re-authenticate with the stored credentials exactly once.
   try {
