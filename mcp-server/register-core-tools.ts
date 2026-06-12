@@ -20,8 +20,6 @@ import {
   type Debt,
 } from "../src/lib/loan-calculator.js";
 import {
-  getLatestFxRate,
-  getRate,
   getRateToUsdDetailed,
   validateCurrencyCode,
   validateFxDate,
@@ -46,20 +44,7 @@ import {
   csvToRawTransactionsWithMapping,
 } from "../src/lib/csv-parser.js";
 import { parseOfx } from "../src/lib/ofx-parser.js";
-import { previewImport as pipelinePreview, executeImport as pipelineExecute, type RawTransaction } from "../src/lib/import-pipeline.js";
-import { generateImportHash } from "../src/lib/import-hash.js";
-import {
-  detectProbableDuplicates,
-  type DuplicateCandidatePool,
-  type DuplicateCandidateRow,
-  type DuplicateMatch,
-} from "../src/lib/external-import/duplicate-detect.js";
-import {
-  scanForPossibleDuplicates,
-  dateBoundsForScan,
-  type CommittedInsert,
-  type CandidateRow,
-} from "../src/lib/mcp/duplicate-hints.js";
+import { type RawTransaction } from "../src/lib/import-pipeline.js";
 
 // FINLYNQ-84: rules are JSONB conditions+actions. Stdio matcher mirrors
 // the structure from src/lib/auto-categorize.ts but trims to what stdio

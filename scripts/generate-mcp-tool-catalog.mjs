@@ -273,13 +273,13 @@ function main() {
   // Print a summary so CI logs show drift at a glance.
   const byCat = {};
   for (const t of enriched) byCat[t.category] = (byCat[t.category] ?? 0) + 1;
-  // eslint-disable-next-line no-console
+
   console.log(
     `generate-mcp-tool-catalog: wrote ${enriched.length} HTTP tools to ${OUTPUT_FILE}`
   );
-  // eslint-disable-next-line no-console
+
   console.log(`  By category: ${JSON.stringify(byCat)}`);
-  // eslint-disable-next-line no-console
+
   console.log(
     `  Transport: http-only=${enriched.filter((t) => t.transport === "http").length}, both=${stdioCount}`
   );

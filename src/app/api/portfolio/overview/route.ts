@@ -11,6 +11,7 @@ import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import { cashLegSkipSql } from "@/lib/portfolio/aggregation-predicates";
+import { todayISO } from "@/lib/utils/date";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -18,7 +19,7 @@ export async function GET(request: NextRequest) {
   const { userId, sessionId } = auth.context;
   const dek = sessionId ? getDEK(sessionId, userId) : null;
   const displayCurrency = await getDisplayCurrency(userId, request.nextUrl.searchParams.get("currency"));
-  const todayDate = new Date().toISOString().split("T")[0];
+  const todayDate = todayISO();
 
   // Active currencies â€” used to recognize user-defined currency codes (XAU
   // etc.) as cash positions when they appear as a holding's symbol.

@@ -15,6 +15,12 @@
  */
 
 import { getRateToUsdDetailed, type RateSource } from "@/lib/fx-service";
+import { round2 } from "@/lib/utils/number";
+
+// Re-exported so existing `import { round2 } from "@/lib/currency-conversion"`
+// callsites keep working after FINLYNQ-145 moved the canonical copy to
+// @/lib/utils/number.
+export { round2 };
 
 export type ConversionResult = {
   /** Account-currency amount = entered_amount * entered_fx_rate. Rounded to 2 decimals. */
@@ -35,8 +41,6 @@ export type ConversionInput = {
   date: string;
   userId: string;
 };
-
-export const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 /**
  * Convert an entered amount in one currency into the account's currency.

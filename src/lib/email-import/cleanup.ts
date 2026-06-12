@@ -118,7 +118,7 @@ export function startEmailCleanupTimer(): void {
   const THIRTY_MIN = 30 * 60 * 1000;
   timer = setInterval(() => {
     cleanupExpiredEmailArtifacts().catch((err) => {
-      // eslint-disable-next-line no-console
+
       console.error("[email-import-cleanup] sweep failed:", err);
     });
   }, THIRTY_MIN);

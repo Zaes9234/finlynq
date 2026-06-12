@@ -838,7 +838,7 @@ export async function executeImport(
           cause && typeof cause === "object" && "detail" in cause
             ? String((cause as { detail: unknown }).detail ?? "")
             : null;
-        // eslint-disable-next-line no-console
+
         console.error("[bank-ledger] upsert failed", {
           userId,
           accountId: row.accountId,

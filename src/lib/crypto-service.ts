@@ -3,6 +3,7 @@
 
 import { db, schema } from "@/db";
 import { and, eq, inArray } from "drizzle-orm";
+import { todayISO } from "@/lib/utils/date";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
@@ -167,7 +168,7 @@ export async function getCryptoSpotPrices(
   coins: Array<{ coinId: string; symbol: string }>,
 ): Promise<CryptoPrice[]> {
   if (coins.length === 0) return [];
-  const today = new Date().toISOString().split("T")[0];
+  const today = todayISO();
   const symbols = coins.filter((c) => c.coinId && c.symbol).map((c) => c.symbol);
   const cacheMap = await readCryptoCacheBulk(symbols, today);
   const { hits, misses } = splitCryptoCacheHits(coins, new Set(cacheMap.keys()));
@@ -233,7 +234,7 @@ export function bucketDailyCryptoPrices(
 // dates older than that simply stay uncached and the caller falls back to the
 // live spot price (same approximation as before historical pricing existed).
 async function fetchCryptoHistoryToCache(coinId: string, symbol: string, fromDate: string): Promise<void> {
-  const today = new Date().toISOString().split("T")[0];
+  const today = todayISO();
   const spanMs = Date.parse(`${today}T00:00:00Z`) - Date.parse(`${fromDate}T00:00:00Z`);
   if (!(spanMs > 0)) return; // fromDate is today or in the future — nothing historical to fetch
   const days = Math.min(365, Math.ceil(spanMs / 86400000) + 1);
@@ -282,7 +283,7 @@ export async function getCryptoPricesAtDate(
   date: string,
 ): Promise<CryptoPrice[]> {
   if (coins.length === 0) return [];
-  const today = new Date().toISOString().split("T")[0];
+  const today = todayISO();
   if (date >= today) return getCryptoSpotPrices(coins); // today/future → live
 
   // Dedup by coinId, keep the first symbol seen (upper-cased to match the cache key).
@@ -374,7 +375,7 @@ export async function getCryptoHistory(
 // Cache crypto price with "CRYPTO:" prefix
 async function cacheCryptoPrice(symbol: string, price: number, currency: string) {
   const cacheSymbol = `CRYPTO:${symbol}`;
-  const today = new Date().toISOString().split("T")[0];
+  const today = todayISO();
 
   try {
     const existing = await db

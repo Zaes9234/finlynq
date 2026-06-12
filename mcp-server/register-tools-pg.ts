@@ -1455,7 +1455,7 @@ export function registerPgTools(
     async ({ period, priorMonths, months, reportingCurrency }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       if (months !== undefined && priorMonths === undefined) {
-        // eslint-disable-next-line no-console
+
         console.warn("[mcp] get_spending_trends: `months` is deprecated (issue #210); use `priorMonths`.");
       }
       const lookback = priorMonths ?? months ?? 12;
@@ -1620,7 +1620,7 @@ export function registerPgTools(
       // what callers asked for, and `months: 3` keeps the legacy behavior.
       const lookback = priorMonths ?? months;
       if (months !== undefined && priorMonths === undefined) {
-        // eslint-disable-next-line no-console
+
         console.warn("[mcp] get_net_worth: `months` is deprecated (issue #210); use `priorMonths`.");
       }
       if (!lookback || lookback <= 0) {
@@ -3103,7 +3103,7 @@ export function registerPgTools(
           // Lookup failure must not block the live write path — log and fall
           // through. Worst case: the caller's retry double-inserts on the
           // racing pair, strictly no worse than no idempotency.
-          // eslint-disable-next-line no-console
+
           console.warn("[bulk_record_transactions] idempotency lookup failed:", e);
         }
         return null;
@@ -3573,7 +3573,7 @@ export function registerPgTools(
         } catch (e) {
           // Scan must never fail the response. Log and surface an empty
           // hints array so the caller still sees the imported counts.
-          // eslint-disable-next-line no-console
+
           console.warn("[bulk_record_transactions] duplicate-hint scan failed:", e);
           possibleDuplicates = [];
         }
@@ -3633,7 +3633,7 @@ export function registerPgTools(
           `);
         } catch (e) {
           // Persist failure must not break the response — log and continue.
-          // eslint-disable-next-line no-console
+
           console.warn("[bulk_record_transactions] idempotency persist failed:", e);
         }
       }
@@ -10864,7 +10864,7 @@ export function registerPgTools(
         } catch (e) {
           // Fall through — better to re-execute than to break on a transient
           // SELECT failure.
-          // eslint-disable-next-line no-console
+
           console.warn("[approve_staged_rows] idempotency lookup failed:", e);
         }
       }
@@ -11420,7 +11420,7 @@ export function registerPgTools(
             ON CONFLICT (user_id, key) DO NOTHING
           `);
         } catch (e) {
-          // eslint-disable-next-line no-console
+
           console.warn("[approve_staged_rows] idempotency persist failed:", e);
         }
       }

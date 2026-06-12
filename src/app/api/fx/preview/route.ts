@@ -12,6 +12,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getRateToUsdDetailed } from "@/lib/fx-service";
+import { todayISO } from "@/lib/utils/date";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -20,7 +21,7 @@ export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const from = (params.get("from") ?? "").trim().toUpperCase();
   const to = (params.get("to") ?? "").trim().toUpperCase();
-  const date = params.get("date") ?? new Date().toISOString().split("T")[0];
+  const date = params.get("date") ?? todayISO();
   const amountParam = params.get("amount");
   const amount = amountParam != null ? parseFloat(amountParam) : null;
 

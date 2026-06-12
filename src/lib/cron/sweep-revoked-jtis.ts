@@ -39,7 +39,7 @@ export function startRevokedJtisSweepTimer(): void {
   const ONE_DAY = 24 * 60 * 60 * 1000;
   timer = setInterval(() => {
     sweepRevokedJtis().catch((err) => {
-      // eslint-disable-next-line no-console
+
       console.error("[sweep-revoked-jtis] sweep failed:", err);
     });
   }, ONE_DAY);

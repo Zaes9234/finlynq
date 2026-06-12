@@ -140,7 +140,7 @@ export async function rebuildPortfolioSnapshots(
     try {
       await rebuildCashSnapshots({ userId, fromDate: null, toDate: to, stampMeta: true });
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn(
         "[rebuild] cash snapshot build failed:",
         err instanceof Error ? err.message : err,

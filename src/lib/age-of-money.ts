@@ -1,5 +1,5 @@
 import { db, schema } from "@/db";
-import { eq, and, gte, lte, desc, asc, sql } from "drizzle-orm";
+import { eq, and, desc, asc } from "drizzle-orm";
 
 const { transactions, categories } = schema;
 

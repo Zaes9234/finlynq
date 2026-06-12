@@ -48,7 +48,6 @@ import {
   openLotForBuyHook,
   closeLotsForSellHook,
   applyLotEffectsForLinkPair,
-  resolveCashLegForTx,
 } from "@/lib/portfolio/lots/write-hooks";
 import { closeCashLotsHook, openCashLotHook } from "@/lib/portfolio/lots/cash-hooks";
 import { InvalidLinkPairError } from "@/lib/portfolio/lots/engine";

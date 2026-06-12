@@ -440,7 +440,7 @@ export async function POST(
       );
     } catch (err) {
       // Anchor errors are non-fatal — bank ledger rows already landed.
-      // eslint-disable-next-line no-console
+
       console.error("[approve] anchor promotion failed", { userId, stagedImportId: staged.id, err });
     }
   }

@@ -7,6 +7,7 @@ import {
 } from "@/lib/loan-calculator";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireDevMode } from "@/lib/require-dev-mode";
+import { todayISO } from "@/lib/utils/date";
 import { z } from "zod";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
 
@@ -36,7 +37,7 @@ export async function POST(request: NextRequest) {
       const monthlyMaintenance = maintenanceYear / 12;
       const monthlyCashFlow = monthlyPayment + monthlyPropertyTax + monthlyMaintenance;
 
-      const schedule = generateAmortizationSchedule(principal, interestRate, termMonths, new Date().toISOString().split("T")[0]);
+      const schedule = generateAmortizationSchedule(principal, interestRate, termMonths, todayISO());
       const balanceOverTime = schedule.schedule
         .filter((_, i) => i % 12 === 0 || i === schedule.schedule.length - 1)
         .map((row) => ({

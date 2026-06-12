@@ -93,7 +93,7 @@ export async function PUT(request: NextRequest) {
     // via the on-the-fly fallback. Guarded against concurrent runs.
     if (changed) {
       void recomputeReportingAmounts(auth.context.userId, displayCurrency).catch((err) => {
-        // eslint-disable-next-line no-console
+
         console.error("[display-currency] reporting recompute failed:", err);
       });
     }

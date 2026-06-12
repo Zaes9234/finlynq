@@ -90,13 +90,13 @@ export async function sendBounceIfAuthenticated(input: BounceInput): Promise<boo
       }),
     });
     if (!res.ok) {
-      // eslint-disable-next-line no-console
+
       console.warn(`[email-bounce] Resend send failed: ${res.status}`);
       return false;
     }
     return true;
   } catch (e) {
-    // eslint-disable-next-line no-console
+
     console.warn("[email-bounce] send threw", e);
     return false;
   }

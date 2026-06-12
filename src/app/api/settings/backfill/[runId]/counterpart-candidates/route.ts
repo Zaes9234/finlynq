@@ -214,7 +214,7 @@ export async function GET(
       })
       .sort((a, b) => (amountRanked ? a._dAmt - b._dAmt : 0) || a._dDays - b._dDays)
       .slice(0, 25)
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+
       .map(({ _dAmt, _dDays, ...rest }) => rest);
 
     return NextResponse.json({ candidates, orphan: orphanMeta });

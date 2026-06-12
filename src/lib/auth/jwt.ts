@@ -78,7 +78,7 @@ const getSecret = (() => {
         }
         if (!devWarned) {
           devWarned = true;
-          // eslint-disable-next-line no-console
+
           console.warn(
             "[auth] PF_JWT_SECRET not set — using ephemeral dev secret. Do not use in production."
           );

@@ -74,7 +74,7 @@ function kickSelfHeal(
       await rebuildPortfolioSnapshots(userId, from, today, dek);
       if (dirtyMarkedAt) await clearDirtyIfUnchanged(userId, dirtyMarkedAt);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn(
         "[net-worth-history] self-heal rebuild failed:",
         err instanceof Error ? err.message : err,
@@ -101,7 +101,7 @@ function kickCashSelfHeal(userId: string, today: string): void {
       // BEFORE building, so a mid-build write re-trips stale on the next load).
       await rebuildCashSnapshots({ userId, fromDate: null, toDate: today, stampMeta: true });
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn(
         "[net-worth-history] cash self-heal failed:",
         err instanceof Error ? err.message : err,

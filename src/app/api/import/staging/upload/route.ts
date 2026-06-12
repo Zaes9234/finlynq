@@ -768,7 +768,7 @@ export async function POST(request: NextRequest) {
           rowErrors,
         });
       } catch (err) {
-        // eslint-disable-next-line no-console
+
         console.error("[upload] simplifiedUpload failed", { userId, templateId, err });
         return NextResponse.json(
           { error: safeErrorMessage(err, "Simplified upload failed") },

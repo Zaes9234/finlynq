@@ -56,7 +56,7 @@ export function __setCashLotHookStrictMode(value: boolean): void {
 }
 
 function softFail(err: unknown, label: string): void {
-  // eslint-disable-next-line no-console
+
   console.error(`${HOOK_LABEL} ${label} failed:`, err);
   if (strictMode) throw err;
 }
@@ -233,7 +233,7 @@ export async function closeCashLotsHook(
     if (remaining > 1e-9) {
       // Shortfall: more cash leaving than the lot history accounts for.
       // Pre-backfill rollout this is normal. Log so it's discoverable.
-      // eslint-disable-next-line no-console
+
       console.warn(
         `${HOOK_LABEL} closeCashLotsHook tx=${tx.id} sleeve=${tx.portfolioHoldingId} ` +
           `shortfall=${remaining} (target=${targetQty}, closed=${targetQty - remaining}). ` +

@@ -6,6 +6,7 @@ import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getDisplayCurrency, getRateMap, convertWithRateMap } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
+import { todayISO } from "@/lib/utils/date";
 
 type Period = "daily" | "weekly" | "monthly" | "quarterly";
 type GroupBy = "category" | "group";
@@ -50,7 +51,7 @@ export async function GET(request: NextRequest) {
 
   const params = request.nextUrl.searchParams;
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;
-  const endDate = params.get("endDate") ?? new Date().toISOString().split("T")[0];
+  const endDate = params.get("endDate") ?? todayISO();
   const period = (params.get("period") ?? "monthly") as Period;
   const groupBy = (params.get("groupBy") ?? "category") as GroupBy;
   const isBusiness = params.get("business") === "true";

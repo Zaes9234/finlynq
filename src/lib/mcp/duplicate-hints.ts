@@ -26,6 +26,8 @@
 // happens. Never hash-compare ciphertexts (AES-GCM IVs are random — every
 // ciphertext differs).
 
+import { round2 } from "@/lib/utils/number";
+
 export type CommittedInsert = {
   newTransactionId: number;
   accountId: number;
@@ -163,10 +165,6 @@ function shiftDays(date: string, days: number): string {
   if (Number.isNaN(t)) return date;
   const shifted = new Date(t + days * 24 * 60 * 60 * 1000);
   return shifted.toISOString().slice(0, 10);
-}
-
-function round2(n: number): number {
-  return Math.round(n * 100) / 100;
 }
 
 function round3(n: number): number {

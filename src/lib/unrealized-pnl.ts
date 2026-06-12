@@ -23,6 +23,7 @@ import { getAccountBalances } from "@/lib/queries";
 import { getHoldingsValueByAccount, type AccountHoldingsValue } from "@/lib/holdings-value";
 import { getDisplayCurrency, getRate } from "@/lib/fx-service";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { todayISO } from "@/lib/utils/date";
 import { db, schema } from "@/db";
 import { and, eq, lte, sql } from "drizzle-orm";
 
@@ -76,10 +77,6 @@ export type UnrealizedPnL = {
 function firstOfCurrentMonth(): string {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
-}
-
-function todayISO(): string {
-  return new Date().toISOString().split("T")[0];
 }
 
 export type UnrealizedPnLOpts = {

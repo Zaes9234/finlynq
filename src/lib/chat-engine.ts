@@ -6,6 +6,7 @@ import { eq, and, gte, lte, desc, sql, asc } from "drizzle-orm";
 import { formatCurrency, getCurrentMonth, getMonthLabel } from "@/lib/currency";
 import { decryptField } from "@/lib/crypto/envelope";
 import { decryptName, nameLookup } from "@/lib/crypto/encrypted-columns";
+import { todayISO } from "@/lib/utils/date";
 
 export type ChatResponse = {
   text: string;
@@ -30,10 +31,6 @@ function safeDecrypt(dek: Buffer | null | undefined, v: string | null | undefine
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
-
-function today(): string {
-  return new Date().toISOString().split("T")[0];
-}
 
 function startOfMonth(offset = 0): string {
   const d = new Date();
@@ -60,7 +57,7 @@ function parseDateRange(msg: string): { start: string; end: string; label: strin
   }
   if (lower.includes("this year") || lower.includes("year to date") || lower.includes("ytd")) {
     const y = new Date().getFullYear();
-    return { start: `${y}-01-01`, end: today(), label: `${y} YTD` };
+    return { start: `${y}-01-01`, end: todayISO(), label: `${y} YTD` };
   }
   if (lower.includes("last year")) {
     const y = new Date().getFullYear() - 1;
@@ -711,7 +708,7 @@ const handleForecast: IntentHandler = async (msg, ctx) => {
   }
 
   const upcoming = recurring
-    .filter((r) => r.nextDate && r.nextDate >= today())
+    .filter((r) => r.nextDate && r.nextDate >= todayISO())
     .slice(0, 10)
     .map((r) => ({ ...r, payee: safeDecrypt(ctx.dek, r.payee) }));
 

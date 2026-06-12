@@ -53,6 +53,8 @@
  *   `getAccounts(userId, { includeArchived: true })`-equivalent filter.
  */
 
+import { round2 } from "@/lib/utils/number";
+
 export interface DuplicateCandidatePool {
   /**
    * Pool of recent transactions, indexed by `accountId`. The caller pre-fetches
@@ -371,9 +373,8 @@ function payeeSimilarity(a: string | null, b: string | null): number {
   return union === 0 ? 0 : intersect / union;
 }
 
-function roundScore(s: number): number {
-  return Math.round(s * 100) / 100;
-}
+// 2-decimal score rounding (FINLYNQ-145 — delegates to the shared round2).
+const roundScore = round2;
 
 function roundDelta(d: number): number {
   // Two decimals for currency, four for ratios. Caller distinguishes by field.

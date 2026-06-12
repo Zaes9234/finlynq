@@ -204,7 +204,7 @@ function isFxNegativelyCached(code: string): boolean {
 
 function markFxFetchMiss(code: string): void {
   fxNegativeCache.set(code, Date.now() + FX_NEGATIVE_TTL_MS);
-  // eslint-disable-next-line no-console
+
   console.warn(
     `[fx-service] live rate fetch for "${code}" failed/timed out — falling back to nearest cached rate, skipping live fetch for ${FX_NEGATIVE_TTL_MS / 60000}m`,
   );

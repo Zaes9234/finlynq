@@ -22,7 +22,7 @@ import { lt } from "drizzle-orm";
 export async function cleanupExpiredUploads(): Promise<{ deleted: number; errors: number }> {
   const now = new Date();
   // Snapshot which rows we're about to delete so we know which blobs to unlink.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
   const expired = (await db
     .select({
       id: schema.mcpUploads.id,
@@ -59,7 +59,7 @@ export function startUploadCleanupTimer(): void {
   const THIRTY_MIN = 30 * 60 * 1000;
   timer = setInterval(() => {
     cleanupExpiredUploads().catch((err) => {
-      // eslint-disable-next-line no-console
+
       console.error("[mcp-upload-cleanup] sweep failed:", err);
     });
   }, THIRTY_MIN);

@@ -45,7 +45,7 @@ export async function logAdminAction(opts: {
       ip: opts.ip ?? null,
     });
   } catch (err) {
-    // eslint-disable-next-line no-console
+
     console.error("[admin-audit] insert failed", err);
   }
 }

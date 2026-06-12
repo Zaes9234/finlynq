@@ -131,7 +131,7 @@ export async function POST(request: NextRequest) {
 
     // Fire-and-forget: never block the response or 500 on email failure.
     void notifyMaintainer(userId, d).catch((err) => {
-      // eslint-disable-next-line no-console
+
       console.error("[feedback-email] notify failed", err);
     });
 

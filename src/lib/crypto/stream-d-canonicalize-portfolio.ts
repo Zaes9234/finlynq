@@ -152,7 +152,7 @@ export async function canonicalizePortfolioNamesIfReady(
     try {
       decryptField(dek, sample.nameCt);
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn(
         `[canonicalize-portfolio] user=${userId} sample decrypt failed; ` +
           `keeping existing names. err=${err instanceof Error ? err.message : String(err)}`,
@@ -213,14 +213,14 @@ export function enqueueCanonicalizePortfolioNames(userId: string, dek: Buffer): 
     try {
       const r = await canonicalizePortfolioNamesIfReady(userId, dek);
       if (r.canonicalized && r.rewrittenCount > 0) {
-        // eslint-disable-next-line no-console
+
         console.log(
           `[canonicalize-portfolio] user=${userId} rewrote ${r.rewrittenCount}/${r.total} ` +
             `portfolio_holdings names to canonical form`,
         );
       }
     } catch (err) {
-      // eslint-disable-next-line no-console
+
       console.warn(`[canonicalize-portfolio] user=${userId} unexpected error:`, err);
     }
   })();

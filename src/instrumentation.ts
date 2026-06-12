@@ -47,14 +47,14 @@ export async function register() {
     const ONE_DAY = 24 * 60 * 60 * 1000;
     const timer: NodeJS.Timeout = setInterval(() => {
       runSnapshotsCron().catch((err) => {
-        // eslint-disable-next-line no-console
+
         console.error("[portfolio-snapshots-cron] run failed:", err);
       });
     }, ONE_DAY);
     if (timer.unref) timer.unref();
     console.log("[instrumentation] portfolio-snapshots cron registered (24h interval)");
   } catch (err) {
-    // eslint-disable-next-line no-console
+
     console.error("[instrumentation] failed to register portfolio-snapshots cron:", err);
   }
 

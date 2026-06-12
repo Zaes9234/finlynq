@@ -172,7 +172,7 @@ export default function AccountsPage() {
       .catch(() => { setError(true); setLoading(false); });
   }
 
-  useEffect(() => { loadAccounts(showArchived); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [showArchived, displayCurrency]);
+  useEffect(() => { loadAccounts(showArchived);   }, [showArchived, displayCurrency]);
 
   function resetForm() {
     setForm(emptyForm);

@@ -1263,7 +1263,7 @@ async function applyCrossAccountOverride(
       } catch (e) {
         // InvalidLinkPairError etc. — the rows are written + paired; lots just
         // didn't materialize. Surface in logs; the user can rebuild snapshots.
-        // eslint-disable-next-line no-console
+
         console.warn(`applyCrossAccountOverride: link-pair lot replay failed for proposal ${proposal.id}:`, e);
       }
     }

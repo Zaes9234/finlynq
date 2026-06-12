@@ -6,6 +6,8 @@ import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
 import { getRateMap, convertWithRateMap, getDisplayCurrency } from "@/lib/fx-service";
 import { selfHealReportingAmounts } from "@/lib/fx/reporting-amount";
+import { todayISO } from "@/lib/utils/date";
+import { round2 } from "@/lib/utils/number";
 import {
   computeAllAccountsUnrealizedPnL,
   summarizeUnrealizedPnL,
@@ -18,7 +20,7 @@ export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const type = params.get("type") ?? "income-statement";
   const startDate = params.get("startDate") ?? `${new Date().getFullYear()}-01-01`;
-  const endDate = params.get("endDate") ?? new Date().toISOString().split("T")[0];
+  const endDate = params.get("endDate") ?? todayISO();
   const isBusiness = params.get("business") === "true";
   const displayCurrency = await getDisplayCurrency(userId, params.get("currency"));
 
@@ -122,7 +124,6 @@ export async function GET(request: NextRequest) {
       dek,
     });
     const unrealizedTotals = summarizeUnrealizedPnL(unrealized);
-    const round2 = (n: number) => Math.round(n * 100) / 100;
 
     return NextResponse.json({
       type: "income-statement",

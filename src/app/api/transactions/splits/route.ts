@@ -17,6 +17,7 @@ import {
   decryptSplitRows,
 } from "@/lib/crypto/encrypted-columns";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
+import { round2 } from "@/lib/utils/number";
 import { db, schema } from "@/db";
 import { eq, and, inArray, sql } from "drizzle-orm";
 import { validateBody, safeErrorMessage } from "@/lib/validate";
@@ -128,7 +129,6 @@ export async function POST(request: NextRequest) {
     const parentEnteredCurrency = parent?.enteredCurrency ?? parentCurrency;
     const parentEnteredFxRate = parent?.enteredFxRate ?? 1;
     const sameCurrency = parentEnteredCurrency.toUpperCase() === parentCurrency.toUpperCase();
-    const round2 = (n: number) => Math.round(n * 100) / 100;
 
     // Replace existing splits atomically
     await db.delete(transactionSplits).where(eq(transactionSplits.transactionId, transactionId));

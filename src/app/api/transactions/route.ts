@@ -8,6 +8,7 @@ import { decryptField } from "@/lib/crypto/envelope";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { buildHoldingResolver } from "@/lib/external-import/portfolio-holding-resolver";
 import { convertToAccountCurrency } from "@/lib/currency-conversion";
+import { todayISO } from "@/lib/utils/date";
 import { InvestmentHoldingRequiredError } from "@/lib/investment-account";
 import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
 import {
@@ -382,7 +383,7 @@ async function resolveTxAmounts(
     };
   }
   const accountCurrency = account.currency.toUpperCase();
-  const date = data.date ?? new Date().toISOString().split("T")[0];
+  const date = data.date ?? todayISO();
 
   // Path 1: caller gave us entered fields — triangulate.
   if (data.enteredAmount != null) {
