@@ -53,6 +53,7 @@ import { InboxReconciledTab } from "@/components/inbox/inbox-reconciled-tab";
 import { InboxToApproveTab } from "@/components/inbox/inbox-to-approve-tab";
 import { InboxToCategorizeTab } from "@/components/inbox/inbox-to-categorize-tab";
 import { InboxEmailTab } from "@/components/inbox/inbox-email-tab";
+import { ReconcileSummaryPanel } from "@/components/inbox/reconcile-summary-panel";
 
 interface Account {
   id: number;
@@ -105,6 +106,10 @@ function ImportPageInner() {
   const [lens, setLens] = useState<Mode | null>(null);
   const [tab, setTab] = useState<string>("staging");
   const [savingPolicy, setSavingPolicy] = useState(false);
+  // FINLYNQ-147 — account ids the user has hidden from the reconcile dropdown.
+  // Dropdown-only filter; the toggle lives on /settings/import. A hidden
+  // account stays selectable via a direct ?account=<id> deep-link.
+  const [hiddenIds, setHiddenIds] = useState<number[]>([]);
 
   // ─── Load accounts ──────────────────────────────────────────────────
   useEffect(() => {
@@ -157,6 +162,27 @@ function ImportPageInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // FINLYNQ-147 — load the per-user hidden-account list (dropdown filter).
+  // Non-blocking: a failure just leaves nothing hidden.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/settings/reconcile-hidden-accounts");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.accountIds)) {
+          setHiddenIds(data.accountIds.filter((n: unknown) => typeof n === "number"));
+        }
+      } catch {
+        // ignore — leave nothing hidden
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Persist ?account= and ?tab= so deep links + legacy-route redirects land
   // on the right account + tab, and a refresh keeps the user in place.
   useEffect(() => {
@@ -174,6 +200,15 @@ function ImportPageInner() {
   const visibleAccounts = useMemo(
     () => accounts.filter((a) => !a.archived),
     [accounts],
+  );
+  // FINLYNQ-147 — the dropdown shows non-archived, non-hidden accounts, BUT
+  // always keeps the currently-selected account in the list so a hidden
+  // deep-linked account (?account=<id>) stays selectable in the trigger.
+  const hiddenSet = useMemo(() => new Set(hiddenIds), [hiddenIds]);
+  const dropdownAccounts = useMemo(
+    () =>
+      visibleAccounts.filter((a) => !hiddenSet.has(a.id) || a.id === accountId),
+    [visibleAccounts, hiddenSet, accountId],
   );
   const policy: Mode = account?.mode ?? "manual";
   const activeLens: Mode = lens ?? policy;
@@ -331,9 +366,7 @@ function ImportPageInner() {
                 <SelectValue placeholder="Select an account">
                   {accountId != null
                     ? (() => {
-                        const a = visibleAccounts.find(
-                          (x) => x.id === accountId,
-                        );
+                        const a = accounts.find((x) => x.id === accountId);
                         return a
                           ? `${safeAccountName(a)} · ${a.currency}`
                           : "Select an account";
@@ -342,9 +375,10 @@ function ImportPageInner() {
                 </SelectValue>
               </SelectTrigger>
               <SelectContent>
-                {visibleAccounts.map((a) => (
+                {dropdownAccounts.map((a) => (
                   <SelectItem key={a.id} value={String(a.id)}>
                     {safeAccountName(a)} · {a.currency}
+                    {hiddenSet.has(a.id) ? " · hidden" : ""}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -362,6 +396,11 @@ function ImportPageInner() {
           <ModeBanner lens={activeLens} policy={policy} />
         </div>
       </div>
+
+      <ReconcileSummaryPanel
+        onOpenAccount={(id) => switchAccount(id)}
+        reloadKey={reloadKey}
+      />
 
       <Tabs
         value={tab}
