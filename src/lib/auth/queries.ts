@@ -9,7 +9,7 @@
 import { db } from "@/db";
 import type { DrizzleDb } from "@/db";
 import * as pgSchema from "@/db/schema-pg";
-import { eq, count, sql, inArray, and } from "drizzle-orm";
+import { eq, count, sql, inArray, and, isNull } from "drizzle-orm";
 import crypto from "crypto";
 
 /** Returns the PostgreSQL schema tables */
@@ -531,6 +531,17 @@ export async function wipeUserDataAndRewrap(
   // FK failure (e.g. cross-tenant transaction_splits) left the user signed
   // in to a half-wiped account whose DEK was never rotated.
   await db.transaction(async (tx) => {
+    // FINLYNQ-154 — revoke every live OAuth grant FIRST. `deleteAllUserDataTx`
+    // already DELETEs these rows, so the security outcome (the orphaned wrapped
+    // DEK in any old access/refresh token can no longer be used → validateOauthToken
+    // 401s) is guaranteed either way. We flip `revoked_at` explicitly before the
+    // delete so the intent is encoded at the WIPE chokepoint and the post-reset
+    // window (between this UPDATE and the row delete in the same tx) is closed.
+    await tx
+      .update(s.oauthAccessTokens)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(s.oauthAccessTokens.userId, userId), isNull(s.oauthAccessTokens.revokedAt)));
+
     await deleteAllUserDataTx(tx, userId);
 
     // Rewrap the DEK with the new password + bump encryption version so any
