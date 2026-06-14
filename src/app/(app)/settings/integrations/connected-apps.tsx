@@ -100,7 +100,7 @@ export function ConnectedApps() {
           </div>
           <div>
             <CardTitle className="text-base">Connected apps</CardTitle>
-            <CardDescription>AI assistants and other apps you&apos;ve authorized to access your data over OAuth</CardDescription>
+            <CardDescription>AI assistants and other apps you&apos;ve authorized to access your data over OAuth. Connections you don&apos;t use are automatically removed after 60 days; you can also revoke them anytime.</CardDescription>
           </div>
         </div>
       </CardHeader>

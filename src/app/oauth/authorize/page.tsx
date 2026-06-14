@@ -438,7 +438,8 @@ function AuthorizePageInner() {
         </div>
 
         <p className="mt-6 text-center text-xs text-muted-foreground/50">
-          You can revoke access at any time from Settings → API Key.
+          You can revoke access at any time from Settings → API Key. Connections
+          you don&apos;t use are automatically removed after 60 days.
         </p>
       </div>
     </div>
