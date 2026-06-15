@@ -161,7 +161,11 @@ export async function loadMetricsForUser(
   if (dividendsCategoryId != null) {
     const divRows = await db
       .select({
-        holdingId: schema.transactions.portfolioHoldingId,
+        // FINLYNQ-173: attribute the dividend to the PAYING SECURITY
+        // (related_holding_id) not the cash sleeve it landed on
+        // (portfolio_holding_id). Fall back to the cash sleeve only when no
+        // related holding was stamped (legacy rows / genuine cash interest).
+        holdingId: sql<number | null>`COALESCE(${schema.transactions.relatedHoldingId}, ${schema.transactions.portfolioHoldingId})`,
         accountId: schema.transactions.accountId,
         amount: schema.transactions.amount,
         enteredAmount: schema.transactions.enteredAmount,
@@ -181,11 +185,21 @@ export async function loadMetricsForUser(
     for (const r of divRows) {
       if (r.holdingId == null || r.accountId == null) continue;
       if (r.date > asOfDate) continue;
+      // FINLYNQ-173: `holdingId` is now the attribution target (paying
+      // security via related_holding_id, else the cash sleeve). The dividend
+      // AMOUNT, however, is denominated in the currency it was PAID in (the
+      // cash sleeve's currency, captured on the row's entered_currency /
+      // currency) — NOT the security's currency. Tag the cell with the paid
+      // currency so the metrics layer FX-converts it correctly to the
+      // attribution holding's currency (e.g. a CAD dividend credited to a
+      // USD ETF converts CAD→USD, not USD→USD).
       const key = `${r.holdingId}:${r.accountId}`;
+      const paidCurrency =
+        (r.enteredCurrency ?? r.currency ?? holdingCurrencies.get(r.holdingId) ?? "USD") as string;
       const cell = dividends.get(key) ?? {
         ytd: 0,
         allTime: 0,
-        currency: holdingCurrencies.get(r.holdingId) ?? "USD",
+        currency: paidCurrency,
       };
       const amount = Number(r.enteredAmount ?? r.amount ?? 0);
       cell.allTime += amount;

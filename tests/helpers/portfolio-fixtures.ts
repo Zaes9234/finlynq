@@ -221,6 +221,9 @@ export async function recordTransaction(args: {
   amount: number;
   quantity?: number | null;
   portfolioHoldingId?: number | null;
+  // FINLYNQ-173: the paying security a dividend/income row relates to (the
+  // row itself lands on the cash sleeve via portfolioHoldingId).
+  relatedHoldingId?: number | null;
   enteredCurrency?: string | null;
   enteredAmount?: number | null;
   tradeLinkId?: string | null;
@@ -240,6 +243,7 @@ export async function recordTransaction(args: {
       amount: args.amount,
       quantity: args.quantity ?? null,
       portfolioHoldingId: args.portfolioHoldingId ?? null,
+      relatedHoldingId: args.relatedHoldingId ?? null,
       enteredCurrency: args.enteredCurrency ?? null,
       enteredAmount: args.enteredAmount ?? null,
       tradeLinkId: args.tradeLinkId ?? null,

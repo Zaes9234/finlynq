@@ -656,3 +656,153 @@ describe("#128 paired cash-leg sell-branch skip — realized-gain side (tc-3, tc
     expect(realizedGain(stock!)).toBeCloseTo(250, 2);
   });
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// FINLYNQ-173 — per-holding dividends attributed to the paying ticker.
+//
+// A dividend lands on the brokerage CASH SLEEVE (portfolio_holding_id) but
+// carries related_holding_id = the paying security. The per-holding
+// aggregator must credit the SECURITY, leaving the cash sleeve's Dividends
+// at 0 — a naive tally piled every ticker's dividend onto the cash sleeve.
+// The grand total must be preserved (amount MOVED, not duplicated/dropped).
+// ───────────────────────────────────────────────────────────────────────────
+describe("FINLYNQ-173 dividend attribution to the paying security (tc-7, tc-8)", () => {
+  async function setupDividendOnCashSleeve() {
+    const userId = await createTestUser();
+    const accountId = await createAccount({
+      userId,
+      name: "TFSA",
+      currency: "CAD",
+      isInvestment: true,
+    });
+    // Cash sleeve (CAD) — where the dividend cash inflow lands.
+    const cashSleeveId = await createHolding({
+      userId,
+      accountId,
+      name: "Cash CAD",
+      symbol: "CAD",
+      currency: "CAD",
+    });
+    // The paying security (CAD-denominated ETF).
+    const stockId = await createHolding({
+      userId,
+      accountId,
+      name: "VCN.TO",
+      symbol: "VCN.TO",
+      currency: "CAD",
+    });
+    const dividendsCategoryId = await createCategory({
+      userId,
+      name: "Dividends",
+      type: "I",
+    });
+    // Prior buy so the security has a position + buckets of its own.
+    await recordTransaction({
+      userId,
+      accountId,
+      portfolioHoldingId: stockId,
+      currency: "CAD",
+      amount: 1000,
+      quantity: 10,
+      enteredCurrency: "CAD",
+      enteredAmount: 1000,
+      kind: "buy",
+      source: "import",
+      date: TODAY,
+    });
+    // Dividend cash inflow: lands on the CASH SLEEVE (portfolio_holding_id),
+    // related_holding_id = the paying security. This is the canonical shape
+    // recordPortfolioIncomeOrExpense() writes for a dividend.
+    await recordTransaction({
+      userId,
+      accountId,
+      portfolioHoldingId: cashSleeveId,
+      relatedHoldingId: stockId,
+      categoryId: dividendsCategoryId,
+      currency: "CAD",
+      amount: 52.83,
+      quantity: 52.83,
+      enteredCurrency: "CAD",
+      enteredAmount: 52.83,
+      kind: "portfolio_income",
+      source: "import",
+      date: TODAY,
+    });
+    await seedFxRate({ currency: "CAD", date: TODAY, rateToUsd: 0.73 });
+    return { userId, cashSleeveId, stockId, dividendsCategoryId };
+  }
+
+  it("tc-7: dividend credits the paying security; the cash sleeve's Dividends = 0", async () => {
+    const { userId, cashSleeveId, stockId, dividendsCategoryId } =
+      await setupDividendOnCashSleeve();
+    const aggs = await aggregateHoldings(db, userId, TEST_DEK, {
+      dividendsCategoryId,
+    });
+
+    const cashSleeve = aggs.find(a => a.holding_id === cashSleeveId);
+    const stock = aggs.find(a => a.holding_id === stockId);
+    expect(cashSleeve).toBeDefined();
+    expect(stock).toBeDefined();
+
+    // The bug: the cash sleeve claimed the dividend. The fix: it reads 0.
+    expect(cashSleeve!.dividends).toBe(0);
+    // The dividend is credited to the paying security.
+    expect(stock!.dividends).toBeCloseTo(52.83, 2);
+  });
+
+  it("tc-8: re-attribution preserves the grand total (moved, not duplicated/dropped)", async () => {
+    const { userId, dividendsCategoryId } = await setupDividendOnCashSleeve();
+    const aggs = await aggregateHoldings(db, userId, TEST_DEK, {
+      dividendsCategoryId,
+    });
+    // Sum of all holdings' dividends == the single dividend row's amount.
+    const total = aggs.reduce((s, a) => s + a.dividends, 0);
+    expect(total).toBeCloseTo(52.83, 2);
+  });
+
+  it("tc-9: dividend with NO related holding stays on its own holding (legacy / cash interest)", async () => {
+    // A dividend/interest row with related_holding_id NULL lands on (and
+    // stays on) the holding it was recorded against — no re-attribution.
+    const userId = await createTestUser();
+    const accountId = await createAccount({
+      userId,
+      name: "Brokerage",
+      currency: "USD",
+      isInvestment: true,
+    });
+    const holdingId = await createHolding({
+      userId,
+      accountId,
+      name: "AAPL",
+      symbol: "AAPL",
+      currency: "USD",
+    });
+    const dividendsCategoryId = await createCategory({
+      userId,
+      name: "Dividends",
+      type: "I",
+    });
+    await recordTransaction({
+      userId,
+      accountId,
+      portfolioHoldingId: holdingId,
+      // relatedHoldingId intentionally omitted (NULL) — legacy shape.
+      categoryId: dividendsCategoryId,
+      currency: "USD",
+      amount: 10,
+      quantity: 0,
+      enteredCurrency: "USD",
+      enteredAmount: 10,
+      source: "import",
+      date: TODAY,
+    });
+    await seedFxRate({ currency: "USD", date: TODAY, rateToUsd: 1 });
+
+    const aggs = await aggregateHoldings(db, userId, TEST_DEK, {
+      dividendsCategoryId,
+    });
+    expect(aggs).toHaveLength(1);
+    expect(aggs[0].holding_id).toBe(holdingId);
+    expect(aggs[0].dividends).toBeCloseTo(10, 2);
+  });
+});
