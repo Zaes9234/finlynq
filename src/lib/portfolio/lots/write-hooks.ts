@@ -35,7 +35,7 @@
  *      reach this hook because the caller filters on qty != 0.
  */
 
-import { and, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import {
   InvalidLinkPairError,
