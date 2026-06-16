@@ -10,7 +10,7 @@ import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
-import { cashLegSkipSql } from "@/lib/portfolio/aggregation-predicates";
+import { cashLegSkipSql, dividendAttributionHoldingIdSql } from "@/lib/portfolio/aggregation-predicates";
 import { todayISO } from "@/lib/utils/date";
 
 export async function GET(request: NextRequest) {
@@ -251,9 +251,12 @@ export async function GET(request: NextRequest) {
       // drops the sleeve's own cash flows from its balance (showed Cash USD at
       // $700k when the true balance was $0). Mirrors holdings-value.ts `delta`.
       delta: sql<number>`COALESCE(SUM(${schema.transactions.quantity}), 0)::float8`,
-      dividendsInEntered: dividendsCategoryId !== null
-        ? sql<number>`COALESCE(SUM(CASE WHEN ${schema.transactions.categoryId} = ${dividendsCategoryId} THEN COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount}) ELSE 0 END), 0)::float8`
-        : sql<number>`0::float8`,
+      // FINLYNQ-173: dividends are NO LONGER tallied here (keyed by
+      // portfolio_holding_id = cash sleeve). They are aggregated separately
+      // below, keyed on COALESCE(related_holding_id, portfolio_holding_id) so
+      // the paying security is credited and the cash sleeve shows 0. Keep the
+      // field present (= 0) so the bucket shape / downstream merge is stable.
+      dividendsInEntered: sql<number>`0::float8`,
       firstPurchaseDate: sql<string | null>`MIN(CASE WHEN COALESCE(${schema.transactions.quantity}, 0) > 0 THEN ${schema.transactions.date} END)`,
     })
     .from(schema.transactions)
@@ -425,17 +428,86 @@ export async function GET(request: NextRequest) {
     }
   }
 
+  // FINLYNQ-173: dividend attribution. A dividend lands on the cash sleeve
+  // (portfolio_holding_id) but carries related_holding_id = the paying
+  // security. Aggregate dividends keyed on COALESCE(related_holding_id,
+  // portfolio_holding_id) so the SECURITY is credited and the cash sleeve
+  // shows 0 — a naive per-holding tally (the old fkAggRows path) piled every
+  // ticker's dividend cash inflow onto the Cash sleeve's Dividends column and
+  // Total Return. The grand total is preserved (the amount MOVES from cash to
+  // the ticker). Amount stays in the row's own (paid) currency for the
+  // currency-aware FX hop into each target holding's quote currency below.
+  const dividendByHolding = new Map<number, { amount: number; currency: string }[]>();
+  if (dividendsCategoryId !== null) {
+    const divRows = await db
+      .select({
+        attributionHoldingId: dividendAttributionHoldingIdSql({
+          relatedHoldingId: schema.transactions.relatedHoldingId,
+          portfolioHoldingId: schema.transactions.portfolioHoldingId,
+        }),
+        enteredCurrency: sql<string>`COALESCE(${schema.transactions.enteredCurrency}, ${schema.transactions.currency})`,
+        dividendsInEntered: sql<number>`COALESCE(SUM(COALESCE(${schema.transactions.enteredAmount}, ${schema.transactions.amount})), 0)::float8`,
+      })
+      .from(schema.transactions)
+      .where(and(
+        eq(schema.transactions.userId, userId),
+        eq(schema.transactions.categoryId, dividendsCategoryId),
+        isNotNull(schema.transactions.portfolioHoldingId),
+      ))
+      .groupBy(
+        dividendAttributionHoldingIdSql({
+          relatedHoldingId: schema.transactions.relatedHoldingId,
+          portfolioHoldingId: schema.transactions.portfolioHoldingId,
+        }),
+        sql`COALESCE(${schema.transactions.enteredCurrency}, ${schema.transactions.currency})`,
+      );
+    for (const r of divRows) {
+      if (r.attributionHoldingId == null) continue;
+      const hid = Number(r.attributionHoldingId);
+      const arr = dividendByHolding.get(hid) ?? [];
+      arr.push({
+        amount: Number(r.dividendsInEntered),
+        currency: String(r.enteredCurrency || "").toUpperCase() || displayCurrency,
+      });
+      dividendByHolding.set(hid, arr);
+    }
+  }
+  // Resolve the re-attributed dividend total for one holding, FX-converted
+  // from each paid-currency slice into the holding's quote currency.
+  const dividendsForHolding = async (holdingId: number, targetCcy: string): Promise<number> => {
+    const slices = dividendByHolding.get(holdingId);
+    if (!slices) return 0;
+    let total = 0;
+    for (const s of slices) {
+      const fx = await getCrossRate(s.currency, targetCcy);
+      total += s.amount * fx;
+    }
+    return total;
+  };
+
   // Reduce per-currency buckets into a single TxMetrics keyed by holding id.
   // Cost basis normalized to the holding's quote currency via FX before
   // summing â€” fixes the cross-currency P&L bug for cash-as-currency
   // positions.
   const metricsByHoldingId = new Map<number, TxMetrics>();
   for (const h of holdings) {
-    const fkBuckets = bucketsById.get(h.id);
-    if (!fkBuckets) continue;
     const targetCcy = quoteCurrencyById.get(h.id) ?? h.currency;
-    const fkAgg = await aggInHoldingCurrency(fkBuckets, targetCcy);
-    metricsByHoldingId.set(h.id, toMetrics(fkAgg));
+    const fkBuckets = bucketsById.get(h.id);
+    // FINLYNQ-173: a holding may have re-attributed dividends even with no
+    // buy/sell buckets of its own (rare). Build a zero TxAgg in that case so
+    // the dividend still lands on the security's row.
+    const fkAgg = fkBuckets
+      ? await aggInHoldingCurrency(fkBuckets, targetCcy)
+      : {
+          totalBuyQty: 0, totalBuyAmount: 0, totalSellQty: 0, totalSellAmount: 0,
+          netQty: 0, dividendsReceived: 0, firstPurchaseDate: null,
+        } as TxAgg;
+    const metrics = toMetrics(fkAgg);
+    // Overlay the re-attributed dividend (fkAgg.dividendsReceived is now 0).
+    metrics.dividendsReceived = await dividendsForHolding(h.id, targetCcy);
+    if (fkBuckets || metrics.dividendsReceived !== 0) {
+      metricsByHoldingId.set(h.id, metrics);
+    }
   }
 
   // 6c. Auto-seed any ETF symbols not yet in the shared ETF database
@@ -463,6 +535,12 @@ export async function GET(request: NextRequest) {
     let quoteCurrency: string | null = null;
     let marketCap: number | null = null;
     let image: string | null = null;
+    // FINLYNQ-174: human-readable long name from the quote layer (Yahoo
+    // `meta.shortName`). Only populated on a live fetch — on a warm
+    // price_cache hit the quote `name` is just the symbol, which the
+    // client-side `holdingDescription(...)` resolver treats as "no
+    // description". Null for cash/metals/crypto/custom.
+    let quoteName: string | null = null;
 
     if (isCrypto && h.symbol) {
       const base = String(h.symbol).toUpperCase().split("-")[0];
@@ -484,6 +562,11 @@ export async function GET(request: NextRequest) {
         change = q.change;
         changePct = q.changePct ? Math.round(q.changePct * 100) / 100 : null;
         quoteCurrency = q.currency;
+        // Surface the Yahoo long name when it's a real description, not the
+        // symbol echoed back (cache-hit rows return name === symbol).
+        if (q.name && q.name.trim().toUpperCase() !== h.symbol.toUpperCase()) {
+          quoteName = q.name.trim();
+        }
       }
     }
 
@@ -576,6 +659,7 @@ export async function GET(request: NextRequest) {
       accountName: h.accountName ?? "Unknown",
       name: h.name,
       symbol: h.symbol,
+      quoteName,
       currency: h.currency,
       assetType,
       price,
@@ -865,6 +949,8 @@ export async function GET(request: NextRequest) {
     key: string;
     symbol: string | null;
     name: string;
+    // FINLYNQ-174: first non-null member quoteName (Yahoo long name).
+    description: string | null;
     assetType: AssetType;
     totalQty: number;
     costBasisDisplay: number;
@@ -887,6 +973,7 @@ export async function GET(request: NextRequest) {
         key: ck.key,
         symbol: ck.symbol,
         name: ck.name,
+        description: null,
         assetType: h.assetType,
         totalQty: 0,
         costBasisDisplay: 0,
@@ -902,6 +989,10 @@ export async function GET(request: NextRequest) {
       byHoldingMap.set(ck.key, acc);
     }
     if (h.accountId != null) acc.accountIds.add(h.accountId);
+    // FINLYNQ-174: carry the first member with a real quote long name up to
+    // the canonical row (all members of an `eq:`/`crypto:` key share a
+    // ticker, so any member's quoteName describes the whole row).
+    if (acc.description == null && h.quoteName) acc.description = h.quoteName;
     if (h.quantity != null) acc.totalQty += h.quantity;
     acc.marketValueDisplay += h.marketValueDisplay ?? 0;
     acc.unrealizedGainDisplay += h.unrealizedGainDisplay ?? 0;
@@ -937,6 +1028,7 @@ export async function GET(request: NextRequest) {
       key: a.key,
       symbol: a.symbol,
       name: a.name,
+      description: a.description,
       assetType: a.assetType,
       totalQty: Math.round(a.totalQty * 1e6) / 1e6,
       avgCostDisplay: avgCostDisplay != null ? Math.round(avgCostDisplay * 10000) / 10000 : null,

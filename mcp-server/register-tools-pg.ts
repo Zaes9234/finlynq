@@ -1011,13 +1011,22 @@ export async function aggregateHoldings(
   // rows carry non-zero amount + qty so `trade_link_id IS NOT NULL AND
   // amount = 0` no longer matches them — kind is the new discriminator.
   // Stream D Phase 4: ph.name dropped — read ph.name_ct only.
+  // FINLYNQ-173: SELECT t.related_holding_id + the paying security's
+  // name_ct/currency (rph.*) so the dividend branch in accumulate() can
+  // re-attribute a dividend off the cash sleeve onto the security that
+  // earned it. A dividend row lands on the cash sleeve
+  // (portfolio_holding_id = USD_Cash) but carries related_holding_id =
+  // the paying security; without re-attribution every ticker's dividend
+  // piled onto the cash sleeve's Dividends + Total Return.
   const fkRows = await q(db, sql`
-    SELECT t.portfolio_holding_id, t.amount, t.quantity, t.date, t.category_id,
+    SELECT t.portfolio_holding_id, t.related_holding_id, t.amount, t.quantity, t.date, t.category_id,
            t.trade_link_id, t.kind,
            t.entered_amount, t.entered_currency, t.currency AS row_currency,
            a.currency AS account_currency,
            ph.name_ct AS holding_name_ct,
            ph.currency AS holding_currency,
+           rph.name_ct AS related_name_ct,
+           rph.currency AS related_currency,
            cash.amount AS cash_amount, cash.id AS cash_id,
            cash.entered_amount AS cash_entered_amount,
            cash.entered_currency AS cash_entered_currency,
@@ -1029,6 +1038,7 @@ export async function aggregateHoldings(
      AND ha.user_id = ${userId}
     INNER JOIN accounts a ON a.id = t.account_id
     LEFT JOIN portfolio_holdings ph ON t.portfolio_holding_id = ph.id
+    LEFT JOIN portfolio_holdings rph ON t.related_holding_id = rph.id
     LEFT JOIN transactions cash
       ON cash.user_id = ${userId}
      AND cash.trade_link_id IS NOT NULL
@@ -1062,9 +1072,12 @@ export async function aggregateHoldings(
       const enteredCcy = String(r.entered_currency ?? r.row_currency ?? r.account_currency ?? "").toUpperCase();
       if (enteredCcy && enteredCcy !== holdingCcy) neededPairs.add(fxKey(enteredCcy, holdingCcy));
     }
-    // Dividends: entered_currency on the row.
+    // Dividends: entered_currency on the row, FX'd into the ATTRIBUTION
+    // holding's currency — the paying security (related_currency) when present,
+    // else the cash sleeve (FINLYNQ-173).
     const enteredCcy = String(r.entered_currency ?? r.row_currency ?? r.account_currency ?? "").toUpperCase();
-    if (enteredCcy && enteredCcy !== holdingCcy) neededPairs.add(fxKey(enteredCcy, holdingCcy));
+    const divTargetCcy = String(r.related_currency ?? r.holding_currency ?? "").toUpperCase();
+    if (enteredCcy && divTargetCcy && enteredCcy !== divTargetCcy) neededPairs.add(fxKey(enteredCcy, divTargetCcy));
   }
   for (const key of neededPairs) {
     const [from, to] = key.split("->");
@@ -1077,23 +1090,41 @@ export async function aggregateHoldings(
     return fxCache.get(fxKey(f, t)) ?? 1;
   };
 
+  // FINLYNQ-173: per-holding decrypt cache so a dividend's PAYING SECURITY
+  // (related_holding_id) row can be created/looked-up with its own decrypted
+  // name even when the security appears only as a related_holding_id (no
+  // buy/sell rows of its own in this window).
+  const decryptHoldingName = (nameCt: unknown): string => {
+    if (!nameCt || !dek) return "";
+    try {
+      return decryptField(dek, String(nameCt)) ?? "";
+    } catch {
+      return "";
+    }
+  };
+
   for (const r of fkRows) {
     const hid = Number(r.portfolio_holding_id ?? 0) || null;
     if (hid == null) continue; // shouldn't happen post-Phase-6; defensive skip
     // Stream D Phase 4: only the ciphertext column remains. Decrypt or skip.
-    let name = "";
-    if (r.holding_name_ct && dek) {
-      try {
-        name = decryptField(dek, String(r.holding_name_ct)) ?? "";
-      } catch {
-        name = "";
-      }
-    }
+    const name = decryptHoldingName(r.holding_name_ct);
     // Skip rows whose holding_name_ct failed to decrypt or DEK is missing
     // (stdio transport, or a DEK mismatch). The downstream UI relies on a
     // non-empty name.
     if (!name || name.startsWith("v1:")) continue;
-    accumulate(out, hid, name, r, dividendsCategoryId, fxLookup);
+    // FINLYNQ-173: resolve the dividend's attribution target (the paying
+    // security when related_holding_id is set, else this row's own holding).
+    const relatedId = Number(r.related_holding_id ?? 0) || null;
+    const relatedName = relatedId != null ? decryptHoldingName(r.related_name_ct) : "";
+    const divTarget =
+      relatedId != null && relatedName && !relatedName.startsWith("v1:")
+        ? {
+            holdingId: relatedId,
+            name: relatedName,
+            currency: String(r.related_currency ?? r.holding_currency ?? "").toUpperCase(),
+          }
+        : null;
+    accumulate(out, hid, name, r, dividendsCategoryId, fxLookup, divTarget);
   }
 
   return Array.from(out.values()).sort((a, b) => b.buy_amount - a.buy_amount);
@@ -1116,6 +1147,11 @@ function accumulate(
   r: Row,
   dividendsCategoryId: number | null,
   fxLookup: (from: string, to: string) => number,
+  // FINLYNQ-173: dividend-attribution target (the paying security via
+  // related_holding_id). When set, the dividend branch credits THIS holding's
+  // row instead of the row's own `holdingId` (the cash sleeve). null → no
+  // related holding stamped, dividend stays on the row's own holding.
+  divTarget?: { holdingId: number; name: string; currency: string } | null,
 ): void {
   const qty = Number(r.quantity ?? 0);
   const amt = Number(r.amount);
@@ -1211,16 +1247,46 @@ function accumulate(
     const fx = holdingCcy ? fxLookup(enteredCcy, holdingCcy) : 1;
     row.sell_amount += sellAmtInEntered * fx;
   }
+  // Persist the row's own holding (buy/sell/qty/tx_count) before handling the
+  // dividend, which may credit a DIFFERENT holding (the paying security).
+  out.set(holdingId, row);
+
   if (dividendsCategoryId !== null && catId === dividendsCategoryId) {
-    // Issue #129: dividends in entered_currency, FX-normalized to holding
+    // Issue #129: dividends in entered_currency, FX-normalized to the holding
     // currency. Sign preserved (dividends contribute positive; withholding-
     // tax / corrections contribute negative — see issue #84).
+    // FINLYNQ-173: credit the PAYING SECURITY (divTarget) not the cash sleeve.
+    // A dividend lands on the cash sleeve (portfolio_holding_id) but carries
+    // related_holding_id = the security; route it there so the cash sleeve's
+    // Dividends column reads 0. When no related holding was stamped (legacy /
+    // genuine cash interest) divTarget is null and the dividend stays on the
+    // row's own holding — preserving the grand total either way.
     const enteredAmt = r.entered_amount != null ? Number(r.entered_amount) : NaN;
     const divInEntered = Number.isFinite(enteredAmt) ? enteredAmt : amt;
-    const fx = holdingCcy ? fxLookup(enteredCcy, holdingCcy) : 1;
-    row.dividends += divInEntered * fx;
+    const targetId = divTarget?.holdingId ?? holdingId;
+    const targetCcy = (divTarget?.currency || holdingCcy).toUpperCase();
+    const fx = targetCcy ? fxLookup(enteredCcy, targetCcy) : 1;
+    // Resolve (or create) the attribution row. When the security has no
+    // buy/sell rows of its own in this window the row won't exist yet.
+    const targetRow = out.get(targetId) ?? {
+      name: divTarget?.name ?? name,
+      buy_qty: 0,
+      buy_amount: 0,
+      sell_qty: 0,
+      sell_amount: 0,
+      dividends: 0,
+      first_purchase: null as string | null,
+      purchases: 0,
+      tx_count: 0,
+      net_quantity: 0,
+      last_activity: null as string | null,
+      holding_id: targetId,
+      currency: targetCcy || "CAD",
+    };
+    targetRow.dividends += divInEntered * fx;
+    if (!targetRow.last_activity || d > targetRow.last_activity) targetRow.last_activity = d;
+    out.set(targetId, targetRow);
   }
-  out.set(holdingId, row);
 }
 
 /** Issue #65: shift an ISO YYYY-MM-DD date by N days (UTC-safe). Returns null on parse failure. */

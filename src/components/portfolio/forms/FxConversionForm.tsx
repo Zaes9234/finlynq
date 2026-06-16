@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/select";
 import { todayISO } from "@/lib/utils/date";
 import { useEditId } from "@/lib/hooks/useEditId";
+import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { usePortfolioFormData } from "@/lib/hooks/usePortfolioFormData";
 import { useAccountHoldingSelection } from "@/lib/hooks/useAccountHoldingSelection";
 
@@ -495,7 +496,7 @@ export default function FxConversionForm() {
                 {blockingClosureTxIds.map((id) => (
                   <li key={id}>
                     <Link
-                      href={`/transactions?search=%23${id}`}
+                      href={buildTxDrillUrl({ id: String(id) })}
                       className="text-amber-700 dark:text-amber-300 underline hover:no-underline"
                     >
                       Transaction #{id}

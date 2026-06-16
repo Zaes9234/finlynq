@@ -27,6 +27,7 @@ import type { TxFilters } from "@/lib/transactions/build-query";
  * `TxFilters` keys are honoured) — `URLSearchParams` handles the encoding.
  */
 const ALLOWED_KEYS: ReadonlySet<keyof TxFilters> = new Set([
+  "id",
   "startDate",
   "endDate",
   "accountId",

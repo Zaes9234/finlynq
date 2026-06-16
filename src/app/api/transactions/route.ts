@@ -15,6 +15,7 @@ import {
   applyLotEffectsForTx,
   buildLotContext,
   reverseLotsForDeleteHook,
+  replanLotsAfterMutation,
 } from "@/lib/portfolio/lots/write-hooks";
 import { canEditPortfolioRow } from "@/lib/portfolio/operations";
 import type { TxRowForLots } from "@/lib/portfolio/lots/types";
@@ -73,6 +74,10 @@ const putSchema = z.object({
   isBusiness: z.number().optional(),
   splitPerson: z.string().optional(),
   splitRatio: z.number().optional(),
+  // FINLYNQ-176 — when true, a lot-locked edit (canEditPortfolioRow → not
+  // allowed) reallocates the dependent closures instead of returning 409.
+  // Stripped from `data` before the row is updated.
+  confirmReallocation: z.boolean().optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -173,9 +178,26 @@ export async function GET(request: NextRequest) {
     filterPortfolio || filterPortfolioTicker || filterTags
   );
 
+  // FINLYNQ-177 — single-transaction id deep link. Owner-scoped SQL pushdown
+  // (combined with the user_id predicate in buildTxFilterConditions). A present
+  // but non-positive / non-numeric `id` param can never match a real serial id,
+  // so short-circuit to the empty state rather than silently dropping the
+  // filter and rendering the full list.
+  const idParamRaw = params.get("id");
+  let idFilter: number | undefined;
+  if (idParamRaw != null && idParamRaw !== "") {
+    const parsed = parseInt(idParamRaw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      idFilter = parsed;
+    } else {
+      return NextResponse.json({ data: [], total: 0 });
+    }
+  }
+
   // FK filter is SQL-side, so it's NOT a postDecryptFilter — paginate normally.
   const postDecryptFilter = search || tag || hasEncryptedSubstringFilter;
   const filters: TxSortFilter = {
+    id: idFilter,
     startDate: params.get("startDate") ?? undefined,
     endDate: params.get("endDate") ?? undefined,
     createdAtFrom: params.get("createdAtFrom") ?? undefined,
@@ -549,19 +571,24 @@ export async function PUT(request: NextRequest) {
     const body = await request.json();
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
-    const { id, ...data } = parsed.data;
+    const { id, confirmReallocation, ...data } = parsed.data;
 
-    // Portfolio edit-guard (Phase 2 of the operations refactor) — refuse
-    // edits to a buy/transfer-in tx whose opened lot has been sold or
-    // transferred out. Returns the dependent closure tx ids so the UI can
-    // render a modal listing the rows the user must delete first.
+    // Portfolio edit-guard (Phase 2 of the operations refactor). When a
+    // buy/transfer-in tx's opened lot has been sold or transferred out, the
+    // guard reports the dependent closures.
+    //   - Without confirmReallocation → keep the existing 409 affordance so
+    //     the client can fetch the reallocation preview (FINLYNQ-176).
+    //   - With confirmReallocation → re-plan the dependent closures against
+    //     the post-edit inventory instead of refusing.
     const guard = await canEditPortfolioRow(auth.userId, id);
-    if (!guard.allowed) {
+    const reallocate = !guard.allowed && confirmReallocation === true;
+    const dependentCloseTxIds = guard.blockingClosureTxIds ?? [];
+    if (!guard.allowed && !reallocate) {
       return NextResponse.json(
         {
           error: guard.reason,
           code: "portfolio_edit_blocked",
-          blockingClosureTxIds: guard.blockingClosureTxIds ?? [],
+          blockingClosureTxIds: dependentCloseTxIds,
         },
         { status: 409 },
       );
@@ -636,15 +663,27 @@ export async function PUT(request: NextRequest) {
     const encrypted = encryptTxWrite(auth.dek, data);
     const tx = await updateTransaction(id, auth.userId, encrypted, auth.dek);
     invalidateUserTxCache(auth.userId);
-    // Portfolio lot tracking — UPDATE may have changed quantity / amount /
-    // category / holding, so the conservative move is reverse + redo.
-    // Pure-metadata edits (note / payee / tags / date) still spend the
-    // reverse cycle, but reverseLotsForDeleteHook is a no-op when there
-    // are no lots tied to this tx.
-    await reverseLotsForDeleteHook(auth.userId, id);
-    if (tx && tx.portfolioHoldingId != null && tx.quantity != null && tx.quantity !== 0) {
-      const ctx = await buildLotContext(auth.userId, auth.dek);
-      await applyLotEffectsForTx(tx as TxRowForLots, ctx);
+    if (reallocate) {
+      // FINLYNQ-176 — the edited buy/transfer-in had dependent closures.
+      // Re-plan them against the post-edit inventory (strict, all-or-nothing):
+      // reverse dependents + target, redo the edited target, re-close each
+      // dependent (FIFO + auto-short). Throws on any error → 500 rollback.
+      await replanLotsAfterMutation(
+        auth.userId,
+        { op: "edit", targetTxId: id, dependentCloseTxIds },
+        { dryRun: false, dek: auth.dek },
+      );
+    } else {
+      // Portfolio lot tracking — UPDATE may have changed quantity / amount /
+      // category / holding, so the conservative move is reverse + redo.
+      // Pure-metadata edits (note / payee / tags / date) still spend the
+      // reverse cycle, but reverseLotsForDeleteHook is a no-op when there
+      // are no lots tied to this tx.
+      await reverseLotsForDeleteHook(auth.userId, id);
+      if (tx && tx.portfolioHoldingId != null && tx.quantity != null && tx.quantity !== 0) {
+        const ctx = await buildLotContext(auth.userId, auth.dek);
+        await applyLotEffectsForTx(tx as TxRowForLots, ctx);
+      }
     }
     // Snapshot history is stale from this date forward for investment rows
     // (a back-dated edit can move the affected date earlier than today).
@@ -683,6 +722,9 @@ export async function DELETE(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const id = parseInt(params.get("id") ?? "0");
   if (!id) return NextResponse.json({ error: "Missing id" }, { status: 400 });
+  // FINLYNQ-176 — `?confirmReallocation=1` opts into warn-and-reallocate
+  // instead of the hard `portfolio_edit_blocked` 409.
+  const confirmReallocation = params.get("confirmReallocation") === "1";
 
   // Phase 2 portfolio-ops refactor (2026-05-25): paired rows from
   // operations.ts share a `trade_link_id` (buy/sell cash leg pairs) or
@@ -797,18 +839,21 @@ export async function DELETE(request: NextRequest) {
   // in place); they have to delete the sell first. We check each row in the
   // set and aggregate any blocking ids so the UI can surface a single
   // actionable list.
-  const blockingClosureTxIds: number[] = [];
+  const blockingSet = new Set<number>();
   for (const txId of allIds) {
     const guard = await canEditPortfolioRow(userId, txId);
     if (!guard.allowed && guard.blockingClosureTxIds) {
       for (const b of guard.blockingClosureTxIds) {
         // Exclude ids already in the delete set — the user is deleting
         // them, so they're not "blocking" the operation.
-        if (!idSet.has(b)) blockingClosureTxIds.push(b);
+        if (!idSet.has(b)) blockingSet.add(b);
       }
     }
   }
-  if (blockingClosureTxIds.length > 0) {
+  const blockingClosureTxIds = Array.from(blockingSet);
+  if (blockingClosureTxIds.length > 0 && !confirmReallocation) {
+    // FINLYNQ-176 — without the confirm flag, keep the 409 affordance so the
+    // client can fetch the reallocation preview before proceeding.
     return NextResponse.json(
       {
         error:
@@ -821,6 +866,84 @@ export async function DELETE(request: NextRequest) {
     );
   }
 
+  if (blockingClosureTxIds.length > 0) {
+    // FINLYNQ-176 reallocation path. Reverse the dependent closures' lot
+    // effects FIRST so they release the lots the deleted rows opened, then
+    // delete the tx rows, then re-close the dependents (FIFO + auto-short)
+    // against the remaining inventory. STRICT — any error throws → 500.
+    const { __setLotWriteHookStrictMode } = await import(
+      "@/lib/portfolio/lots/write-hooks"
+    );
+    __setLotWriteHookStrictMode(true);
+    try {
+      for (const depId of blockingClosureTxIds) {
+        await reverseLotsForDeleteHook(userId, depId);
+      }
+      for (const txId of allIds) {
+        await reverseLotsForDeleteHook(userId, txId);
+      }
+      for (const txId of allIds) {
+        await deleteTransaction(txId, userId);
+      }
+      // Re-close the (still-existing) dependent transactions against the
+      // post-delete inventory.
+      const ctx = await buildLotContext(userId, null);
+      const depRows = await db
+        .select({
+          id: schema.transactions.id,
+          userId: schema.transactions.userId,
+          date: schema.transactions.date,
+          amount: schema.transactions.amount,
+          currency: schema.transactions.currency,
+          enteredAmount: schema.transactions.enteredAmount,
+          enteredCurrency: schema.transactions.enteredCurrency,
+          quantity: schema.transactions.quantity,
+          accountId: schema.transactions.accountId,
+          categoryId: schema.transactions.categoryId,
+          portfolioHoldingId: schema.transactions.portfolioHoldingId,
+          tradeLinkId: schema.transactions.tradeLinkId,
+          source: schema.transactions.source,
+          kind: schema.transactions.kind,
+        })
+        .from(schema.transactions)
+        .where(and(eq(schema.transactions.userId, userId), inArray(schema.transactions.id, blockingClosureTxIds)));
+      depRows.sort((a, b) => a.date.localeCompare(b.date) || a.id - b.id);
+      for (const r of depRows) {
+        if (r.portfolioHoldingId == null || r.quantity == null) continue;
+        await applyLotEffectsForTx(
+          {
+            id: r.id,
+            userId: r.userId,
+            date: r.date,
+            amount: Number(r.amount ?? 0),
+            currency: r.currency ?? "USD",
+            enteredAmount: r.enteredAmount == null ? null : Number(r.enteredAmount),
+            enteredCurrency: r.enteredCurrency,
+            quantity: Number(r.quantity),
+            accountId: r.accountId,
+            categoryId: r.categoryId,
+            portfolioHoldingId: r.portfolioHoldingId,
+            tradeLinkId: r.tradeLinkId,
+            source: (r.source ?? "manual") as TransactionSource,
+            kind: r.kind,
+          },
+          ctx,
+        );
+      }
+    } finally {
+      __setLotWriteHookStrictMode(false);
+    }
+    invalidateUserTxCache(userId);
+    if (snapshotDirtyFrom) await markSnapshotsDirty(userId, snapshotDirtyFrom);
+    return NextResponse.json({
+      success: true,
+      deletedIds: allIds,
+      cascaded: allIds.length > 1,
+      reallocated: blockingClosureTxIds,
+    });
+  }
+
+  // No dependent closures — the standard delete path.
   // Reverse lots BEFORE deleting tx rows so reverseLotsForDeleteHook can
   // see them. ON DELETE CASCADE on holding_lots.open_tx_id catches any
   // strays as defense-in-depth.

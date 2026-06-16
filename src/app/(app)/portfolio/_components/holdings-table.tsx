@@ -12,14 +12,17 @@
  */
 
 import Link from "next/link";
-import { ChevronDown, ChevronUp, Download } from "lucide-react";
+import { useState } from "react";
+import { ChevronDown, ChevronUp, Download, Layers } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { LotInspectorDialog } from "@/components/portfolio/lot-inspector-dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCurrency } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { exportByHoldingToCSV } from "./csv";
+import { holdingDescription } from "./holding-description";
 import {
   ASSET_TYPE_CONFIG,
   type ByHoldingRow,
@@ -83,7 +86,16 @@ export function HoldingsTable({
 }) {
   const { summary, byType } = data;
 
+  // FINLYNQ-176 — read-only lot inspector (opened per-account-holding row).
+  const [inspect, setInspect] = useState<{
+    holdingId: number;
+    accountId: number | null;
+    holdingName: string;
+    accountName: string;
+  } | null>(null);
+
   return (
+    <>
     <Card>
       <CardHeader className="pb-2">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -156,6 +168,10 @@ export function HoldingsTable({
               {filteredHoldings.map(r => {
                 const typeConf = ASSET_TYPE_CONFIG[r.assetType];
                 const isExpanded = expandedRows.has(r.key);
+                // FINLYNQ-174: human-readable description for the single-line
+                // Holding cell. `r.name` is the canonical key (= ticker for
+                // equities), so prefer the quote long name; null-safe fallback.
+                const description = holdingDescription({ quoteName: r.description, name: r.name, symbol: r.symbol });
                 const reportCcy = data.displayCurrency ?? displayCurrency;
                 const memberHoldings = holdingsByCanonicalKey.get(r.key) ?? [];
                 // Aggregate-level first-purchase / days-held are derived
@@ -182,35 +198,41 @@ export function HoldingsTable({
                         {isExpanded ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                       </TableCell>
                       <TableCell>
-                        <div className="flex items-center gap-2">
-                          {r.image && <img src={r.image} alt="" className="h-6 w-6 rounded-full" />}
-                          <div>
-                            <span className="font-medium text-sm">{r.name}</span>
-                            <div className="flex items-center gap-1 mt-0.5">
-                              {r.symbol && <Badge variant="secondary" className="font-mono text-[10px] h-4 px-1">{r.symbol}</Badge>}
-                              <Badge
-                                variant="outline"
-                                className="text-[10px] h-4 px-1"
-                                ref={(el) => {
-                                  if (el && typeConf?.color) {
-                                    el.style.borderColor = typeConf.color;
-                                    el.style.color = typeConf.color;
-                                  }
-                                }}
-                              >
-                                {typeConf?.label ?? r.assetType}
-                              </Badge>
-                              {r.totalQty < 0 && (
-                                <Badge
-                                  variant="outline"
-                                  className="text-[10px] h-4 px-1 border-rose-500 text-rose-600 dark:border-rose-400 dark:text-rose-400"
-                                  title="Net-short position — sales exceeded buys. Lots are tracked via holding_lots.side='short'; close by buying to cover."
-                                >
-                                  Short
-                                </Badge>
-                              )}
-                            </div>
-                          </div>
+                        {/* FINLYNQ-174: single-line Holding cell — symbol badge
+                            + human-readable description + asset-type badge,
+                            with the Short badge inline. `description` resolves
+                            the quote long name (Yahoo shortName) with a fallback
+                            to the stored name, null-safe; `--` when neither is a
+                            meaningful description (cash/metals/custom). */}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {r.image && <img src={r.image} alt="" className="h-5 w-5 rounded-full flex-shrink-0" />}
+                          {r.symbol && <Badge variant="secondary" className="font-mono text-[10px] h-4 px-1">{r.symbol}</Badge>}
+                          {description ? (
+                            <span className="font-medium text-sm">{description}</span>
+                          ) : (
+                            <span className="text-muted-foreground text-xs">--</span>
+                          )}
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] h-4 px-1"
+                            ref={(el) => {
+                              if (el && typeConf?.color) {
+                                el.style.borderColor = typeConf.color;
+                                el.style.color = typeConf.color;
+                              }
+                            }}
+                          >
+                            {typeConf?.label ?? r.assetType}
+                          </Badge>
+                          {r.totalQty < 0 && (
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] h-4 px-1 border-rose-500 text-rose-600 dark:border-rose-400 dark:text-rose-400"
+                              title="Net-short position — sales exceeded buys. Lots are tracked via holding_lots.side='short'; close by buying to cover."
+                            >
+                              Short
+                            </Badge>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell className={`text-right font-mono text-sm ${r.totalQty < 0 ? "text-rose-600 dark:text-rose-400" : ""}`}>
@@ -358,14 +380,32 @@ export function HoldingsTable({
                                           ) : <span className="text-muted-foreground">--</span>}
                                         </TableCell>
                                         <TableCell className="text-right">
-                                          <Link
-                                            href={buildTxDrillUrl({ portfolioHolding: h.name, accountId: h.accountId ? String(h.accountId) : undefined })}
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="text-[11px] text-primary hover:underline whitespace-nowrap"
-                                            title="View transactions for this holding in this account"
-                                          >
-                                            View txns →
-                                          </Link>
+                                          <div className="flex items-center justify-end gap-2 whitespace-nowrap">
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setInspect({
+                                                  holdingId: h.id,
+                                                  accountId: h.accountId ?? null,
+                                                  holdingName: h.name,
+                                                  accountName: h.accountName,
+                                                });
+                                              }}
+                                              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground hover:underline"
+                                              title="Inspect lots: see how this holding's lots are consumed"
+                                            >
+                                              <Layers className="h-3 w-3" /> Lots
+                                            </button>
+                                            <Link
+                                              href={buildTxDrillUrl({ portfolioHolding: h.name, accountId: h.accountId ? String(h.accountId) : undefined })}
+                                              onClick={(e) => e.stopPropagation()}
+                                              className="text-[11px] text-primary hover:underline"
+                                              title="View transactions for this holding in this account"
+                                            >
+                                              View txns →
+                                            </Link>
+                                          </div>
                                         </TableCell>
                                       </TableRow>
                                     );
@@ -421,5 +461,14 @@ export function HoldingsTable({
         </div>
       </CardContent>
     </Card>
+    <LotInspectorDialog
+      open={inspect !== null}
+      onOpenChange={(open) => { if (!open) setInspect(null); }}
+      holdingId={inspect?.holdingId ?? null}
+      accountId={inspect?.accountId ?? null}
+      holdingName={inspect?.holdingName}
+      accountName={inspect?.accountName}
+    />
+    </>
   );
 }

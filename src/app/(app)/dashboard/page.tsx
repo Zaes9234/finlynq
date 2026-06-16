@@ -192,6 +192,9 @@ export default function DashboardPage() {
     }))
     .slice(-12);
   const incExpLast6 = incExpData.slice(-6);
+  // "YYYY-MM" labels parallel to the income/expense/budget sparklines — drive the
+  // hover tooltip's date line (formatted via getMonthLabel inside Sparkline).
+  const incExpSparkLabels = incExpLast6.map((d) => d.month);
   const incomeSparkline = incExpLast6.map((d) => d.income);
   const expenseSparkline = incExpLast6.map((d) => d.expenses);
 
@@ -208,7 +211,10 @@ export default function DashboardPage() {
   const netWorthData = Array.from(nwMap.entries())
     .map(([month, value]) => ({ month, value }))
     .slice(-24);
-  const nwSparkline = netWorthData.slice(-6).map((d) => d.value);
+  // Net Worth sparkline shows the last twelve months (hero + stat tile share it).
+  const nwSparkPoints = netWorthData.slice(-12);
+  const nwSparkline = nwSparkPoints.map((d) => d.value);
+  const nwSparkLabels = nwSparkPoints.map((d) => d.month);
 
   // Month-over-month change
   let momChange = 0;
@@ -257,6 +263,7 @@ export default function DashboardPage() {
       iconBg: "bg-primary/10 text-primary",
       sparkColor: "#6366f1",
       sparkData: nwSparkline,
+      sparkLabels: nwSparkLabels,
       href: "/accounts",
     },
     {
@@ -267,6 +274,7 @@ export default function DashboardPage() {
       iconBg: "bg-emerald-100 text-emerald-600 dark:bg-emerald-950/60 dark:text-emerald-400",
       sparkColor: "#10b981",
       sparkData: incomeSparkline,
+      sparkLabels: incExpSparkLabels,
       href: buildTxDrillUrl({ startDate: monthDrill.startDate, endDate: monthDrill.endDate }),
     },
     {
@@ -277,6 +285,7 @@ export default function DashboardPage() {
       iconBg: "bg-rose-100 text-rose-600 dark:bg-rose-950/60 dark:text-rose-400",
       sparkColor: "#f43f5e",
       sparkData: expenseSparkline,
+      sparkLabels: incExpSparkLabels,
       href: buildTxDrillUrl({ startDate: monthDrill.startDate, endDate: monthDrill.endDate }),
     },
     {
@@ -287,6 +296,7 @@ export default function DashboardPage() {
       iconBg: "bg-amber-100 text-amber-600 dark:bg-amber-950/60 dark:text-amber-400",
       sparkColor: "#f59e0b",
       sparkData: budgetSparkline,
+      sparkLabels: incExpSparkLabels,
       href: "/budgets",
     },
   ];
@@ -382,7 +392,7 @@ export default function DashboardPage() {
 
                   {/* Mini sparkline */}
                   <div className="hidden md:block w-40 h-20 opacity-50 group-hover:opacity-100 transition-opacity duration-300">
-                    <Sparkline data={nwSparkline} color="#6366f1" />
+                    <Sparkline data={nwSparkline} color="#6366f1" labels={nwSparkLabels} currency={apiDisplayCurrency} />
                   </div>
                 </div>
               </CardContent>

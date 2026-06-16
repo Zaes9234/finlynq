@@ -145,6 +145,11 @@ export async function getTransactionCountByCategory(categoryId: number, userId: 
 // `@/lib/transactions/columns` first. Encrypted name columns are NOT in the
 // list — sorting on them post-Phase-3 returns NULL-clustered rows.
 export type TxSortFilter = {
+  // FINLYNQ-177 — single-transaction id deep link. Applied as an owner-scoped
+  // `WHERE transactions.id = ?` (alongside the always-present
+  // `eq(transactions.userId, userId)`), so `?id=<another user's id>` and
+  // `?id=<nonexistent>` both return zero rows — never the full list.
+  id?: number;
   startDate?: string;
   endDate?: string;
   // Audit-trio range filters (issue #59). All ISO timestamps; gte/lte
@@ -183,6 +188,9 @@ export type TxSortFilter = {
 
 function buildTxFilterConditions(userId: string, filters?: TxSortFilter) {
   const conditions = [eq(transactions.userId, userId)];
+  // FINLYNQ-177 — single-tx id pushdown. Combined with the user_id predicate
+  // above, so another user's id (or a nonexistent one) yields zero rows.
+  if (filters?.id != null) conditions.push(eq(transactions.id, filters.id));
   if (filters?.startDate) conditions.push(gte(transactions.date, filters.startDate));
   if (filters?.endDate) conditions.push(lte(transactions.date, filters.endDate));
   if (filters?.createdAtFrom) {

@@ -18,7 +18,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
 import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
+import { safeName } from "@/lib/safe-name";
 import { DayChange } from "./portfolio-ui";
+import { holdingDescription } from "./holding-description";
 import { ASSET_TYPE_CONFIG, type EnrichedHolding } from "../_types";
 
 export function HoldingsByAccount({
@@ -181,18 +183,21 @@ export function HoldingsByAccount({
                         <TableBody>
                           {items.map(h => {
                             const hasMetrics = h.quantity !== null && h.quantity !== 0;
+                            // FINLYNQ-174: prefer the quote long name (Yahoo
+                            // shortName); fall back to the stored holding name
+                            // (null-safe) so the cell is never empty.
+                            const label = holdingDescription({ quoteName: h.quoteName, name: h.name, symbol: h.symbol })
+                              ?? safeName(h.name, "Holding", h.id);
                             return (
                               <TableRow key={h.id} className="hover:bg-muted/30 transition-colors">
                                 <TableCell>
-                                  <div className="flex items-center gap-2">
-                                    {h.image && <img src={h.image} alt="" className="h-5 w-5 rounded-full" />}
-                                    <div>
-                                      <span className="font-medium text-sm">{h.name}</span>
-                                      {h.symbol && <Badge variant="secondary" className="ml-1 font-mono text-[10px] h-4 px-1">{h.symbol}</Badge>}
-                                      {hasMetrics && h.quantity != null && h.quantity < 0 && (
-                                        <Badge variant="outline" className="ml-1 text-[10px] h-4 px-1 border-rose-500 text-rose-600 dark:border-rose-400 dark:text-rose-400" title="Net-short position">Short</Badge>
-                                      )}
-                                    </div>
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    {h.image && <img src={h.image} alt="" className="h-5 w-5 rounded-full flex-shrink-0" />}
+                                    {h.symbol && <Badge variant="secondary" className="font-mono text-[10px] h-4 px-1">{h.symbol}</Badge>}
+                                    <span className="font-medium text-sm">{label}</span>
+                                    {hasMetrics && h.quantity != null && h.quantity < 0 && (
+                                      <Badge variant="outline" className="text-[10px] h-4 px-1 border-rose-500 text-rose-600 dark:border-rose-400 dark:text-rose-400" title="Net-short position">Short</Badge>
+                                    )}
                                   </div>
                                 </TableCell>
                                 <TableCell className={`text-right font-mono text-sm ${hasMetrics && h.quantity != null && h.quantity < 0 ? "text-rose-600 dark:text-rose-400" : ""}`}>

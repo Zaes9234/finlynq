@@ -44,10 +44,12 @@ export function exportStocksToCSV(stocks: AggregatedStock[], etfTotalValueDispla
 }
 
 export function exportByHoldingToCSV(rows: ByHoldingRow[], displayCurrency: string) {
-  const header = ["#", "Holding", "Symbol", "Type", "Total Qty", `Avg Cost ${displayCurrency}`, `Cost Basis ${displayCurrency}`, `Mkt Value ${displayCurrency}`, "Unrealized G/L", "Unrealized %", "Realized G/L", "Dividends", "Total Return", "Total Return %", "Accounts", "Weight %"];
+  const header = ["#", "Holding", "Description", "Symbol", "Type", "Total Qty", `Avg Cost ${displayCurrency}`, `Cost Basis ${displayCurrency}`, `Mkt Value ${displayCurrency}`, "Unrealized G/L", "Unrealized %", "Realized G/L", "Dividends", "Total Return", "Total Return %", "Accounts", "Weight %"];
   const out = rows.map((r, i) => [
     i + 1,
     `"${r.name}"`,
+    // FINLYNQ-174: quote long name (Yahoo shortName); blank when none.
+    `"${r.description ?? ""}"`,
     r.symbol ?? "",
     r.assetType,
     r.totalQty,
@@ -65,7 +67,10 @@ export function exportByHoldingToCSV(rows: ByHoldingRow[], displayCurrency: stri
   ]);
   const totalMV = rows.reduce((s, r) => s + r.marketValueDisplay, 0);
   const totalUnreal = rows.reduce((s, r) => s + r.unrealizedGainDisplay, 0);
-  out.push(["", "TOTAL", "", "", "", "", "", totalMV.toFixed(2), totalUnreal.toFixed(2), "", "", "", "", "", "", "100.00"] as unknown as string[]);
+  // 17 columns: #, Holding, Description, Symbol, Type, Total Qty, Avg Cost,
+  // Cost Basis, Mkt Value(8), Unrealized G/L(9), Unrealized %, Realized G/L,
+  // Dividends, Total Return, Total Return %, Accounts, Weight %(16).
+  out.push(["", "TOTAL", "", "", "", "", "", "", totalMV.toFixed(2), totalUnreal.toFixed(2), "", "", "", "", "", "", "100.00"] as unknown as string[]);
   const csv = [header.join(","), ...out.map(r => (r as (string | number | null)[]).join(","))].join("\n");
   downloadCSV(csv, `portfolio-by-holding-${new Date().toISOString().slice(0, 10)}.csv`);
 }

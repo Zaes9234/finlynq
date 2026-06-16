@@ -82,3 +82,48 @@ export type CashLegSkipColumns = {
 export function cashLegSkipSql(cols: CashLegSkipColumns): SQL<boolean> {
   return sql<boolean>`(${cols.kind} IN ('buy_cash_leg', 'sell_cash_leg') OR (${cols.tradeLinkId} IS NOT NULL AND ${cols.amount} = 0))`;
 }
+
+/**
+ * Dividend-attribution holding id (FINLYNQ-173).
+ *
+ * A portfolio_income / portfolio_expense dividend row lands ON the brokerage
+ * cash sleeve (`portfolio_holding_id = USD_Cash`) but carries
+ * `related_holding_id = <paying security>` so reports can group the dividend
+ * BY the security that earned it (see schema-pg.ts `related_holding_id` doc).
+ *
+ * The per-holding aggregators (overview route, MCP `aggregateHoldings`,
+ * lots `loadMetricsForUser`, `listDividendIncome` groupBy:"holding") naively
+ * keyed dividends on `portfolio_holding_id`, so EVERY ticker's dividend cash
+ * inflow piled onto the Cash sleeve's Dividends column (and its Total Return).
+ * This helper is the SINGLE source of truth for re-attribution: credit
+ * `related_holding_id` when present, else fall back to `portfolio_holding_id`
+ * (legacy rows recorded before related-holding stamping, and genuine
+ * cash-sleeve interest with no security tie). The grand total is preserved —
+ * the amount is MOVED from cash to the ticker, never duplicated or dropped.
+ *
+ * Keep all four aggregators pointed at this helper so they cannot drift.
+ */
+export function dividendAttributionHoldingId(row: {
+  relatedHoldingId?: number | null;
+  related_holding_id?: number | null;
+  portfolioHoldingId?: number | null;
+  portfolio_holding_id?: number | null;
+}): number | null {
+  const related = row.relatedHoldingId ?? row.related_holding_id ?? null;
+  if (related != null) return Number(related);
+  const own = row.portfolioHoldingId ?? row.portfolio_holding_id ?? null;
+  return own != null ? Number(own) : null;
+}
+
+/**
+ * Drizzle `sql` form of `dividendAttributionHoldingId` —
+ * `COALESCE(related_holding_id, portfolio_holding_id)`. Pass the two column
+ * refs; consumed by `api/portfolio/overview/route.ts` + `lots/read.ts` where
+ * the dividend tally is keyed in SQL.
+ */
+export function dividendAttributionHoldingIdSql(cols: {
+  relatedHoldingId: SQL.Aliased | SQL | unknown;
+  portfolioHoldingId: SQL.Aliased | SQL | unknown;
+}): SQL<number | null> {
+  return sql<number | null>`COALESCE(${cols.relatedHoldingId}, ${cols.portfolioHoldingId})`;
+}

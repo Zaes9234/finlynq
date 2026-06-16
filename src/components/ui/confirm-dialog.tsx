@@ -66,7 +66,7 @@ export function ConfirmDialog({
         onOpenChange(next);
       }}
     >
-      <DialogContent className="max-w-sm">
+      <DialogContent className="sm:max-w-sm">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-destructive">
             <AlertTriangle className="h-4 w-4" />

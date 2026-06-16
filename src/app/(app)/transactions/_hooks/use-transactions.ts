@@ -33,6 +33,8 @@ type TxListResponse = { data?: Transaction[]; total?: number };
 
 export function useTransactions(
   filters: {
+    // FINLYNQ-177 — single-transaction id deep link.
+    id: string;
     startDate: string;
     endDate: string;
     accountId: string;

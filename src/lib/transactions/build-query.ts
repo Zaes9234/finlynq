@@ -27,6 +27,12 @@ export type TxFilters = {
   search?: string;
   portfolioHolding?: string;
   tag?: string;
+  // FINLYNQ-177 — first-class single-transaction deep link. `id=<n>` filters
+  // the page to exactly one transaction (owner-scoped SQL pushdown on the GET
+  // route). Distinct from the DELETE handler's `id` param (different HTTP
+  // method, never routed through this builder). The string is kept as-is and
+  // parsed to an int server-side.
+  id?: string;
 };
 
 /** Per-user header sort. `null` direction = unsorted (server default date DESC). */
@@ -68,6 +74,10 @@ export function buildTransactionQuery(
   page: TxQueryPage,
 ): URLSearchParams {
   const params = new URLSearchParams();
+  // FINLYNQ-177 — single-transaction id deep link. Emitted FIRST so the deep
+  // link reads as `?id=<n>` up front; the GET route applies it as an
+  // owner-scoped `WHERE transactions.id = ?` pushdown.
+  if (filters.id) params.set("id", filters.id);
   if (filters.startDate) params.set("startDate", filters.startDate);
   if (filters.endDate) params.set("endDate", filters.endDate);
   if (filters.accountId) params.set("accountId", filters.accountId);

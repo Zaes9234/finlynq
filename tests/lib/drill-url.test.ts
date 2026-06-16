@@ -44,4 +44,18 @@ describe("buildTxDrillUrl (FINLYNQ-130)", () => {
       "/transactions?portfolioHolding=Apple+Inc",
     );
   });
+
+  // FINLYNQ-177 — first-class single-transaction id deep link. The new `id`
+  // key must be in ALLOWED_KEYS so every "go to this one transaction" link
+  // (audit Edit affordance, the 5 portfolio-form dependent-row links, the
+  // delete-dialog dependent-row links) builds its href through this helper.
+  it("emits the single-transaction id key (FINLYNQ-177)", () => {
+    expect(buildTxDrillUrl({ id: "42" })).toBe("/transactions?id=42");
+  });
+
+  it("emits id first, before other recognised filters", () => {
+    expect(buildTxDrillUrl({ id: "42", categoryId: "5" })).toBe(
+      "/transactions?id=42&categoryId=5",
+    );
+  });
 });

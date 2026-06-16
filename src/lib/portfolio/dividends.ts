@@ -16,7 +16,8 @@
  *   undefined   — return raw rows
  */
 
-import { and, eq, gte, isNotNull, lte } from "drizzle-orm";
+import { and, eq, gte, isNotNull, lte, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import { db, schema } from "@/db";
 import { decryptField, tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptName } from "@/lib/crypto/encrypted-columns";
@@ -114,12 +115,29 @@ export async function listDividendIncome(
   if (from) preds.push(gte(schema.transactions.date, from));
   if (to) preds.push(lte(schema.transactions.date, to));
   if (filter.holdingId != null) {
-    preds.push(eq(schema.transactions.portfolioHoldingId, filter.holdingId));
+    // FINLYNQ-173: a dividend lands on the cash sleeve (portfolio_holding_id)
+    // but is attributed to the paying security (related_holding_id). Match on
+    // EITHER so a caller scoping to the security's id (the natural choice) OR
+    // the cash sleeve's id both resolve that holding's dividends.
+    preds.push(
+      sql`(${schema.transactions.portfolioHoldingId} = ${filter.holdingId} OR ${schema.transactions.relatedHoldingId} = ${filter.holdingId})`,
+    );
   }
   if (filter.accountId != null) {
     preds.push(eq(schema.transactions.accountId, filter.accountId));
   }
 
+  // FINLYNQ-173: attribute the dividend to the PAYING SECURITY
+  // (related_holding_id) rather than the cash sleeve it landed on
+  // (portfolio_holding_id). A dividend row lands on the cash sleeve but
+  // carries related_holding_id = the security; without this the
+  // groupBy:"holding" view labels every dividend "Cash". Fall back to the
+  // cash sleeve when no related holding was stamped (legacy rows / genuine
+  // cash interest). The attribution holding feeds the name/account labels and
+  // the holdingId, while the holdingId filter (filter.holdingId) still matches
+  // EITHER the security or the cash sleeve so existing deep-links keep working.
+  const attributionHoldingId = sql<number | null>`COALESCE(${schema.transactions.relatedHoldingId}, ${schema.transactions.portfolioHoldingId})`;
+  const rph = alias(schema.portfolioHoldings, "rph");
   const rows = await db
     .select({
       txId: schema.transactions.id,
@@ -130,15 +148,21 @@ export async function listDividendIncome(
       enteredCurrency: schema.transactions.enteredCurrency,
       quantity: schema.transactions.quantity,
       payeeCt: schema.transactions.payee,
-      holdingId: schema.transactions.portfolioHoldingId,
+      holdingId: attributionHoldingId,
       accountId: schema.transactions.accountId,
-      holdingNameCt: schema.portfolioHoldings.nameCt,
+      // Prefer the related (security) holding's name; fall back to the
+      // row's own holding (cash sleeve) when no related holding was stamped.
+      holdingNameCt: sql<string | null>`COALESCE(${rph.nameCt}, ${schema.portfolioHoldings.nameCt})`,
       accountNameCt: schema.accounts.nameCt,
     })
     .from(schema.transactions)
     .leftJoin(
       schema.portfolioHoldings,
       eq(schema.portfolioHoldings.id, schema.transactions.portfolioHoldingId),
+    )
+    .leftJoin(
+      rph,
+      eq(rph.id, schema.transactions.relatedHoldingId),
     )
     .leftJoin(
       schema.accounts,

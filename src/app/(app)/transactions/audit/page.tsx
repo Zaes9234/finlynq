@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/currency";
+import { buildTxDrillUrl } from "@/lib/transactions/drill-url";
 import { ArrowLeft, AlertTriangle, RefreshCw, Check, X } from "lucide-react";
 
 type AuditRow = {
@@ -206,7 +207,7 @@ export default function CurrencyAuditPage() {
                     <Check className="h-3 w-3 mr-1.5" />
                     Keep as-is
                   </Button>
-                  <Link href={`/transactions?id=${row.transactionId}`}>
+                  <Link href={buildTxDrillUrl({ id: String(row.transactionId) })}>
                     <Button size="sm" variant="ghost">
                       <X className="h-3 w-3 mr-1.5" />
                       Edit transaction

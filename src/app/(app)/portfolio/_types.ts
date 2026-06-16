@@ -64,6 +64,11 @@ export type EnrichedHolding = {
   accountName: string;
   name: string;
   symbol: string | null;
+  // FINLYNQ-174: human-readable long name from the quote layer (Yahoo
+  // `meta.shortName`). Null for cash/metals/custom holdings and on a
+  // warm-price-cache hit (the cache doesn't persist the name). Resolved
+  // for display via `holdingDescription(...)`.
+  quoteName: string | null;
   currency: string;
   assetType: AssetType;
   price: number | null;
@@ -96,6 +101,11 @@ export type ByHoldingRow = {
   key: string;
   symbol: string | null;
   name: string;
+  // FINLYNQ-174: human-readable long name (Yahoo `meta.shortName`) carried
+  // up from the per-account members. Null when no member has a quote
+  // description (cash/metals/custom or warm-cache hit). For the canonical
+  // row `name` is the ticker code itself, so this is the descriptive label.
+  description: string | null;
   assetType: AssetType;
   totalQty: number;
   avgCostDisplay: number | null;

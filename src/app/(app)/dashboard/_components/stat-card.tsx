@@ -20,11 +20,13 @@ type StatCardProps = {
   iconBg: string;
   sparkColor: string;
   sparkData: number[];
+  /** Optional "YYYY-MM" labels parallel to sparkData — enables the hover tooltip. */
+  sparkLabels?: string[];
   href: string;
   currency?: string;
 };
 
-export function StatCard({ label, value, sub, icon: Icon, iconBg, sparkColor, sparkData, href, currency = "CAD" }: StatCardProps) {
+export function StatCard({ label, value, sub, icon: Icon, iconBg, sparkColor, sparkData, sparkLabels, href, currency = "CAD" }: StatCardProps) {
   return (
     <motion.div variants={itemVariants}>
       <Link href={href}>
@@ -50,7 +52,7 @@ export function StatCard({ label, value, sub, icon: Icon, iconBg, sparkColor, sp
           {/* Full-width sparkline at bottom */}
           {sparkData.length > 1 && (
             <div className="opacity-50 group-hover:opacity-100 transition-opacity duration-300 -mx-px">
-              <Sparkline data={sparkData} color={sparkColor} />
+              <Sparkline data={sparkData} color={sparkColor} labels={sparkLabels} currency={currency} />
             </div>
           )}
         </Card>

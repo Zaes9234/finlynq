@@ -35,7 +35,7 @@
  *      reach this hook because the caller filters on qty != 0.
  */
 
-import { and, eq, inArray, isNotNull, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import {
   InvalidLinkPairError,
@@ -51,9 +51,12 @@ import {
   inferCashCloseKind,
   openCashLotHook,
 } from "./cash-hooks";
+import { planLotReallocation, type DependentCloseInput } from "./replan";
 import type {
   CashLegHint,
   HoldingLot,
+  HoldingLotClosure,
+  LotReallocationPreview,
   LotSelectionStrategy,
   TxRowForLots,
 } from "./types";
@@ -970,6 +973,323 @@ export async function applyLotEffectsForTx(
       cashLeg: opts?.cashLeg ?? null,
       holdingCurrency,
     });
+  }
+}
+
+// ─── replanLotsAfterMutation — FINLYNQ-176 reallocation orchestrator ──────
+//
+// Warn-and-reallocate replacement for the hard `portfolio_edit_blocked`
+// 409. When the user confirms editing/deleting a buy/transfer-in whose lot
+// has been consumed, this re-plans the dependent closures against the
+// post-mutation inventory (re-FIFO; overflow auto-opens a short lot).
+//
+//   dryRun=true  — read lots + dependent close-txs, run the PURE
+//                  planLotReallocation core, return the preview. Writes
+//                  NOTHING (issue: must be safe to call before confirm).
+//   dryRun=false — STRICT, all-or-nothing. Reverses the dependent
+//                  closures' lot effects + the target's lot effects, then
+//                  (edit only) re-applies the edited target, then re-closes
+//                  every dependent in chronological order via the existing
+//                  closeLotsForSellHook (FIFO + auto-short). The caller MUST
+//                  invoke this inside the same logical unit as the tx
+//                  edit/delete; lot-hook strict mode is forced ON so any
+//                  failure throws and the caller rolls back.
+//
+// IMPORTANT: this reuses the existing hooks (which bind to the module-level
+// `db`) the same way the backfill replay does — there is no tx-handle
+// threading in the lot layer. The caller (the transactions route) performs
+// the actual `transactions` UPDATE/DELETE; this only owns the lot+closure
+// rows. NEVER DELETE+INSERT a `transactions` row here (backfill invariant).
+
+const LOT_TX_SELECT = {
+  id: schema.transactions.id,
+  userId: schema.transactions.userId,
+  date: schema.transactions.date,
+  amount: schema.transactions.amount,
+  currency: schema.transactions.currency,
+  enteredAmount: schema.transactions.enteredAmount,
+  enteredCurrency: schema.transactions.enteredCurrency,
+  quantity: schema.transactions.quantity,
+  accountId: schema.transactions.accountId,
+  categoryId: schema.transactions.categoryId,
+  portfolioHoldingId: schema.transactions.portfolioHoldingId,
+  tradeLinkId: schema.transactions.tradeLinkId,
+  source: schema.transactions.source,
+  kind: schema.transactions.kind,
+} as const;
+
+function txRowToLots(
+  r: Record<string, unknown>,
+): TxRowForLots {
+  return {
+    id: r.id as number,
+    userId: r.userId as string,
+    date: r.date as string,
+    amount: Number(r.amount ?? 0),
+    currency: (r.currency as string) ?? "USD",
+    enteredAmount: r.enteredAmount == null ? null : Number(r.enteredAmount),
+    enteredCurrency: (r.enteredCurrency as string | null) ?? null,
+    quantity: r.quantity == null ? null : Number(r.quantity),
+    accountId: (r.accountId as number | null) ?? null,
+    categoryId: (r.categoryId as number | null) ?? null,
+    portfolioHoldingId: (r.portfolioHoldingId as number | null) ?? null,
+    tradeLinkId: (r.tradeLinkId as string | null) ?? null,
+    source: ((r.source as string) ?? "manual") as TransactionSource,
+    kind: (r.kind as string | null) ?? null,
+  };
+}
+
+/** Load the dependent close-tx rows + their stored closures, for the pure
+ *  re-plan. Closures are read BEFORE any reversal. */
+async function loadDependentCloses(
+  userId: string,
+  closeTxIds: number[],
+): Promise<DependentCloseInput[]> {
+  if (closeTxIds.length === 0) return [];
+  const txRows = await db
+    .select(LOT_TX_SELECT)
+    .from(schema.transactions)
+    .where(
+      and(
+        eq(schema.transactions.userId, userId),
+        inArray(schema.transactions.id, closeTxIds),
+      ),
+    );
+  const closureRows = await db
+    .select()
+    .from(schema.holdingLotClosures)
+    .where(
+      and(
+        eq(schema.holdingLotClosures.userId, userId),
+        inArray(schema.holdingLotClosures.closeTxId, closeTxIds),
+      ),
+    );
+  const closuresByTx = new Map<number, HoldingLotClosure[]>();
+  for (const c of closureRows) {
+    const arr = closuresByTx.get(c.closeTxId) ?? [];
+    arr.push({
+      id: c.id,
+      userId: c.userId,
+      lotId: c.lotId,
+      closeTxId: c.closeTxId,
+      closeDate: c.closeDate,
+      qtyClosed: Number(c.qtyClosed),
+      proceedsPerShare: Number(c.proceedsPerShare),
+      costPerShare: Number(c.costPerShare),
+      realizedGain: Number(c.realizedGain),
+      currency: c.currency,
+      daysHeld: Number(c.daysHeld),
+      closeKind: c.closeKind as HoldingLotClosure["closeKind"],
+      source: c.source as TransactionSource,
+    });
+    closuresByTx.set(c.closeTxId, arr);
+  }
+  // Chronological order (oldest close first), id tiebreaker.
+  const deps: DependentCloseInput[] = txRows
+    .map((r) => txRowToLots(r))
+    .map((tx) => ({ tx, originalClosures: closuresByTx.get(tx.id) ?? [] }))
+    .sort(
+      (a, b) =>
+        a.tx.date.localeCompare(b.tx.date) || a.tx.id - b.tx.id,
+    );
+  return deps;
+}
+
+/** Snapshot the user's current lots (long+short, open) for the holdings
+ *  touched by the dependent closes — the pure re-plan input. */
+async function loadLotsForHoldings(
+  userId: string,
+  holdingIds: number[],
+): Promise<HoldingLot[]> {
+  if (holdingIds.length === 0) return [];
+  const rows = await db
+    .select()
+    .from(schema.holdingLots)
+    .where(
+      and(
+        eq(schema.holdingLots.userId, userId),
+        inArray(schema.holdingLots.holdingId, holdingIds),
+      ),
+    );
+  return rows.map(rowToLot);
+}
+
+export interface ReplanArgs {
+  op: "edit" | "delete";
+  targetTxId: number;
+  /** The dependent closure tx ids from canEditPortfolioRow(targetTxId). */
+  dependentCloseTxIds: number[];
+  /** Lot context (holding currencies + dividends category) for the redo. */
+  ctx?: LotContext;
+}
+
+/**
+ * FINLYNQ-176 — re-plan + (optionally) reallocate dependent closures after
+ * the target tx is edited/deleted.
+ *
+ * dryRun=true returns the preview and writes nothing.
+ * dryRun=false runs STRICT (lot hooks throw on error) and must be called
+ *   AFTER the caller has applied the target `transactions` UPDATE (edit) or
+ *   immediately BEFORE the caller deletes the target row (delete): see the
+ *   sequence note above. On any error it throws — the caller rolls back.
+ */
+export async function replanLotsAfterMutation(
+  userId: string,
+  args: ReplanArgs,
+  opts: { dryRun: boolean; dek?: Buffer | null },
+): Promise<LotReallocationPreview> {
+  const { targetTxId, dependentCloseTxIds } = args;
+
+  // No dependents → nothing to reallocate (empty preview / no-op).
+  if (dependentCloseTxIds.length === 0) {
+    return {
+      affectedHoldingIds: [],
+      dependentCloseTxIds: [],
+      proposedClosures: [],
+      openedShortLots: [],
+      realizedGainDeltaByYear: {},
+    };
+  }
+
+  const deps = await loadDependentCloses(userId, dependentCloseTxIds);
+  const holdingIds = Array.from(
+    new Set(
+      deps
+        .map((d) => d.tx.portfolioHoldingId)
+        .filter((h): h is number => h != null),
+    ),
+  );
+
+  // ─── dry-run: simulate the post-reversal inventory, run the pure core ──
+  if (opts.dryRun) {
+    // Post-reversal snapshot: drop lots opened by the target tx and add
+    // back the qty its closures consumed (the pure mirror of
+    // reverseLotsForDeleteHook). We do NOT touch the DB.
+    const liveLots = await loadLotsForHoldings(userId, holdingIds);
+
+    // Lots opened by the target (removed on reversal).
+    const targetOpenedLotIds = new Set(
+      liveLots.filter((l) => l.openTxId === targetTxId).map((l) => l.id),
+    );
+    // Closures written BY the target tx restore qty on the lots they closed.
+    const targetClosures = await db
+      .select({
+        lotId: schema.holdingLotClosures.lotId,
+        qtyClosed: schema.holdingLotClosures.qtyClosed,
+      })
+      .from(schema.holdingLotClosures)
+      .where(
+        and(
+          eq(schema.holdingLotClosures.userId, userId),
+          eq(schema.holdingLotClosures.closeTxId, targetTxId),
+        ),
+      );
+    const restoreByLot = new Map<number, number>();
+    for (const c of targetClosures) {
+      restoreByLot.set(
+        c.lotId,
+        (restoreByLot.get(c.lotId) ?? 0) + Number(c.qtyClosed),
+      );
+    }
+    // The dependent closures also currently consume inventory; the re-plan
+    // replays them from scratch, so strip their consumption from the
+    // baseline (add their qtyClosed back to the lots they sit on).
+    const depCloseTxIdSet = new Set(dependentCloseTxIds);
+    for (const d of deps) {
+      for (const c of d.originalClosures) {
+        if (!depCloseTxIdSet.has(c.closeTxId)) continue;
+        restoreByLot.set(
+          c.lotId,
+          (restoreByLot.get(c.lotId) ?? 0) + c.qtyClosed,
+        );
+      }
+    }
+
+    const postReversal: HoldingLot[] = liveLots
+      .filter((l) => !targetOpenedLotIds.has(l.id))
+      .map((l) => {
+        const restore = restoreByLot.get(l.id) ?? 0;
+        const qtyRemaining = l.qtyRemaining + restore;
+        return {
+          ...l,
+          qtyRemaining,
+          status: qtyRemaining > 1e-9 ? "open" : l.status,
+        };
+      });
+
+    return planLotReallocation({
+      mutation: { op: args.op, targetTxId },
+      lots: postReversal,
+      dependentCloses: deps,
+    });
+  }
+
+  // ─── commit: strict, all-or-nothing reverse → redo → re-close ──────────
+  const ctx = args.ctx ?? (await buildLotContext(userId, opts.dek ?? null));
+  const prevStrict = strictMode;
+  __setLotWriteHookStrictMode(true);
+  try {
+    // 1. Reverse the dependent closures' lot effects FIRST (restores the
+    //    lots they consumed; deletes their closure rows).
+    for (const d of deps) {
+      await reverseLotsForDeleteHook(userId, d.tx.id);
+    }
+    // 2. Reverse the target's lot effects (delete its opened lots — their
+    //    surviving closures cascade; restore any qty it consumed). For a
+    //    DELETE the caller removes the tx row afterward; for an EDIT the
+    //    caller has already UPDATEd the row, so we redo it below.
+    await reverseLotsForDeleteHook(userId, targetTxId);
+
+    // 3. EDIT only — re-apply the edited target row so its (possibly
+    //    changed) lot re-opens before the dependents re-close against it.
+    if (args.op === "edit") {
+      const targetRows = await db
+        .select(LOT_TX_SELECT)
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.userId, userId),
+            eq(schema.transactions.id, targetTxId),
+          ),
+        );
+      const t = targetRows[0];
+      if (
+        t &&
+        t.portfolioHoldingId != null &&
+        t.quantity != null &&
+        Number(t.quantity) !== 0
+      ) {
+        await applyLotEffectsForTx(txRowToLots(t), ctx);
+      }
+    }
+
+    // 4. Re-close every dependent in chronological order. closeLotsForSellHook
+    //    FIFO-closes remaining long lots and auto-opens a short on overflow.
+    for (const d of deps) {
+      const t = d.tx;
+      if (t.portfolioHoldingId == null || t.quantity == null) continue;
+      await applyLotEffectsForTx(t, ctx);
+    }
+
+    // Return the realized preview so the caller can echo affected years.
+    const liveLots = await loadLotsForHoldings(userId, holdingIds);
+    return {
+      affectedHoldingIds: holdingIds.sort((a, b) => a - b),
+      dependentCloseTxIds,
+      proposedClosures: [],
+      openedShortLots: liveLots
+        .filter((l) => l.side === "short" && l.qtyRemaining > 1e-9)
+        .map((l) => ({
+          holdingId: l.holdingId,
+          accountId: l.accountId,
+          qty: l.qtyRemaining,
+          costPerShare: l.costPerShare,
+          currency: l.currency,
+        })),
+      realizedGainDeltaByYear: {},
+    };
+  } finally {
+    __setLotWriteHookStrictMode(prevStrict);
   }
 }
 

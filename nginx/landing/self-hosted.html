@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PF - Self-Hosted Setup</title>
+  <title>Finlynq - Self-Hosted Setup</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -110,27 +110,36 @@
     <a href="/" class="back">&larr; Back to home</a>
 
     <h1>Self-Hosted Setup</h1>
-    <p class="subtitle">Run PF on your own machine. Your data never leaves your device.</p>
+    <p class="subtitle">Run Finlynq on your own infrastructure. App and PostgreSQL run in Docker; sensitive fields are encrypted at rest with a per-user key derived from your account password.</p>
 
-    <h2>Quick Start with Docker</h2>
-    <div class="code-block">docker run -d \<br>&nbsp;&nbsp;--name pf \<br>&nbsp;&nbsp;-p 3000:3000 \<br>&nbsp;&nbsp;-v pf-data:/app/data \<br>&nbsp;&nbsp;ghcr.io/nextsoftwareconsulting/pf:latest</div>
-    <p>Then open <code>http://localhost:3000</code> in your browser.</p>
+    <h2>Quick Start with Docker Compose</h2>
+    <p>Download the compose file:</p>
+    <div class="code-block">curl -O https://raw.githubusercontent.com/finlynq/finlynq/main/docker-compose.yml</div>
+    <p>Create a sibling <code>.env</code> file with the three required secrets, each generated with <code>openssl rand -hex 32</code>:</p>
+    <div class="code-block">echo "PF_JWT_SECRET=$(openssl rand -hex 32)" &gt;&gt; .env<br>echo "PF_PEPPER=$(openssl rand -hex 32)" &gt;&gt; .env<br>echo "PF_STAGING_KEY=$(openssl rand -hex 32)" &gt;&gt; .env</div>
+    <p>Then start it:</p>
+    <div class="code-block">docker compose up -d</div>
+    <p>Open <code>http://localhost:3000</code> and register. Compose fails fast with a clear message if any secret is missing. Change the default PostgreSQL password (<code>POSTGRES_PASSWORD</code> in <code>.env</code>) before exposing the container beyond localhost.</p>
 
     <h2>What You Get</h2>
     <ul>
-      <li>Local SQLite database &mdash; encrypted with your passphrase</li>
-      <li>All data stored in a Docker volume (<code>pf-data</code>)</li>
-      <li>No external network calls &mdash; fully offline capable</li>
-      <li>Automatic updates via Docker image pulls</li>
+      <li>Self-contained Docker Compose: app plus PostgreSQL, nothing external</li>
+      <li>All data stored in the <code>postgres_data</code> Docker volume</li>
+      <li>Envelope encryption on transaction text fields (payees, notes, tags, holdings)</li>
+      <li>First-party MCP server for plugging in AI assistants (Claude, etc.)</li>
+      <li>Automatic schema migrations on container start</li>
     </ul>
 
     <h2>Environment Variables</h2>
     <ul>
-      <li><code>PF_DATA_DIR</code> &mdash; data directory (default: <code>/app/data</code>)</li>
-      <li><code>PORT</code> &mdash; server port (default: <code>3000</code>)</li>
+      <li><code>DATABASE_URL</code>: PostgreSQL connection string (required; set for you by docker-compose)</li>
+      <li><code>PF_JWT_SECRET</code>: JWT signing secret, at least 32 chars (required)</li>
+      <li><code>PF_PEPPER</code>: scrypt password peppering, at least 32 chars (required in production)</li>
+      <li><code>PF_STAGING_KEY</code>: wraps email-staged transactions, at least 32 chars (required in production)</li>
+      <li><code>PORT</code>: server port (default: <code>3000</code>)</li>
     </ul>
 
-    <p class="footer">PF &mdash; Track your money here, analyze it anywhere</p>
+    <p class="footer">Finlynq &middot; Track your money here, analyze it anywhere</p>
   </div>
 </body>
 </html>
