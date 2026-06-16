@@ -27,7 +27,6 @@ import {
   Zap,
   Link2,
   Upload,
-  Layers,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -44,9 +43,9 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/settings/rules", label: "Rules", icon: Zap },
   { href: "/settings/import", label: "Import", icon: Upload },
   { href: "/settings/reconciliation", label: "Reconciliation", icon: Link2 },
+  // Securities master (Tier 2) is folded into this page — one filterable row
+  // per security; /settings/securities + /settings/holding-accounts redirect here.
   { href: "/settings/investments", label: "Investments", icon: Briefcase },
-  // Securities master (Tier 2) — centralized per-ticker identity management.
-  { href: "/settings/securities", label: "Securities", icon: Layers },
   { href: "/settings/display", label: "Display & Ordering", icon: Sliders },
   { href: "/settings/integrations", label: "Integrations", icon: Server },
   { href: "/settings/developer", label: "Developer", icon: Wrench },
@@ -56,6 +55,7 @@ const NAV_ITEMS: NavItem[] = [
 // nav entry without us having to add them as nav items.
 const ROUTE_GROUP: Array<{ prefix: string; group: string }> = [
   { prefix: "/settings/holding-accounts", group: "/settings/investments" },
+  { prefix: "/settings/securities", group: "/settings/investments" },
   { prefix: "/settings/dropdown-order", group: "/settings/display" },
 ];
 
