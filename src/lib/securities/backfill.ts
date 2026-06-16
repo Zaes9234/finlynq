@@ -21,7 +21,7 @@
  * after a full pass, so a partial failure simply re-runs next login.
  *
  * Fire-and-forget on the login path — never blocks login, never throws.
- * → docs/architecture/securities.md
+ * → plan/architecture/securities.md
  */
 
 import { db, schema } from "@/db";

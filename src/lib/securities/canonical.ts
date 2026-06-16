@@ -18,7 +18,7 @@
  *
  * Pure + DEK-free: callers compute the HMAC `symbol_lookup` / `name_lookup`
  * (which need the DEK) and pass them to `buildSecurityClusterKey`.
- * → docs/architecture/securities.md
+ * → plan/architecture/securities.md
  */
 
 import { isCryptoSymbol, isCurrencyCodeSymbol, isMetalCurrency } from "@/lib/fx/supported-currencies";

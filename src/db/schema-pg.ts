@@ -215,7 +215,7 @@ export const txCurrencyAudit = pgTable("tx_currency_audit", {
 //
 // Identity ONLY — zero dollar amounts. Positions/lots/transactions never move;
 // aggregation just swaps the grouping key from an in-memory symbol string to a
-// real `security_id` FK (behind a flag during rollout). → docs/architecture/securities.md
+// real `security_id` FK (behind a flag during rollout). → plan/architecture/securities.md
 //
 // `cluster_key` is the privacy-preserving cluster discriminator computed by
 // src/lib/securities/canonical.ts — `eq:<symbol_lookup>` / `crypto:<…>` /
@@ -264,7 +264,7 @@ export const portfolioHoldings = pgTable("portfolio_holdings", {
   // (resolveOrCreateSecurity) + by the login-time per-user backfill. NULL on
   // un-backfilled rows; aggregators fall back to the legacy `canonicalKey`
   // string for those. ON DELETE SET NULL so deleting a security never orphans
-  // a position. → docs/architecture/securities.md
+  // a position. → plan/architecture/securities.md
   securityId: integer("security_id").references(() => securities.id, {
     onDelete: "set null",
   }),

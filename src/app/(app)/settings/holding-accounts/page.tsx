@@ -50,6 +50,9 @@ type Pairing = {
   holdingName: string | null;
   holdingSymbol: string | null;
   holdingCurrency: string;
+  // Securities master (Phase F) — present only when the read-flip is enabled;
+  // groups same-security positions across accounts into one card.
+  holdingSecurityId: number | null;
   accountName: string | null;
   accountIsInvestment: boolean;
 };
@@ -134,9 +137,17 @@ export default function HoldingAccountsPage() {
 
   const groups: HoldingGroup[] = useMemo(() => {
     if (!pairings) return [];
-    const map = new Map<number, HoldingGroup>();
+    // Securities master (Phase F): when the read-flip exposes holdingSecurityId,
+    // group cards by the shared security so the same ticker across N accounts is
+    // ONE card with N account rows. Otherwise key on holdingId (legacy). The
+    // group's `holding.id` is the representative (first-seen) position — the
+    // add-pairing target; edit/delete/setPrimary carry each pairing's own ids.
+    const map = new Map<string, HoldingGroup>();
+    const seenHoldingIds = new Set<number>();
     for (const p of pairings) {
-      let group = map.get(p.holdingId);
+      seenHoldingIds.add(p.holdingId);
+      const key = p.holdingSecurityId != null ? `sec:${p.holdingSecurityId}` : `hold:${p.holdingId}`;
+      let group = map.get(key);
       if (!group) {
         group = {
           holding: {
@@ -147,15 +158,18 @@ export default function HoldingAccountsPage() {
           },
           pairings: [],
         };
-        map.set(p.holdingId, group);
+        map.set(key, group);
       }
       group.pairings.push(p);
     }
     // Holdings with no pairings yet: synth a single empty group from
-    // /api/portfolio so the user can add the first pairing here too.
+    // /api/portfolio so the user can add the first pairing here too. These have
+    // no security context (no pairing row), so they key by holdingId.
     for (const h of holdings) {
-      if (map.has(h.id)) continue;
-      map.set(h.id, {
+      if (seenHoldingIds.has(h.id)) continue;
+      const key = `hold:${h.id}`;
+      if (map.has(key)) continue;
+      map.set(key, {
         holding: {
           id: h.id,
           displayName: h.symbol?.trim() || h.name || "(unnamed)",

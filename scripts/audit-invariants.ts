@@ -270,6 +270,12 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // login — the same backstop that covers stdio/DEK-less writes. Accepted.
   "src/app/api/data/import/route.ts:securities-dual-write":
     "backup restore bulk-inserts pre-encrypted rows; login-time backfillSecuritiesForUser populates security_id on next login (same backstop as DEK-less writes).",
+  // The /settings/securities "link to account" POST creates a position that
+  // copies an EXISTING, user-selected security row (security_id set explicitly
+  // from sec.id). resolveOrCreateSecurity would be redundant — the security is
+  // already resolved by definition. Accepted.
+  "src/app/api/securities/route.ts:securities-dual-write":
+    "links to a pre-resolved security; the INSERT sets security_id explicitly from the chosen securities row (resolveOrCreateSecurity would be redundant).",
 };
 
 interface InvariantConfig {

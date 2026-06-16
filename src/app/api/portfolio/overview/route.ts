@@ -9,6 +9,8 @@ import { isMetalCurrency, isCryptoSymbol, isCurrencyCodeSymbol } from "@/lib/fx/
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { clusterFromAssetType } from "@/lib/securities/canonical";
+import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import { cashLegSkipSql, dividendAttributionHoldingIdSql } from "@/lib/portfolio/aggregation-predicates";
 import { todayISO } from "@/lib/utils/date";
@@ -50,6 +52,7 @@ export async function GET(request: NextRequest) {
       symbolCt: schema.portfolioHoldings.symbolCt,
       currency: schema.portfolioHoldings.currency,
       isCrypto: schema.portfolioHoldings.isCrypto,
+      securityId: schema.portfolioHoldings.securityId,
       note: schema.portfolioHoldings.note,
     })
     .from(schema.portfolioHoldings)
@@ -655,6 +658,7 @@ export async function GET(request: NextRequest) {
 
     return {
       id: h.id,
+      securityId: h.securityId ?? null,
       accountId: h.accountId,
       accountName: h.accountName ?? "Unknown",
       name: h.name,
@@ -910,40 +914,26 @@ export async function GET(request: NextRequest) {
   // so user-edited free-text names don't fragment the same ticker into
   // multiple rows.
   type ByHoldingKey = { key: string; symbol: string | null; name: string };
+  // Securities master (2026-06-16): the cluster logic is single-sourced in
+  // src/lib/securities/canonical.ts (used by the write-side resolver + the
+  // login backfill too) so grouping by `security_id` stays provably equivalent
+  // to this legacy string key. `symbol` mirrors the legacy field (currency code
+  // for cash, ticker otherwise).
   const canonicalKey = (h: typeof enrichedHoldings[number]): ByHoldingKey => {
-    if (h.assetType === "crypto" && h.symbol) {
-      // Decision (issue #25, 2026-05-01): preserve the FULL crypto symbol.
-      // BTC-ETH is a distinct holding from BTC; do NOT collapse on `-`.
-      const sym = h.symbol.toUpperCase();
-      return { key: `crypto:${sym}`, symbol: sym, name: sym };
-    }
-    if (h.assetType === "stock" || h.assetType === "etf") {
-      if (h.symbol) {
-        const sym = h.symbol.toUpperCase();
-        return { key: `eq:${sym}`, symbol: sym, name: sym };
-      }
-    }
-    if (h.assetType === "cash") {
-      if (h.symbol) {
-        const symU = h.symbol.toUpperCase();
-        // Metal sleeves (XAU/XAG/XPT/XPD) are universal regardless of the
-        // account's holding currency â€” XAU in a CAD account and XAU in a
-        // USD account hold the same ounces of gold.
-        if (isMetalCurrency(symU)) {
-          return { key: `metal:${symU}`, symbol: symU, name: symU };
-        }
-        // Currency-code symbol â†’ cash sleeve in that currency.
-        return { key: `cash:${symU}`, symbol: symU, name: `Cash ${symU}` };
-      }
-      // No symbol â†’ cash in the holding's own row currency.
-      const cur = h.currency.toUpperCase();
-      return { key: `cash:${cur}`, symbol: cur, name: `Cash ${cur}` };
-    }
-    // User-defined fallback (no symbol, non-cash) â€” fragment by name. After
-    // the canonicalization helper has run for this user, these rows still
-    // collapse on (lowercased) free-text name within a user's portfolio.
-    return { key: `custom:${(h.name || "?").trim().toLowerCase()}`, symbol: null, name: h.name || "?" };
+    const c = clusterFromAssetType({
+      assetType: h.assetType,
+      symbol: h.symbol,
+      currency: h.currency,
+      name: h.name,
+    });
+    return { key: c.legacyKey, symbol: c.symbolUpper ?? c.currencyCode, name: c.displayName };
   };
+  // Phase D read-flip: when enabled for this user, bucket combined holdings on
+  // the real `security_id` FK instead of the in-memory string. Rows still
+  // missing a security_id (un-backfilled) fall back to the legacy key, so the
+  // two paths converge. Display fields (key/symbol/name/image) still come from
+  // the first member's canonicalKey, keeping the response identical.
+  const useSecurityGrouping = await securitiesReadEnabledForUser(userId);
 
   type ByHoldingAccum = {
     key: string;
@@ -967,7 +957,12 @@ export async function GET(request: NextRequest) {
   const byHoldingMap = new Map<string, ByHoldingAccum>();
   for (const h of enrichedHoldings) {
     const ck = canonicalKey(h);
-    let acc = byHoldingMap.get(ck.key);
+    // Bucket on security_id when the flag is on and the row is backfilled;
+    // otherwise the legacy canonicalKey string. `acc.key` stays the legacy
+    // string regardless (opaque React key / display id).
+    const bucketKey =
+      useSecurityGrouping && h.securityId != null ? `sec:${h.securityId}` : ck.key;
+    let acc = byHoldingMap.get(bucketKey);
     if (!acc) {
       acc = {
         key: ck.key,
@@ -986,7 +981,7 @@ export async function GET(request: NextRequest) {
         image: h.image ?? null,
         quoteCurrency: h.quoteCurrency,
       };
-      byHoldingMap.set(ck.key, acc);
+      byHoldingMap.set(bucketKey, acc);
     }
     if (h.accountId != null) acc.accountIds.add(h.accountId);
     // FINLYNQ-174: carry the first member with a real quote long name up to

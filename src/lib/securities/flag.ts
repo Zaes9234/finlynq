@@ -13,7 +13,7 @@
  *
  * Default OFF. When OFF every aggregator keeps the legacy string-match path, so
  * the column/table can exist (Phase A/B/C) with zero behavior change until we
- * deliberately flip. → docs/architecture/securities.md
+ * deliberately flip. → plan/architecture/securities.md
  */
 
 import { db, schema } from "@/db";
@@ -41,15 +41,22 @@ export function securitiesReadEnabledGlobally(): boolean {
  */
 export async function securitiesReadEnabledForUser(userId: string): Promise<boolean> {
   if (securitiesReadEnabledGlobally()) return true;
-  const row = await db
-    .select({ value: schema.settings.value })
-    .from(schema.settings)
-    .where(
-      and(
-        eq(schema.settings.key, SECURITIES_READ_SETTING_KEY),
-        eq(schema.settings.userId, userId),
-      ),
-    )
-    .get();
-  return isTruthy(row?.value);
+  // A flag-read failure (uninitialized adapter in tests, transient DB hiccup)
+  // MUST degrade to the safe default OFF (legacy string-match path) — never
+  // break an aggregator that merely consults the flag.
+  try {
+    const row = await db
+      .select({ value: schema.settings.value })
+      .from(schema.settings)
+      .where(
+        and(
+          eq(schema.settings.key, SECURITIES_READ_SETTING_KEY),
+          eq(schema.settings.userId, userId),
+        ),
+      )
+      .get();
+    return isTruthy(row?.value);
+  } catch {
+    return false;
+  }
 }

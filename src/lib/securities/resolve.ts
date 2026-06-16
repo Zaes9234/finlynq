@@ -18,7 +18,7 @@
  *     the position keeps `security_id = NULL` and the login-time backfill
  *     reconciles it once the user logs in with a DEK. Never auto-merges blind.
  *
- * → docs/architecture/securities.md
+ * → plan/architecture/securities.md
  */
 
 import { db, schema } from "@/db";

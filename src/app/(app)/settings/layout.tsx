@@ -27,6 +27,7 @@ import {
   Zap,
   Link2,
   Upload,
+  Layers,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -44,6 +45,8 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/settings/import", label: "Import", icon: Upload },
   { href: "/settings/reconciliation", label: "Reconciliation", icon: Link2 },
   { href: "/settings/investments", label: "Investments", icon: Briefcase },
+  // Securities master (Tier 2) — centralized per-ticker identity management.
+  { href: "/settings/securities", label: "Securities", icon: Layers },
   { href: "/settings/display", label: "Display & Ordering", icon: Sliders },
   { href: "/settings/integrations", label: "Integrations", icon: Server },
   { href: "/settings/developer", label: "Developer", icon: Wrench },

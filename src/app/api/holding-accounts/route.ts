@@ -37,6 +37,7 @@ import { and, eq } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
 import { decryptNamedRows } from "@/lib/crypto/encrypted-columns";
+import { securitiesReadEnabledForUser } from "@/lib/securities/flag";
 
 /**
  * GET /api/holding-accounts — list every (holding, account) pairing for
@@ -60,6 +61,9 @@ export const GET = apiHandler(
         holdingNameCt: schema.portfolioHoldings.nameCt,
         holdingSymbolCt: schema.portfolioHoldings.symbolCt,
         holdingCurrency: schema.portfolioHoldings.currency,
+        // Securities master (Phase F) — let the client group cards by the
+        // shared security identity (one card per ticker across accounts).
+        holdingSecurityId: schema.portfolioHoldings.securityId,
         accountNameCt: schema.accounts.nameCt,
         accountIsInvestment: schema.accounts.isInvestment,
       })
@@ -74,11 +78,20 @@ export const GET = apiHandler(
       )
       .where(eq(schema.holdingAccounts.userId, userId));
 
-    const rows = decryptNamedRows(rawRows, dek, {
+    const decrypted = decryptNamedRows(rawRows, dek, {
       holdingNameCt: "holdingName",
       holdingSymbolCt: "holdingSymbol",
       accountNameCt: "accountName",
     });
+
+    // Securities master (Phase F) — only surface holdingSecurityId when the
+    // read-flip is enabled for this user. The page groups cards by security
+    // when present, else by holdingId (legacy). This gates Phase F behind the
+    // SAME flag without changing the bare-array wire shape.
+    const enabled = await securitiesReadEnabledForUser(userId);
+    const rows = enabled
+      ? decrypted
+      : decrypted.map((r) => ({ ...r, holdingSecurityId: null }));
 
     return NextResponse.json(rows);
   },
