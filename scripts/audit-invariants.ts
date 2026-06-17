@@ -296,6 +296,12 @@ const BASELINE_EXCEPTIONS: Record<string, string> = {
   // resolveOrCreateSecurity logic, not the helper). Self-referential.
   "src/lib/securities/backfill.ts:securities-dual-write-on-edit":
     "the login-time backfill itself — sets security_id from its own inline cluster resolution (resolveOrCreateSecurity would be redundant/self-referential).",
+  // The PATCH (rename) copies the security's NEW name_ct/name_lookup down onto
+  // its member positions so the per-position holding name stays in sync. It does
+  // NOT change a position's security_id — the positions stay linked to the same
+  // (renamed) security — so this is a name copy, not a re-cluster.
+  "src/app/api/securities/route.ts:securities-dual-write-on-edit":
+    "PATCH copies the security's renamed name onto its member positions (name_ct/name_lookup); security_id is unchanged, so no re-cluster / resolveOrCreateSecurity needed.",
 };
 
 interface InvariantConfig {

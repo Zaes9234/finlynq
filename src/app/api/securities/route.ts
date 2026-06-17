@@ -132,24 +132,53 @@ const patchSchema = z.object({
 /**
  * PATCH /api/securities — rename a security's display name. Re-encrypts
  * name_ct/name_lookup; does NOT touch cluster_key (renaming never re-clusters).
+ *
+ * Propagation (2026-06-17): the rename is ALSO copied onto every member position
+ * (`portfolio_holdings` with this `security_id`), so surfaces that read the
+ * per-position holding name — the account-detail "Cash sleeves" list, the
+ * transactions ledger when the read-flip is OFF — reflect it too, not just the
+ * centralized securities row. A security can back several cash sleeves across
+ * accounts ("multiple members"); all get the new name. The position's
+ * `security_id` is unchanged, so this is a name copy, NOT a re-cluster (no
+ * `resolveOrCreateSecurity`). Cash sleeves / custom holdings keep the new name;
+ * tickered holdings get re-canonicalized to their symbol on next login (their
+ * ledger identity is the symbol anyway).
  */
 export const PATCH = apiHandler(
   { auth: "encryption", body: patchSchema, fallbackMessage: "Failed to rename security" },
   async ({ userId, dek, body }) => {
     const enc = buildNameFields(dek!, { name: body.name });
+    const nameCt = (enc.nameCt as string | null) ?? null;
+    const nameLookup = (enc.nameLookup as string | null) ?? null;
     const updated = await db
       .update(schema.securities)
-      .set({
-        nameCt: (enc.nameCt as string | null) ?? null,
-        nameLookup: (enc.nameLookup as string | null) ?? null,
-        updatedAt: sql`NOW()`,
-      })
+      .set({ nameCt, nameLookup, updatedAt: sql`NOW()` })
       .where(and(eq(schema.securities.id, body.id), eq(schema.securities.userId, userId)))
       .returning({ id: schema.securities.id });
     if (updated.length === 0) {
       return NextResponse.json({ error: "Security not found" }, { status: 404 });
     }
-    return { id: body.id, name: body.name };
+    // Copy the rename down onto every member position. A same-account legacy
+    // duplicate could trip the (user,account,name_lookup) partial unique index;
+    // the security rename already committed, so swallow that edge — it's a
+    // separate data-cleanup concern, not a reason to fail the rename.
+    let positions = 0;
+    try {
+      const rows = await db
+        .update(schema.portfolioHoldings)
+        .set({ nameCt, nameLookup })
+        .where(
+          and(
+            eq(schema.portfolioHoldings.securityId, body.id),
+            eq(schema.portfolioHoldings.userId, userId),
+          ),
+        )
+        .returning({ id: schema.portfolioHoldings.id });
+      positions = rows.length;
+    } catch {
+      /* legacy same-account name collision — leave those positions as-is */
+    }
+    return { id: body.id, name: body.name, positions };
   },
 );
 
