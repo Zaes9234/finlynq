@@ -3,7 +3,6 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   TrendingUp, BarChart3, Coins, Briefcase, Plus, Flame, Snowflake,
@@ -38,11 +37,9 @@ export default function PortfolioPage() {
   const { data, loading, reload } = usePortfolioOverview(displayCurrency);
   const [filter, setFilter] = useState<FilterType>("all");
   // Edit/delete dialog for individual portfolio holdings. Null = closed.
+  // (Create-mode was removed — "Add holding" now navigates to the consolidated
+  // /settings/investments page; this dialog is edit-in-place only.)
   const [editingHolding, setEditingHolding] = useState<EnrichedHolding | null>(null);
-  // Create-mode dialog for adding a new holding. When non-null, opens the
-  // shared <HoldingEditForm> with the dropdown defaulted to that account.
-  // {} = open with no default account (header-level "Add holding" button).
-  const [creatingHolding, setCreatingHolding] = useState<{ accountId?: number } | null>(null);
   const [benchmarkPeriod, setBenchmarkPeriod] = useState("1y");
   const { benchmarks, benchmarkLoading } = useBenchmarks(benchmarkPeriod, !!devMode);
   const [expandedAccounts, setExpandedAccounts] = useState<Set<string>>(new Set());
@@ -217,10 +214,6 @@ export default function PortfolioPage() {
             {summary.totalHoldings} holdings across {summary.totalAccounts} accounts
           </p>
         </div>
-        {/* Add holding entry point — opens the shared <HoldingEditForm>
-            in create mode. The same form lives at /settings/investments;
-            both are driven by src/components/holdings/holding-edit-form.tsx
-            so the field set never drifts between surfaces (issue #100). */}
         <div className="flex items-center gap-2">
           {/* Phase 2 nav — realized gains + dividends dashboards. Each
               dashboard reads its own data; they're not modal extensions
@@ -241,13 +234,15 @@ export default function PortfolioPage() {
           >
             Dividends
           </Link>
-          {/* Add holding entry point — opens the shared <HoldingEditForm>
-              in create mode. The same form lives at /settings/investments;
-              both are driven by src/components/holdings/holding-edit-form.tsx
-              so the field set never drifts between surfaces (issue #100). */}
-          <Button onClick={() => setCreatingHolding({})} size="sm">
+          {/* Add holding → the consolidated /settings/investments page (the old
+              inline create dialog was removed; securities are defined + linked
+              to accounts there). Per-row edit-in-place stays on the dialog below. */}
+          <Link
+            href="/settings/investments"
+            className={buttonVariants({ size: "sm" })}
+          >
             <Plus className="h-4 w-4 mr-1.5" /> Add holding
-          </Button>
+          </Link>
         </div>
       </div>
 
@@ -534,36 +529,22 @@ export default function PortfolioPage() {
           form. Edits never silently diverge between the two surfaces
           because there's only one component. */}
       <Dialog
-        open={editingHolding !== null || creatingHolding !== null}
+        open={editingHolding !== null}
         onOpenChange={(open) => {
-          if (!open) {
-            setEditingHolding(null);
-            setCreatingHolding(null);
-          }
+          if (!open) setEditingHolding(null);
         }}
       >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>
-              {editingHolding ? "Edit Holding" : "Add Holding"}
-            </DialogTitle>
+            <DialogTitle>Edit Holding</DialogTitle>
           </DialogHeader>
-          {(editingHolding !== null || creatingHolding !== null) && (
+          {editingHolding !== null && (
             <HoldingEditForm
-              holdingId={editingHolding?.id}
-              defaultAccountId={creatingHolding?.accountId}
-              initialHolding={
-                editingHolding
-                  ? holdingFromEnriched(editingHolding)
-                  : undefined
-              }
-              onCancel={() => {
-                setEditingHolding(null);
-                setCreatingHolding(null);
-              }}
+              holdingId={editingHolding.id}
+              initialHolding={holdingFromEnriched(editingHolding)}
+              onCancel={() => setEditingHolding(null)}
               onSave={() => {
                 setEditingHolding(null);
-                setCreatingHolding(null);
                 reload();
               }}
             />
