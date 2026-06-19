@@ -99,7 +99,7 @@ always know they are intentionally off the shared path.
 | Excel mapper dialog | `src/app/(app)/import/components/excel-mapper-dialog.tsx` | Sheet/column mapping grid. |
 | Connector reconciliation dialog | `src/app/(app)/import/components/connector-reconciliation-dialog.tsx` | Reconcile-flow. |
 | Connector tab | `src/app/(app)/import/components/connector-tab.tsx` | Connector status / action panel, not a flat grid. |
-| Two-pane reconcile | `src/components/reconcile/*`, `src/components/import/reconcile/*` | Reconcile-flow (bank rows ↔ ledger), inline accept/unlink/materialize actions. |
+| Two-pane reconcile | `src/components/reconcile/*`, `src/components/import/reconcile/*` | Reconcile-flow (bank rows ↔ ledger), inline accept/unlink/materialize actions. The `BankPane` renders gated **Ticker / Security / Qty** columns when `isInvestment` (FINLYNQ-207, display-only, per-`encryption_tier`-decrypted; cash view byte-identical). |
 | Admin inbox / email-inbox | `src/app/(app)/admin/inbox/page.tsx`, `src/app/(app)/admin/email-inbox/page.tsx` | Triage surfaces with per-row actions + encryption-aware redaction. |
 | Settings → Data | `src/app/(app)/settings/data/page.tsx` | Backup/restore controls + its own CSV builder, not a flat data grid. |
 | Chat | `src/app/(app)/chat/page.tsx` | Renders tables inside AI-chat markdown — not app data. |
