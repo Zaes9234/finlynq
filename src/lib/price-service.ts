@@ -451,6 +451,61 @@ async function cacheHistoricalWindow(
 }
 
 /**
+ * Fetch a Yahoo daily-close series for `symbol` from `fromDate` to NOW in a
+ * single chart call, returning one `{ date, close }` per trading day (strictly
+ * BEFORE `today` — today/future belong to the live path). No caching here — the
+ * caller decides how/where to persist (e.g. crypto writes under "CRYPTO:<SYM>").
+ *
+ * Negative-cache aware: a symbol Yahoo can't serve (delisted/unknown ticker, or
+ * a timeout) is skipped on subsequent calls for NEGATIVE_QUOTE_TTL_MS so a
+ * multi-year crypto rebuild doesn't re-hit a hopeless ticker once per old date.
+ * Returns [] on miss/empty (never throws). Closes are in the ticker's quote
+ * currency (callers use `<SYM>-USD` tickers → USD).
+ */
+export async function fetchYahooDailyCloses(
+  symbol: string,
+  fromDate: string,
+  today: string,
+): Promise<Array<{ date: string; close: number }>> {
+  if (isQuoteNegativelyCached(symbol)) return [];
+  try {
+    const period1 = Math.floor(Date.parse(`${fromDate}T00:00:00Z`) / 1000);
+    const period2 = Math.floor(Date.now() / 1000);
+    if (!Number.isFinite(period1) || period1 >= period2) return [];
+    const url = `${YAHOO_BASE}/chart/${encodeURIComponent(symbol)}?period1=${period1}&period2=${period2}&interval=1d`;
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      next: { revalidate: 86400 },
+      signal: AbortSignal.timeout(QUOTE_FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) {
+      markQuoteMiss(symbol, `chart http ${res.status}`);
+      return [];
+    }
+    const data = await res.json();
+    const result = data.chart?.result?.[0];
+    const timestamps: number[] = result?.timestamp ?? [];
+    const closes: (number | null)[] = result?.indicators?.quote?.[0]?.close ?? [];
+    const out: Array<{ date: string; close: number }> = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const c = closes[i];
+      if (c == null || !(c > 0)) continue;
+      const d = new Date(timestamps[i] * 1000).toISOString().slice(0, 10);
+      if (d >= today) continue; // today/future belong to the live path
+      out.push({ date: d, close: c });
+    }
+    if (out.length === 0) {
+      markQuoteMiss(symbol, "no historical closes");
+      return [];
+    }
+    return out;
+  } catch {
+    markQuoteMiss(symbol, "chart timeout/error");
+    return [];
+  }
+}
+
+/**
  * Fetch the close price on a specific historical date (or the most recent
  * trading day on/before it). Uses Yahoo's chart API with period1/period2
  * spanning the target date ± a small window to handle weekends + holidays.

@@ -8,7 +8,7 @@ import { todayISO } from "@/lib/utils/date";
 // so crypto VALUATIONS (dashboard / net-worth / getHoldingsValueByAccount) refresh
 // intraday instead of freezing at the first cache fill of the UTC day. (The
 // overview's *displayed* crypto day-change already reads CoinGecko live.)
-import { isPriceCacheRowStale } from "@/lib/price-service";
+import { isPriceCacheRowStale, fetchYahooDailyCloses } from "@/lib/price-service";
 
 const COINGECKO_BASE = "https://api.coingecko.com/api/v3";
 
@@ -37,6 +37,50 @@ export function isWithinCryptoHistoryWindow(
   if (!Number.isFinite(dMs) || !Number.isFinite(tMs)) return false;
   const ageDays = Math.floor((tMs - dMs) / 86_400_000);
   return ageDays < maxDays;
+}
+
+// Yahoo serves crypto daily history (back to ~2014 for the majors) via
+// "<SYMBOL>-USD" tickers — the SAME chart endpoint + windowed machinery the
+// stock path uses, no API key. We use it as the >365-day history tier (beyond
+// CoinGecko's free window). Most coins map to "<SYM>-USD"; add an override only
+// where Yahoo's ticker differs from the holding's symbol.
+const YAHOO_CRYPTO_TICKER_OVERRIDES: Record<string, string> = {
+  // POL / MATIC are both listed on Yahoo as POL-USD / MATIC-USD; FTM-USD and
+  // S-USD likewise resolve under their own symbols — so no override needed yet.
+};
+
+/** Base crypto symbol → Yahoo crypto ticker (e.g. BTC → BTC-USD). Pure. */
+export function cryptoSymbolToYahooTicker(symbol: string): string {
+  const base = (symbol ?? "").toUpperCase().split("-")[0];
+  return YAHOO_CRYPTO_TICKER_OVERRIDES[base] ?? `${base}-USD`;
+}
+
+// Backfill one coin's daily USD history from Yahoo (>365-day tier) into
+// price_cache under "CRYPTO:<SYMBOL>". One chart call covers [fromDate, today],
+// so a multi-year rebuild that walks oldest-first makes ~1 Yahoo call per coin
+// (later days hit cache). Crypto trades 24/7, so Yahoo returns a close for every
+// calendar day — no forward-fill needed. Idempotent: inserts only missing dates
+// (historical bars are immutable). Yahoo misses are negative-cached inside
+// fetchYahooDailyCloses, so a coin Yahoo lacks isn't re-hit per old date.
+async function fetchCryptoHistoryFromYahooToCache(symbol: string, fromDate: string): Promise<void> {
+  const ticker = cryptoSymbolToYahooTicker(symbol);
+  const bars = await fetchYahooDailyCloses(ticker, fromDate, todayISO());
+  if (bars.length === 0) return;
+  try {
+    const cacheSymbol = `CRYPTO:${symbol.toUpperCase()}`;
+    const dates = bars.map((b) => b.date);
+    const existing = await db
+      .select({ date: schema.priceCache.date })
+      .from(schema.priceCache)
+      .where(and(eq(schema.priceCache.symbol, cacheSymbol), inArray(schema.priceCache.date, dates)));
+    const have = new Set(existing.map((r) => r.date));
+    const rows = bars
+      .filter((b) => !have.has(b.date))
+      .map((b) => ({ symbol: cacheSymbol, date: b.date, price: b.close, currency: "USD", previousClose: null }));
+    if (rows.length > 0) await db.insert(schema.priceCache).values(rows);
+  } catch {
+    // Best-effort cache fill — a failure just degrades to the spot approximation.
+  }
 }
 
 export type CryptoPrice = {
@@ -379,16 +423,25 @@ export async function getCryptoPricesAtDate(
   // 1. Cache-read for the historical date.
   let cacheMap = await readCryptoCacheBulk(symbols, date);
 
-  // 2. For misses, fetch [date, today] history per coin and re-read — but ONLY
-  //    when `date` is within CoinGecko's free ~365-day history window. For older
-  //    dates the call can never cover the date (it just re-returns the trailing
-  //    365 days), so we skip it entirely and let step 3 use the spot
-  //    approximation — avoiding one wasted CoinGecko request per old date per
-  //    coin across a multi-year rebuild walk.
+  // 2. For misses, backfill history per coin and re-read. Two tiers by age:
+  //    - WITHIN CoinGecko's free ~365-day window → CoinGecko market_chart
+  //      (crypto-native, vs_currency=usd).
+  //    - OLDER than that → Yahoo "<SYM>-USD" daily history (covers back to
+  //      ~2014), so old dates get REAL historical prices instead of degrading to
+  //      today's spot. (Calling CoinGecko for >365d is pointless — it only
+  //      returns the trailing 365 days — so we never do.)
+  //    Both write USD rows under "CRYPTO:<SYM>"; anything neither tier can fill
+  //    falls through to the spot approximation in step 3 (negative-cached so a
+  //    hopeless ticker isn't re-hit per old date).
   const missing = [...uniq].filter(([, sym]) => !cacheMap.has(`CRYPTO:${sym}`));
-  if (missing.length > 0 && isWithinCryptoHistoryWindow(date, today)) {
+  if (missing.length > 0) {
+    const withinWindow = isWithinCryptoHistoryWindow(date, today);
     for (const [coinId, sym] of missing) {
-      await fetchCryptoHistoryToCache(coinId, sym, date);
+      if (withinWindow) {
+        await fetchCryptoHistoryToCache(coinId, sym, date);
+      } else {
+        await fetchCryptoHistoryFromYahooToCache(sym, date);
+      }
     }
     cacheMap = await readCryptoCacheBulk(symbols, date);
   }
@@ -404,11 +457,10 @@ export async function getCryptoPricesAtDate(
     }
   }
 
-  // 3. Dates beyond cache reach (older than the ~365d window — where step 2 is
-  //    skipped — or an in-window API failure) degrade to the cache-first spot
-  //    price so we never drop a holding from a historical snapshot. The spot
-  //    path reads today's cached row first, so this is ~1 call per coin, not one
-  //    per day.
+  // 3. Anything NEITHER tier could fill (a coin Yahoo also lacks, or an API
+  //    failure) degrades to the cache-first spot price so we never drop a holding
+  //    from a historical snapshot. The spot path reads today's cached row first,
+  //    so this is ~1 call per coin, not one per day.
   if (stillMissing.length > 0) {
     const spot = await getCryptoSpotPrices(stillMissing);
     const spotById = new Map(spot.map((p) => [p.id, p]));
