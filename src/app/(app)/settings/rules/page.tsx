@@ -81,6 +81,13 @@ function describeCondition(c: Condition, fkNames?: RuleRow["actionFKNames"]): st
       if (c.op === "weekday") return `date weekday=${c.weekday}`;
       if (c.op === "day_of_month") return `date day=${c.day}`;
       return `date in ${c.from}…${c.to}`;
+    case "ticker":
+      return `ticker ${c.op} "${c.value}"`;
+    case "security_name":
+      return `security name ${c.op} "${c.value}"`;
+    case "quantity":
+      if (c.op === "between") return `quantity between ${c.min}-${c.max}`;
+      return `quantity ${c.op} ${c.value}`;
   }
 }
 
@@ -112,6 +119,21 @@ function describeAction(a: Action, fkNames?: RuleRow["actionFKNames"]): string {
     case "create_transfer": {
       const name = fkNames?.accounts?.[String(a.destAccountId)] ?? `#${a.destAccountId}`;
       return `create transfer → ${name}`;
+    }
+    case "record_investment_op": {
+      const acct = fkNames?.accounts?.[String(a.investmentAccountId)] ?? `#${a.investmentAccountId}`;
+      const target = a.useRowTicker
+        ? "row ticker"
+        : a.holdingId != null
+          ? (fkNames?.holdings?.[String(a.holdingId)] ?? `#${a.holdingId}`)
+          : "—";
+      if (a.op === "deposit" || a.op === "withdrawal") {
+        const other = a.counterpartyAccountId != null
+          ? (fkNames?.accounts?.[String(a.counterpartyAccountId)] ?? `#${a.counterpartyAccountId}`)
+          : "—";
+        return `${a.op} (${acct} ↔ ${other})`;
+      }
+      return `record ${a.op} → ${target} in ${acct}`;
     }
   }
 }

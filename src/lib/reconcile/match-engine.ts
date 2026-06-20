@@ -45,10 +45,11 @@ import { encryptField, tryDecryptField } from "@/lib/crypto/envelope";
 import { decryptStaged } from "@/lib/crypto/staging-envelope";
 import { applyRules, type TransactionRule } from "@/lib/auto-categorize";
 import { decryptRuleFields } from "@/lib/rules/crypto";
-import type { Action, ConditionGroup } from "@/lib/rules/schema";
+import type { Action, ConditionGroup, RecordInvestmentOpAction } from "@/lib/rules/schema";
 import { invalidateUser } from "@/lib/mcp/user-tx-cache";
 import { validateSignVsCategoryById } from "@/lib/transactions/sign-category-invariant";
 import { materializeBankRowAsTransfer } from "./materialize-transfer";
+import { materializeBankRowAsPortfolioOp } from "./materialize-portfolio-op";
 import {
   buildBankLedgerCandidatePool,
   type BankCandidateRow,
@@ -160,6 +161,11 @@ export interface ReconcileBankSnapshot {
   /** Share/unit count for an investment row. Numeric, never encrypted.
    *  Present only when captured; omitted for cash rows. */
   quantity?: number | null;
+  /** FINLYNQ-208 — when a user-authored rule's action is `record_investment_op`,
+   *  the op type it would record (buy/sell/dividend/interest/fee/deposit/
+   *  withdrawal). Lets the reconcile UI preview "this row → Buy" before the user
+   *  applies the rule. `null`/absent when no investment-op rule matches. */
+  suggestedInvestmentOp?: string | null;
 }
 
 export interface ReconcileResult {
@@ -430,11 +436,19 @@ export async function computeReconcileForAccount(
         amount: b.amount,
         accountId: b.accountId,
         date: b.date,
+        // FINLYNQ-208 — investment-import captured fields so a rule's
+        // ticker/security_name/quantity conditions can match here too.
+        ticker: b.tickerPlain,
+        securityName: b.securityNamePlain,
+        quantity: b.quantity,
       },
       activeRules,
     );
     const suggestedCategoryId = ruleMatch
       ? pickCategoryFromActions(ruleMatch.actions)
+      : null;
+    const suggestedInvestmentOp = ruleMatch
+      ? pickInvestmentOpFromActions(ruleMatch.actions)?.op ?? null
       : null;
     // A matched rule whose action set names a transfer destination routes
     // the materialize dialog into Transfer mode. Drop self-transfers (a rule
@@ -461,6 +475,7 @@ export async function computeReconcileForAccount(
       suggestedTransferAccountId,
       duplicateOfTransactionId: strictDupFor(b),
     };
+    if (suggestedInvestmentOp) snap.suggestedInvestmentOp = suggestedInvestmentOp;
     // FINLYNQ-207 — surface the FINLYNQ-195 investment-import capture. Attach
     // ticker/securityName/quantity ONLY when the row actually captured one (an
     // investment-account import); cash rows leave all three NULL so the keys
@@ -576,6 +591,20 @@ function pickTransferDestFromActions(actions: Action[]): number | null {
     if (a.kind === "create_transfer" && typeof a.destAccountId === "number") {
       return a.destAccountId;
     }
+  }
+  return null;
+}
+
+/**
+ * Pick the first `record_investment_op` action from a rule's action list
+ * (FINLYNQ-208), if any. Returns the full action so the executor can drive the
+ * op type + variable bindings. First-wins like the sibling pickers.
+ */
+function pickInvestmentOpFromActions(
+  actions: Action[],
+): RecordInvestmentOpAction | null {
+  for (const a of actions) {
+    if (a.kind === "record_investment_op") return a;
   }
   return null;
 }
@@ -986,6 +1015,8 @@ export async function applyRulesToBankRows(
       payee: schema.bankTransactions.payee,
       note: schema.bankTransactions.note,
       tags: schema.bankTransactions.tags,
+      ticker: schema.bankTransactions.ticker,
+      securityName: schema.bankTransactions.securityName,
       encryptionTier: schema.bankTransactions.encryptionTier,
       importHash: schema.bankTransactions.importHash,
       fitId: schema.bankTransactions.fitId,
@@ -1126,12 +1157,19 @@ export async function applyRulesToBankRows(
     }
 
     const payeePlain = decodeBankString(bank.encryptionTier, dek, bank.payee);
+    const tickerPlain = decodeBankString(bank.encryptionTier, dek, bank.ticker);
+    const securityNamePlain = decodeBankString(bank.encryptionTier, dek, bank.securityName);
     const match = applyRules(
       {
         payee: payeePlain,
         amount: bank.amount,
         accountId: bank.accountId,
         date: bank.date,
+        // FINLYNQ-208 — investment-import captured fields for ticker /
+        // security_name / quantity conditions.
+        ticker: tickerPlain,
+        securityName: securityNamePlain,
+        quantity: bank.quantity,
       },
       activeRules,
     );
@@ -1151,6 +1189,41 @@ export async function applyRulesToBankRows(
       continue;
     }
     rulesFired += 1;
+
+    // FINLYNQ-208 — investment-op rule. Takes precedence over category /
+    // transfer actions: when the matched rule records a portfolio op, we run
+    // the sanctioned investment chokepoint (which lifts the investment-account
+    // refusal because it resolves/creates the position + sleeve). Planning mode
+    // (autoMaterialize=false) just reports the match.
+    const invOp = pickInvestmentOpFromActions(match.actions);
+    if (invOp) {
+      if (!autoMaterialize) {
+        perRow.push({ bankRowId: bank.id, matched: true });
+        continue;
+      }
+      // dek is non-null here — guarded by the autoMaterialize=>dek check.
+      const result = await materializeBankRowAsPortfolioOp({
+        userId,
+        dek: dek!,
+        bankTransactionId: bank.id,
+        action: invOp,
+      });
+      if (result.ok) {
+        materialized += 1;
+        perRow.push({
+          bankRowId: bank.id,
+          matched: true,
+          transactionId: result.linkedTransactionId,
+        });
+      } else {
+        perRow.push({
+          bankRowId: bank.id,
+          matched: true,
+          skipReason: `investment_op_${result.code}`,
+        });
+      }
+      continue;
+    }
 
     const categoryId = pickCategoryFromActions(match.actions);
     if (categoryId == null) {

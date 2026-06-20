@@ -41,6 +41,10 @@ const ALL_FIELDS: ConditionField[] = [
   "account",
   "currency",
   "date",
+  // FINLYNQ-208
+  "ticker",
+  "security_name",
+  "quantity",
 ];
 
 const ALL_KINDS: ActionKind[] = [
@@ -51,6 +55,8 @@ const ALL_KINDS: ActionKind[] = [
   "set_entered_currency",
   "set_portfolio_holding",
   "create_transfer",
+  // FINLYNQ-208
+  "record_investment_op",
 ];
 
 describe("typed rule factory maps (FINLYNQ-114)", () => {

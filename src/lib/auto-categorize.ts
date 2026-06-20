@@ -25,6 +25,12 @@ export interface TransactionInput {
   enteredCurrency?: string | null;
   /** YYYY-MM-DD. Used by date predicates (weekday/day_of_month/between). */
   date?: string | null;
+  /** Investment-import captured fields (FINLYNQ-195/208). Decrypted plaintext
+   *  ticker / security name + numeric quantity, used by the `ticker` /
+   *  `security_name` / `quantity` conditions. Null/absent on cash rows. */
+  ticker?: string | null;
+  securityName?: string | null;
+  quantity?: number | null;
 }
 
 /**
@@ -116,6 +122,15 @@ export function evalCondition(txn: TransactionInput, cond: Condition): boolean {
     }
     case "account":
       return evalSetOp(txn.accountId ?? null, cond.op, cond.accountId);
+    case "ticker":
+      return evalStringOp(txn.ticker ?? "", cond.op, cond.value);
+    case "security_name":
+      return evalStringOp(txn.securityName ?? "", cond.op, cond.value);
+    case "quantity": {
+      const q = txn.quantity ?? 0;
+      if (cond.op === "between") return q >= cond.min && q <= cond.max;
+      return evalNumberOp(q, cond.op, cond.value);
+    }
     case "currency": {
       const a = (txn.enteredCurrency ?? "").toUpperCase();
       const b = cond.value.toUpperCase();

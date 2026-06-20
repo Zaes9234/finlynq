@@ -10,7 +10,8 @@
  *
  * Encrypted fields:
  *   - rule `name`
- *   - `conditions.all[].value` where `field ∈ {payee, note, tags}` (string ops)
+ *   - `conditions.all[].value` where `field ∈ {payee, note, tags, ticker,
+ *     security_name}` (string ops; ticker/security_name added FINLYNQ-208)
  *   - action `rename_payee.to`
  *   - action `set_tags.tags`
  *
@@ -35,8 +36,17 @@ export interface RuleCryptoFields {
   actions?: Action[] | null;
 }
 
-/** Condition fields whose `.value` is user free-text (vs. ISO currency codes). */
-const STRING_CONDITION_FIELDS = new Set(["payee", "note", "tags"]);
+/** Condition fields whose `.value` is user free-text (vs. ISO currency codes).
+ *  `ticker` / `security_name` (FINLYNQ-208) are sensitive captured strings —
+ *  encrypted at rest on bank_transactions — so their condition value is
+ *  encrypted here exactly like payee/note/tags. */
+const STRING_CONDITION_FIELDS = new Set([
+  "payee",
+  "note",
+  "tags",
+  "ticker",
+  "security_name",
+]);
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return v != null && typeof v === "object";

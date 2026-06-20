@@ -29,10 +29,26 @@ import {
   ConditionGroup,
   Action,
   collectActionFKs,
+  validateInvestmentOpAction,
   type ConditionGroup as ConditionGroupType,
   type Action as ActionType,
 } from "@/lib/rules/schema";
 import { encryptRuleFields, decryptRuleFields } from "@/lib/rules/crypto";
+
+/**
+ * Reject a filled but semantically-invalid `record_investment_op` action
+ * (FINLYNQ-208) with a 400 before it reaches the DB. Returns an error message,
+ * or null when every action is valid. The Zod schema keeps the action permissive
+ * (the editor holds blanks); this is the filled-payload re-validation.
+ */
+function investmentOpError(actions: ActionType[]): string | null {
+  for (const a of actions) {
+    if (a.kind !== "record_investment_op") continue;
+    const code = validateInvestmentOpAction(a);
+    if (code) return `Investment-op action (${a.op}) is incomplete: ${code}`;
+  }
+  return null;
+}
 
 const postSchema = z.object({
   name: z.string().min(1).max(120),
@@ -150,6 +166,9 @@ export async function POST(req: NextRequest) {
     if (parsed.error) return parsed.error;
     const { name, conditions, actions, priority, isActive } = parsed.data;
 
+    const invErr = investmentOpError(actions);
+    if (invErr) return NextResponse.json({ error: invErr }, { status: 400 });
+
     // Cross-tenant FK guards — every id referenced inside the conditions /
     // actions must belong to this user. Without this, a rule could fire on
     // user A's transactions and (e.g. via `set_category`) point them at
@@ -218,6 +237,11 @@ export async function PUT(req: NextRequest) {
     const parsed = validateBody(body, putSchema);
     if (parsed.error) return parsed.error;
     const { id, ...updates } = parsed.data;
+
+    if (updates.actions) {
+      const invErr = investmentOpError(updates.actions);
+      if (invErr) return NextResponse.json({ error: invErr }, { status: 400 });
+    }
 
     // Same cross-tenant FK guard as POST. Only run on the slice the caller
     // is updating; if conditions / actions are absent we have nothing to verify.

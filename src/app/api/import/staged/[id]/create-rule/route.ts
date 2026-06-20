@@ -233,9 +233,11 @@ export async function POST(
     // For legacy shorthand: "Match "<value>" → <category>".
     if (legacyAssignCategoryId != null) {
       const firstCond = conditions.all[0];
+      // Only the string-op conditions carry a `.value` string (payee/note/tags
+      // + ticker/security_name); amount/account/date/currency/quantity-between
+      // don't.
       const val =
-        firstCond && firstCond.field !== "amount" && firstCond.field !== "account" &&
-        firstCond.field !== "date" && firstCond.field !== "currency"
+        firstCond && "value" in firstCond && typeof firstCond.value === "string"
           ? firstCond.value
           : "";
       return `Match "${val}" → ${categoryNamePlain || `category #${targetCategoryId}`}`.slice(0, 200);

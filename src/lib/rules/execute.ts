@@ -80,7 +80,9 @@ export function computePureActionPatch(
         break;
       case "set_account":
       case "create_transfer":
-        // Side-effect actions — handled separately.
+      case "record_investment_op":
+        // Side-effect actions — handled separately (record_investment_op runs
+        // on the bank-row materialize path via materializeBankRowAsPortfolioOp).
         break;
       default: {
         // Exhaustiveness check.
