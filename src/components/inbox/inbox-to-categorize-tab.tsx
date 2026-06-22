@@ -275,16 +275,19 @@ export function InboxToCategorizeTab({
       return c?.name ?? `Category #${id}`;
     };
     for (const b of Object.values(snapshot.bankTransactions)) {
-      if (b.suggestedCategoryId != null) {
+      // FINLYNQ-208 — investment-op takes PRECEDENCE over a category suggestion:
+      // on an investment account a category action is a no-op (ops self-
+      // categorize), so an investment-op match must show "record <op>" + the
+      // preview, never the category "Approve" path. Cash rows never carry an
+      // investment-op suggestion, so they still fall through to "create".
+      if (b.suggestedInvestmentOp) {
+        map.set(b.id, { kind: "investment_op", op: b.suggestedInvestmentOp });
+      } else if (b.suggestedCategoryId != null) {
         map.set(b.id, {
           kind: "create",
           categoryId: b.suggestedCategoryId,
           categoryName: catName(b.suggestedCategoryId),
         });
-      } else if (b.suggestedInvestmentOp) {
-        // FINLYNQ-208 — an investment-op rule matched; show "record <op>" + a
-        // Record button that opens the preview (handled in onApprove → onEdit).
-        map.set(b.id, { kind: "investment_op", op: b.suggestedInvestmentOp });
       }
     }
     return map;
