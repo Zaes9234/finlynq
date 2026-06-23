@@ -519,6 +519,10 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
   const cached = await readPriceCache(symbol, date);
   // Historical rows are immutable (never stale), so any hit is returned as-is.
   if (cached) return cached.quote;
+  // Skip a symbol Yahoo recently couldn't serve historically — without this a
+  // ticker with no chart data is re-fetched once PER DAY across the whole rebuild
+  // walk (the FYIXX money-market re-fetch storm this guards against).
+  if (isQuoteNegativelyCached(symbol)) return null;
   try {
     // Window: 7 days BEFORE the target (so a weekend/holiday target still lands
     // on a real close) through HISTORICAL_WINDOW_FORWARD_DAYS AFTER it (capped at
@@ -545,9 +549,9 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
     const result = data.chart?.result?.[0];
     if (!result) return null;
     const meta = result.meta ?? {};
+    const currency = meta.currency ?? "USD";
     const timestamps: number[] = result.timestamp ?? [];
     const closes: (number | null)[] = result.indicators?.quote?.[0]?.close ?? [];
-    if (timestamps.length === 0) return null;
     const targetEpoch = Math.floor(target.getTime() / 1000);
     // Collect every real trading-day close (ascending) so the whole window can be
     // persisted, while still tracking the last close on/before the target.
@@ -561,8 +565,39 @@ export async function fetchQuoteAtDate(symbol: string, date: string): Promise<Qu
         chosen = { ts: timestamps[i], close: c };
       }
     }
-    if (!chosen) return null;
-    const currency = meta.currency ?? "USD";
+    if (!chosen) {
+      // No daily closes in the window. Money-market funds + other quote-only
+      // instruments (instrumentType "MONEYMARKET") return a meta spot price but
+      // an EMPTY close[] — Yahoo serves no chart bars. For an MM fund (NAV pegged
+      // ~$1) use the meta price as a FLAT historical price AND cache the forward
+      // window, so the rebuild walk stops re-fetching this symbol for EVERY day
+      // (the FYIXX storm). Anything else with no closes is a genuine miss →
+      // negative-cache it so a hopeless ticker isn't re-hit once per day either.
+      const metaPrice =
+        typeof meta.regularMarketPrice === "number" && meta.regularMarketPrice > 0
+          ? meta.regularMarketPrice
+          : null;
+      if (meta.instrumentType === "MONEYMARKET" && metaPrice != null) {
+        await cacheHistoricalWindow(
+          symbol,
+          currency,
+          [{ date, close: metaPrice }],
+          date,
+          addCalendarDays(date, HISTORICAL_WINDOW_FORWARD_DAYS),
+        );
+        return {
+          symbol,
+          price: metaPrice,
+          currency,
+          name: meta.shortName ?? symbol,
+          change: 0,
+          changePct: 0,
+          previousClose: null,
+        };
+      }
+      markQuoteMiss(symbol, "no historical closes");
+      return null;
+    }
     // Persist the FULL window (forward-filled to one row per calendar day) — not
     // just the target date — so the next ~2 months of the walk are cache hits.
     // FINLYNQ-92: historical bars carry no meaningful "day change" (we don't
