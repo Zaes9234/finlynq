@@ -19,7 +19,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { DataTable, type DataTableColumn, type SortDir } from "@/components/ui/data-table";
-import { Database, RefreshCw, ChevronLeft, ChevronRight } from "lucide-react";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { Database, RefreshCw, ChevronLeft, ChevronRight, Trash2 } from "lucide-react";
 
 type Tab = "price" | "fx";
 
@@ -125,6 +126,12 @@ export default function AdminPriceCachePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Delete (admin cleanup): one row, or all rows matching the active filter.
+  const [rowToDelete, setRowToDelete] = useState<Row | null>(null);
+  const [rowDeleting, setRowDeleting] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -169,6 +176,45 @@ export default function AdminPriceCachePage() {
     setOffset(0);
   }
 
+  async function confirmRowDelete() {
+    if (!rowToDelete) return;
+    setRowDeleting(true);
+    try {
+      const res = await fetch(`/api/admin/price-cache?table=${tab}&id=${rowToDelete.id}`, { method: "DELETE" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || "Delete failed");
+      setRowToDelete(null);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+    } finally {
+      setRowDeleting(false);
+    }
+  }
+
+  async function confirmBulkDelete() {
+    setBulkDeleting(true);
+    try {
+      const qp = new URLSearchParams({ table: tab, all: "1" });
+      if (search.trim()) qp.set("search", search.trim());
+      if (date.trim()) qp.set("date", date.trim());
+      if (todayOnly) qp.set("todayOnly", "1");
+      if (staleOnly) qp.set("staleOnly", "1");
+      const res = await fetch(`/api/admin/price-cache?${qp.toString()}`, { method: "DELETE" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || "Delete failed");
+      setBulkOpen(false);
+      setOffset(0);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Delete failed");
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
+
+  const filterActive = Boolean(search.trim() || date.trim() || todayOnly || staleOnly);
+
   const today = data?.today ?? "";
 
   const columns = useMemo<DataTableColumn<Row>[]>(() => {
@@ -191,6 +237,23 @@ export default function AdminPriceCachePage() {
       accessor: (r) => r.date,
       render: (r) => <span className={r.date === today ? "font-medium" : ""}>{r.date}</span>,
     };
+    const actionsCol: DataTableColumn<Row> = {
+      key: "actions",
+      header: "",
+      sortable: false,
+      align: "right",
+      accessor: () => null,
+      render: (r) => (
+        <button
+          type="button"
+          onClick={() => setRowToDelete(r)}
+          title="Delete this cache row"
+          className="inline-flex text-muted-foreground transition-colors hover:text-rose-600"
+        >
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
+      ),
+    };
 
     if (tab === "fx") {
       return [
@@ -200,6 +263,7 @@ export default function AdminPriceCachePage() {
         { key: "source", header: "Source", accessor: (r) => (r as FxRow).source },
         fetchedCol,
         freshCol,
+        actionsCol,
       ];
     }
     return [
@@ -210,6 +274,7 @@ export default function AdminPriceCachePage() {
       { key: "previousClose", header: "Prev close", align: "right", accessor: (r) => (r as PriceRow).previousClose, render: (r) => fmtNum((r as PriceRow).previousClose) },
       fetchedCol,
       freshCol,
+      actionsCol,
     ];
   }, [tab, today]);
 
@@ -359,6 +424,18 @@ export default function AdminPriceCachePage() {
                 : `Showing ${showingFrom.toLocaleString()}–${showingTo.toLocaleString()} of ${total.toLocaleString()} matching rows (newest fetched first; sort + filter narrow the full set, not just this page)`}
             </span>
             <div className="flex items-center gap-1">
+              {filterActive && total > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mr-1 border-rose-300 text-rose-600 hover:bg-rose-50 hover:text-rose-700 dark:border-rose-900/60 dark:hover:bg-rose-950/30"
+                  disabled={loading || bulkDeleting}
+                  onClick={() => setBulkOpen(true)}
+                >
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                  Delete {total.toLocaleString()} matching
+                </Button>
+              )}
               <Button
                 variant="outline"
                 size="sm"
@@ -396,6 +473,34 @@ export default function AdminPriceCachePage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Delete a single cache row */}
+      <ConfirmDialog
+        open={rowToDelete != null}
+        onOpenChange={(o) => { if (!o) setRowToDelete(null); }}
+        title="Delete cache row"
+        description={
+          rowToDelete
+            ? `Delete the ${"symbol" in rowToDelete ? rowToDelete.symbol : rowToDelete.currency} row for ${rowToDelete.date}? A real price re-fetches on next read; a garbage row stays gone.`
+            : ""
+        }
+        confirmLabel="Delete row"
+        busyLabel="Deleting…"
+        busy={rowDeleting}
+        onConfirm={confirmRowDelete}
+      />
+
+      {/* Bulk delete every row matching the active filter */}
+      <ConfirmDialog
+        open={bulkOpen}
+        onOpenChange={(o) => { if (!o) setBulkOpen(false); }}
+        title="Delete matching rows"
+        description={`Delete all ${total.toLocaleString()} ${tab === "fx" ? "fx_rates" : "price_cache"} rows matching the current filter? Real prices re-fetch on next read; garbage rows stay gone. This can't be undone.`}
+        confirmLabel={`Delete ${total.toLocaleString()} rows`}
+        busyLabel="Deleting…"
+        busy={bulkDeleting}
+        onConfirm={confirmBulkDelete}
+      />
     </div>
   );
 }

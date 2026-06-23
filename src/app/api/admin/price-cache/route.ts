@@ -15,6 +15,10 @@
  * older than the 30-min TTL is stale; any historical (date != today) row is
  * immutable and never stale.
  *
+ * DELETE removes cache rows (one by id, or all matching a filter) — used to
+ * clear garbage rows (e.g. currency-code symbols mis-served into price_cache).
+ * Deleting is safe: real prices self-heal on next read; garbage stays gone.
+ *
  * Hand-rolls `requireAdmin` (NOT apiHandler) + the managed-mode postgres-dialect
  * guard, mirroring the other /api/admin/* routes. No DEK needed — both caches
  * are plaintext, user-independent market data.
@@ -55,6 +59,61 @@ const FX_SORT: Record<string, AnyColumn> = {
   fetchedAt: schema.fxRates.fetchedAt,
 };
 
+/**
+ * Build the WHERE conditions for a table from the request filter params. Shared
+ * by GET (list) and DELETE (bulk) so they target EXACTLY the same rows — a bulk
+ * delete clears precisely what the admin sees filtered.
+ */
+function buildConds(
+  table: "price" | "fx",
+  p: URLSearchParams,
+  today: string,
+  staleThreshold: Date,
+): SQL[] {
+  const search = (p.get("search") ?? "").trim();
+  const dateExact = (p.get("date") ?? "").trim();
+  const dateFrom = (p.get("dateFrom") ?? "").trim();
+  const dateTo = (p.get("dateTo") ?? "").trim();
+  const todayOnly = p.get("todayOnly") === "1";
+  const staleOnly = p.get("staleOnly") === "1";
+  const conds: SQL[] = [];
+  if (table === "fx") {
+    if (search) conds.push(ilike(schema.fxRates.currency, `%${search}%`));
+    if (dateExact) conds.push(eq(schema.fxRates.date, dateExact));
+    if (dateFrom) conds.push(gte(schema.fxRates.date, dateFrom));
+    if (dateTo) conds.push(lte(schema.fxRates.date, dateTo));
+    if (todayOnly) conds.push(eq(schema.fxRates.date, today));
+    if (staleOnly) {
+      conds.push(eq(schema.fxRates.date, today));
+      conds.push(lt(schema.fxRates.fetchedAt, staleThreshold));
+    }
+  } else {
+    if (search) conds.push(ilike(schema.priceCache.symbol, `%${search}%`));
+    if (dateExact) conds.push(eq(schema.priceCache.date, dateExact));
+    if (dateFrom) conds.push(gte(schema.priceCache.date, dateFrom));
+    if (dateTo) conds.push(lte(schema.priceCache.date, dateTo));
+    if (todayOnly) conds.push(eq(schema.priceCache.date, today));
+    if (staleOnly) {
+      conds.push(eq(schema.priceCache.date, today));
+      conds.push(lt(schema.priceCache.fetchedAt, staleThreshold));
+    }
+  }
+  return conds;
+}
+
+/** True if ANY narrowing filter is present. Bulk DELETE requires this so an
+ *  empty-filter call can never wipe the whole cache. */
+function hasAnyFilter(p: URLSearchParams): boolean {
+  return Boolean(
+    (p.get("search") ?? "").trim() ||
+      (p.get("date") ?? "").trim() ||
+      (p.get("dateFrom") ?? "").trim() ||
+      (p.get("dateTo") ?? "").trim() ||
+      p.get("todayOnly") === "1" ||
+      p.get("staleOnly") === "1",
+  );
+}
+
 export async function GET(request: NextRequest) {
   if (getDialect() !== "postgres") {
     return NextResponse.json(
@@ -68,12 +127,6 @@ export async function GET(request: NextRequest) {
 
   const p = request.nextUrl.searchParams;
   const table = p.get("table") === "fx" ? "fx" : "price";
-  const search = (p.get("search") ?? "").trim(); // symbol (price) / currency (fx)
-  const dateExact = (p.get("date") ?? "").trim();
-  const dateFrom = (p.get("dateFrom") ?? "").trim();
-  const dateTo = (p.get("dateTo") ?? "").trim();
-  const todayOnly = p.get("todayOnly") === "1";
-  const staleOnly = p.get("staleOnly") === "1";
   const sortKey = p.get("sort") ?? "fetchedAt";
   const sortDir = p.get("dir") === "asc" ? "asc" : "desc";
   const limit = clampInt(p.get("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
@@ -85,16 +138,7 @@ export async function GET(request: NextRequest) {
 
   try {
     if (table === "fx") {
-      const conds: SQL[] = [];
-      if (search) conds.push(ilike(schema.fxRates.currency, `%${search}%`));
-      if (dateExact) conds.push(eq(schema.fxRates.date, dateExact));
-      if (dateFrom) conds.push(gte(schema.fxRates.date, dateFrom));
-      if (dateTo) conds.push(lte(schema.fxRates.date, dateTo));
-      if (todayOnly) conds.push(eq(schema.fxRates.date, today));
-      if (staleOnly) {
-        conds.push(eq(schema.fxRates.date, today));
-        conds.push(lt(schema.fxRates.fetchedAt, staleThreshold));
-      }
+      const conds = buildConds("fx", p, today, staleThreshold);
       const where = conds.length ? and(...conds) : undefined;
 
       const orderCol = FX_SORT[sortKey] ?? schema.fxRates.fetchedAt;
@@ -142,16 +186,7 @@ export async function GET(request: NextRequest) {
     }
 
     // ── price_cache ──
-    const conds: SQL[] = [];
-    if (search) conds.push(ilike(schema.priceCache.symbol, `%${search}%`));
-    if (dateExact) conds.push(eq(schema.priceCache.date, dateExact));
-    if (dateFrom) conds.push(gte(schema.priceCache.date, dateFrom));
-    if (dateTo) conds.push(lte(schema.priceCache.date, dateTo));
-    if (todayOnly) conds.push(eq(schema.priceCache.date, today));
-    if (staleOnly) {
-      conds.push(eq(schema.priceCache.date, today));
-      conds.push(lt(schema.priceCache.fetchedAt, staleThreshold));
-    }
+    const conds = buildConds("price", p, today, staleThreshold);
     const where = conds.length ? and(...conds) : undefined;
 
     const orderCol = PRICE_SORT[sortKey] ?? schema.priceCache.fetchedAt;
@@ -199,6 +234,73 @@ export async function GET(request: NextRequest) {
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : "Failed to load cache";
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+/**
+ * DELETE /api/admin/price-cache?table=price|fx
+ *   ?id=N            → delete ONE cache row by id.
+ *   ?all=1&<filters> → delete EVERY row matching the SAME filters as GET.
+ *                      Requires at least one filter (refuses to wipe the whole
+ *                      cache) — used to clear garbage rows such as currency-code
+ *                      symbols (XAU/CAD/USD) Yahoo mis-served into price_cache.
+ *
+ * Safe by design: a deleted REAL price row is simply re-fetched on next read
+ * (the cache self-heals); a deleted garbage row stays gone because the valuation
+ * path never fetches currency-code symbols as prices (isCurrencyCodeSymbol).
+ */
+export async function DELETE(request: NextRequest) {
+  if (getDialect() !== "postgres") {
+    return NextResponse.json(
+      { error: "Admin features are only available in managed mode." },
+      { status: 403 },
+    );
+  }
+
+  const auth = await requireAdmin(request);
+  if (!auth.authenticated) return auth.response;
+
+  const p = request.nextUrl.searchParams;
+  const table = p.get("table") === "fx" ? "fx" : "price";
+
+  try {
+    // ── Single-row delete by id ──
+    const idRaw = p.get("id");
+    if (idRaw != null) {
+      const id = parseInt(idRaw, 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+      }
+      const deleted =
+        table === "fx"
+          ? await db.delete(schema.fxRates).where(eq(schema.fxRates.id, id)).returning({ id: schema.fxRates.id })
+          : await db.delete(schema.priceCache).where(eq(schema.priceCache.id, id)).returning({ id: schema.priceCache.id });
+      return NextResponse.json({ deleted: deleted.length });
+    }
+
+    // ── Bulk delete by filter (requires a filter — never the whole table) ──
+    if (p.get("all") === "1") {
+      if (!hasAnyFilter(p)) {
+        return NextResponse.json(
+          { error: "Refusing to delete the entire cache — narrow with a filter first." },
+          { status: 400 },
+        );
+      }
+      const today = todayISO();
+      const staleThreshold = new Date(Date.now() - PRICE_CACHE_TODAY_TTL_MS);
+      const conds = buildConds(table, p, today, staleThreshold);
+      const where = and(...conds);
+      const deleted =
+        table === "fx"
+          ? await db.delete(schema.fxRates).where(where).returning({ id: schema.fxRates.id })
+          : await db.delete(schema.priceCache).where(where).returning({ id: schema.priceCache.id });
+      return NextResponse.json({ deleted: deleted.length });
+    }
+
+    return NextResponse.json({ error: "Provide ?id=N or ?all=1 with a filter." }, { status: 400 });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Failed to delete cache rows";
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
