@@ -169,7 +169,7 @@ export function BankPane({
                 <TableHead className="text-right">Qty</TableHead>
               )}
               <TableHead className="text-right">Amount</TableHead>
-              <TableHead className="w-48 text-right">Actions</TableHead>
+              <TableHead className="w-28 text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -212,7 +212,7 @@ export function BankPane({
                     </TableCell>
                   )}
                   <TableCell className="font-mono text-xs">{r.date}</TableCell>
-                  <TableCell className="text-xs truncate max-w-[220px]">
+                  <TableCell className="text-xs truncate max-w-[150px]">
                     {r.payee || (
                       <span className="text-muted-foreground">—</span>
                     )}
@@ -225,7 +225,7 @@ export function BankPane({
                     </TableCell>
                   )}
                   {isInvestment && (
-                    <TableCell className="text-xs truncate max-w-[200px]">
+                    <TableCell className="text-xs truncate max-w-[150px]">
                       {r.securityName || (
                         <span className="text-muted-foreground">—</span>
                       )}
