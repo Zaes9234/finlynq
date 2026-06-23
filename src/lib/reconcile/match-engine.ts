@@ -454,7 +454,7 @@ export async function computeReconcileForAccount(
     const invOpNames = ruleMatch
       ? ruleMatch.actions
           .filter((a): a is RecordInvestmentOpAction => a.kind === "record_investment_op")
-          .map((a) => a.op)
+          .map((a) => (a.settleAs === "shares" ? `${a.op} (shares)` : a.op))
       : [];
     const suggestedInvestmentOp = invOpNames.length > 0 ? invOpNames.join(", ") : null;
     // A matched rule whose action set names a transfer destination routes

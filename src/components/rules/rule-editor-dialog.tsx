@@ -650,6 +650,7 @@ function ActionRow({
           action={action}
           accounts={accounts}
           holdings={holdings}
+          categories={categories}
           onChange={onChange}
         />
       )}
@@ -668,17 +669,29 @@ function InvestmentOpFields({
   action,
   accounts,
   holdings,
+  categories,
   onChange,
 }: {
   action: Extract<Action, { kind: "record_investment_op" }>;
   accounts: Account[];
   holdings: Holding[];
+  categories: Category[];
   onChange: (patch: Partial<Action>) => void;
 }) {
   const op = action.op;
   const isTrade = op === "buy" || op === "sell";
   const isCashOnAccount = op === "deposit" || op === "withdrawal";
+  // Income-as-shares (DRIP) is offered for dividend / interest only.
+  const isIncomeOp = op === "dividend" || op === "interest";
+  const isShares = isIncomeOp && action.settleAs === "shares";
   const usesPosition = isTrade || op === "dividend" || op === "interest" || op === "fee";
+  // dividend / interest / fee record a categorized income/expense row — let the
+  // user pick ANY category, defaulting to the canonical one for the op kind.
+  const usesCategory = op === "dividend" || op === "interest" || op === "fee";
+  const autoCategoryName =
+    op === "dividend" ? "Dividends" : op === "interest" ? "Interest" : "Investment Fees";
+  // Shares-settled income needs qty + value bindings, exactly like a trade.
+  const usesTradeBindings = isTrade || isShares;
 
   const acctItems = accounts.map((a): ComboboxItemShape => ({ value: String(a.id), label: a.name }));
 
@@ -686,13 +699,47 @@ function InvestmentOpFields({
     <div className="ml-2 grid gap-2 rounded-md border bg-muted/20 p-2 text-sm">
       <div className="flex flex-wrap items-center gap-2">
         <Label className="w-28 text-xs text-muted-foreground">Transaction</Label>
-        <Select value={op} onValueChange={(v) => onChange({ op: (v ?? "buy") } as Partial<Action>)}>
+        <Select
+          value={op}
+          onValueChange={(v) =>
+            // Switching op resets the settle mode to cash (shares only applies
+            // to dividend/interest); the user re-opts into shares below.
+            onChange({ op: (v ?? "buy"), settleAs: undefined } as Partial<Action>)
+          }
+        >
           <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
           <SelectContent>
             {INVESTMENT_OPS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
           </SelectContent>
         </Select>
       </div>
+
+      {isIncomeOp && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Label className="w-28 text-xs text-muted-foreground">Settle as</Label>
+          <Select
+            value={action.settleAs ?? "cash"}
+            onValueChange={(v) =>
+              onChange(
+                (v === "shares"
+                  ? {
+                      settleAs: "shares",
+                      // Shares need qty + value; seed row bindings if blank.
+                      qty: action.qty ?? { from: "row_quantity" },
+                      total: action.total ?? { from: "row_amount" },
+                    }
+                  : { settleAs: "cash" }) as Partial<Action>,
+              )
+            }
+          >
+            <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="cash">Cash sleeve</SelectItem>
+              <SelectItem value="shares">Shares (reinvested / DRIP)</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <Label className="w-28 text-xs text-muted-foreground">Investment account</Label>
@@ -749,25 +796,58 @@ function InvestmentOpFields({
               className="flex-1 min-w-48"
             />
           )}
-          {op !== "buy" && op !== "sell" && action.useRowTicker && (
+          {!isTrade && !isShares && action.useRowTicker && (
             <span className="text-xs text-muted-foreground italic">
               optional — attributes the {op} to the row&apos;s security
+            </span>
+          )}
+          {isShares && (
+            <span className="text-xs text-muted-foreground italic">
+              required — the reinvested shares land on this holding
             </span>
           )}
         </div>
       )}
 
-      {isTrade ? (
+      {usesTradeBindings ? (
         <>
           <VarBindingRow label="Quantity" value={action.qty} onChange={(qty) => onChange({ qty } as Partial<Action>)} />
-          <VarBindingRow label="Total amount" value={action.total} onChange={(total) => onChange({ total } as Partial<Action>)} />
+          <VarBindingRow label={isShares ? "Dollar value" : "Total amount"} value={action.total} onChange={(total) => onChange({ total } as Partial<Action>)} />
           <VarBindingRow label="Price/unit" value={action.price} onChange={(price) => onChange({ price } as Partial<Action>)} optional />
           <p className="text-[11px] text-muted-foreground italic">
-            Bind any two of quantity / total / price; the third is computed. Lots are matched FIFO automatically.
+            {isShares
+              ? "Bind any two of quantity / value / price; the third is computed. The income is recorded as shares (a lot opens at value ÷ quantity) — no cash sleeve is touched."
+              : "Bind any two of quantity / total / price; the third is computed. Lots are matched FIFO automatically."}
           </p>
         </>
       ) : (
         <VarBindingRow label="Amount" value={action.total} onChange={(total) => onChange({ total } as Partial<Action>)} />
+      )}
+
+      {usesCategory && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Label className="w-28 text-xs text-muted-foreground">Category</Label>
+          <Combobox
+            value={String(action.categoryId ?? 0)}
+            onValueChange={(v) => {
+              const n = parseInt(v ?? "0");
+              onChange({ categoryId: n > 0 ? n : undefined } as Partial<Action>);
+            }}
+            items={[
+              { value: "0", label: `Auto — ${autoCategoryName}` },
+              ...categories
+                .map((c): ComboboxItemShape => ({
+                  value: String(c.id),
+                  label: `${c.group} — ${c.name}`,
+                }))
+                .sort((a, z) => (a.label ?? "").localeCompare(z.label ?? "")),
+            ]}
+            placeholder="Select category"
+            searchPlaceholder="Search categories…"
+            emptyMessage="No matches"
+            className="flex-1 min-w-48"
+          />
+        </div>
       )}
     </div>
   );

@@ -50,6 +50,10 @@ export default function IncomeExpenseForm() {
   const [accountId, setAccountId] = useState<string>("");
   const [currency, setCurrency] = useState<string>("");
   const [direction, setDirection] = useState<Direction>("income");
+  // Settle into: "cash" (the cash sleeve, legacy) or "shares" (a holding —
+  // income received as shares, single-leg DRIP). Income-only + create-only.
+  const [settleAs, setSettleAs] = useState<"cash" | "shares">("cash");
+  const [quantity, setQuantity] = useState<string>("");
   const [amount, setAmount] = useState<string>("");
   const [relatedHoldingId, setRelatedHoldingId] = useState<string>("");
   // Entry type drives auto-categorization. A preset (dividend/interest/fee)
@@ -167,13 +171,34 @@ export default function IncomeExpenseForm() {
     other: direction === "income" ? "Other income" : "Other expense",
   };
 
+  // Income-as-shares is income-only and create-only: hidden in edit mode and
+  // for expenses. The toggle below is only shown under the same condition.
+  const sharesAllowed = !isEdit && direction === "income";
+  const sharesMode = sharesAllowed && settleAs === "shares";
+
+  // Implied price/share preview for shares mode (cosmetic).
+  const impliedPricePerShare = useMemo(() => {
+    const q = parseFloat(quantity);
+    const v = parseFloat(amount);
+    if (!q || !v || Number.isNaN(q) || Number.isNaN(v) || q <= 0) return null;
+    return v / q;
+  }, [quantity, amount]);
+
   function validate(): boolean {
     const e: Record<string, string> = {};
     if (!accountId) e.accountId = "Pick an account";
-    if (!currency) e.currency = "Pick a currency / cash sleeve";
     const amt = parseFloat(amount);
     if (!amount || Number.isNaN(amt) || amt <= 0)
-      e.amount = "Amount must be > 0";
+      e.amount = sharesMode ? "Value must be > 0" : "Amount must be > 0";
+    if (sharesMode) {
+      if (!relatedHoldingId)
+        e.relatedHoldingId = "Pick a holding to receive shares";
+      const q = parseFloat(quantity);
+      if (!quantity || Number.isNaN(q) || q <= 0)
+        e.quantity = "Quantity must be > 0";
+    } else {
+      if (!currency) e.currency = "Pick a currency / cash sleeve";
+    }
     if (!date) e.date = "Pick a date";
     setErrors(e);
     return Object.keys(e).length === 0;
@@ -187,14 +212,24 @@ export default function IncomeExpenseForm() {
     setSubmitting(true);
     try {
       const positive = parseFloat(amount);
-      const signed = direction === "income" ? positive : -positive;
       const body: Record<string, unknown> = {
         accountId: Number(accountId),
-        currency,
-        amount: signed,
         date,
       };
-      if (relatedHoldingId) body.relatedHoldingId = Number(relatedHoldingId);
+      if (sharesMode) {
+        // Single-leg DRIP: income lands as shares on the chosen holding.
+        // Value is always positive; quantity = shares; no currency (derived
+        // from the holding server-side).
+        body.settleAs = "shares";
+        body.holdingId = Number(relatedHoldingId);
+        body.quantity = parseFloat(quantity);
+        body.amount = positive;
+      } else {
+        // Cash sleeve: positive = income, negative = expense.
+        body.currency = currency;
+        body.amount = direction === "income" ? positive : -positive;
+        if (relatedHoldingId) body.relatedHoldingId = Number(relatedHoldingId);
+      }
       // Preset entry types auto-resolve the category server-side; "other" uses
       // the manually-picked category. An explicit categoryId always wins on the
       // server, so for presets we deliberately omit it.
@@ -206,7 +241,7 @@ export default function IncomeExpenseForm() {
       if (payee.trim()) body.payee = payee.trim();
       if (note.trim()) body.note = note.trim();
       if (tags.trim()) body.tags = tags.trim();
-      if (isEdit) body.editId = editId;
+      if (isEdit && !sharesMode) body.editId = editId;
       const res = await fetch("/api/portfolio/operations/income-expense", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -294,7 +329,10 @@ export default function IncomeExpenseForm() {
         <CardDescription>
           Dividends and interest land as income on the matching cash sleeve;
           custodial fees land as expenses. Pick a related holding to attribute
-          income to a specific position for reporting.
+          income to a specific position for reporting. For income received as
+          shares (a DRIP), switch &ldquo;Settle into&rdquo; to{" "}
+          <span className="font-medium">Holding (shares)</span> to book it in a
+          single entry.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -337,6 +375,9 @@ export default function IncomeExpenseForm() {
                   // Reset the entry-type preset to the sensible default for the
                   // new sign (income→dividend, expense→fee).
                   setIncomeType(d === "income" ? "dividend" : "fee");
+                  // Income-as-shares is income-only — drop back to cash for an
+                  // expense so the form stays consistent.
+                  if (d === "expense") setSettleAs("cash");
                 }}
               >
                 <SelectTrigger className="w-full">
@@ -348,35 +389,81 @@ export default function IncomeExpenseForm() {
                 </SelectContent>
               </Select>
             </div>
+            {sharesMode ? (
+              <div className="space-y-1.5">
+                <Label>Quantity (shares)</Label>
+                <Input
+                  type="number"
+                  step="any"
+                  inputMode="decimal"
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                  placeholder="e.g. 1.2345"
+                />
+                {errors.quantity && (
+                  <p className="text-xs text-destructive">{errors.quantity}</p>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                <Label>Currency / cash sleeve</Label>
+                <Select
+                  value={currency}
+                  onValueChange={(v) => setCurrency(v ?? "")}
+                  disabled={!selectedAccount || cashSleeves.length === 0}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue
+                      placeholder={
+                        selectedAccount && cashSleeves.length === 0
+                          ? "No cash sleeves on this account"
+                          : "Pick a sleeve"
+                      }
+                    />
+                  </SelectTrigger>
+                  <SelectContent alignItemWithTrigger={false} side="bottom">
+                    {cashSleeves.map((s) => (
+                      <SelectItem key={s.id} value={s.currency}>
+                        {s.currency}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {errors.currency && (
+                  <p className="text-xs text-destructive">{errors.currency}</p>
+                )}
+              </div>
+            )}
+          </div>
+
+          {sharesAllowed && (
             <div className="space-y-1.5">
-              <Label>Currency / cash sleeve</Label>
+              <Label>Settle into</Label>
               <Select
-                value={currency}
-                onValueChange={(v) => setCurrency(v ?? "")}
-                disabled={!selectedAccount || cashSleeves.length === 0}
+                items={{
+                  cash: "Cash sleeve",
+                  shares: "Holding (shares)",
+                }}
+                value={settleAs}
+                onValueChange={(v) =>
+                  setSettleAs((v ?? "cash") as "cash" | "shares")
+                }
               >
                 <SelectTrigger className="w-full">
-                  <SelectValue
-                    placeholder={
-                      selectedAccount && cashSleeves.length === 0
-                        ? "No cash sleeves on this account"
-                        : "Pick a sleeve"
-                    }
-                  />
+                  <SelectValue />
                 </SelectTrigger>
                 <SelectContent alignItemWithTrigger={false} side="bottom">
-                  {cashSleeves.map((s) => (
-                    <SelectItem key={s.id} value={s.currency}>
-                      {s.currency}
-                    </SelectItem>
-                  ))}
+                  <SelectItem value="cash">Cash sleeve</SelectItem>
+                  <SelectItem value="shares">Holding (shares)</SelectItem>
                 </SelectContent>
               </Select>
-              {errors.currency && (
-                <p className="text-xs text-destructive">{errors.currency}</p>
-              )}
+              <p className="text-xs text-muted-foreground">
+                {settleAs === "shares"
+                  ? "Dividend/income received AS SHARES — books one entry that adds shares to a holding (cost basis = value ÷ quantity). No cash sleeve is touched."
+                  : "Income lands as cash on the matching cash sleeve."}
+              </p>
             </div>
-          </div>
+          )}
 
           <div className="space-y-1.5">
             <Label>Entry type</Label>
@@ -427,7 +514,7 @@ export default function IncomeExpenseForm() {
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>
-                Amount{" "}
+                {sharesMode ? "Dollar value" : "Amount"}{" "}
                 <span className="text-muted-foreground text-xs">
                   (positive)
                 </span>
@@ -459,8 +546,16 @@ export default function IncomeExpenseForm() {
 
           <div className="space-y-1.5">
             <Label>
-              Related holding{" "}
-              <span className="text-muted-foreground text-xs">(optional)</span>
+              {sharesMode ? (
+                "Holding to receive shares"
+              ) : (
+                <>
+                  Related holding{" "}
+                  <span className="text-muted-foreground text-xs">
+                    (optional)
+                  </span>
+                </>
+              )}
             </Label>
             <Select
               items={relatedHoldingLabelById}
@@ -474,7 +569,9 @@ export default function IncomeExpenseForm() {
                     selectedAccount
                       ? accountHoldings.length === 0
                         ? "No non-cash holdings"
-                        : "Pick a holding for attribution"
+                        : sharesMode
+                          ? "Pick the holding the shares land on"
+                          : "Pick a holding for attribution"
                       : "Pick an account first"
                   }
                 />
@@ -488,6 +585,19 @@ export default function IncomeExpenseForm() {
                 ))}
               </SelectContent>
             </Select>
+            {sharesMode && errors.relatedHoldingId && (
+              <p className="text-xs text-destructive">
+                {errors.relatedHoldingId}
+              </p>
+            )}
+            {sharesMode && impliedPricePerShare != null && (
+              <p className="text-xs text-muted-foreground">
+                ≈ {impliedPricePerShare.toLocaleString(undefined, {
+                  maximumFractionDigits: 6,
+                })}{" "}
+                per share
+              </p>
+            )}
           </div>
 
           {incomeType === "other" && (
@@ -604,9 +714,11 @@ export default function IncomeExpenseForm() {
                   : "Recording…"
                 : isEdit
                   ? "Save edit"
-                  : direction === "income"
-                    ? "Record income"
-                    : "Record expense"}
+                  : sharesMode
+                    ? "Record income (shares)"
+                    : direction === "income"
+                      ? "Record income"
+                      : "Record expense"}
             </Button>
           </div>
         </form>

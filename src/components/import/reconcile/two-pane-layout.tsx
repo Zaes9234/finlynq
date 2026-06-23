@@ -21,14 +21,23 @@ export function TwoPaneLayout({
   left,
   rightLabel,
   right,
+  rightWide = false,
 }: {
   leftLabel: ReactNode;
   left: ReactNode;
   rightLabel: ReactNode;
   right: ReactNode;
+  /** When true, the right pane gets ~60% of the width instead of an even
+   *  50/50 split — used by the investment reconcile view whose bank ledger
+   *  carries extra Ticker / Security / Qty columns that don't fit at 50%. */
+  rightWide?: boolean;
 }) {
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+    <div
+      className={`grid grid-cols-1 gap-4 ${
+        rightWide ? "lg:grid-cols-[2fr_3fr]" : "lg:grid-cols-2"
+      }`}
+    >
       <section className="flex flex-col min-h-0">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">

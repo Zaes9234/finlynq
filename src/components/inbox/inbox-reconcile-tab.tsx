@@ -1002,6 +1002,7 @@ export function InboxReconcileTab({
       />
 
       <TwoPaneLayout
+        rightWide={isInvestmentAccount}
         leftLabel="Transactions"
         left={
           <TransactionsPane

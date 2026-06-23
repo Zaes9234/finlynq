@@ -58,6 +58,9 @@ export function InvestmentOpPreviewDialog({
   if (!preview) return null;
   const op = preview.op;
   const isTrade = op === "buy" || op === "sell";
+  // Income settled as shares (DRIP) — the suggestion label carries "(shares)".
+  const isShares = /\(shares\)\s*$/.test(op);
+  const showSecurityQty = isTrade || isShares;
   const security = preview.ticker || preview.securityName || "—";
   const amountAbs = formatCurrency(Math.abs(preview.amount), preview.currency || "CAD");
 
@@ -81,7 +84,7 @@ export function InvestmentOpPreviewDialog({
           <dl className="rounded-md border bg-muted/20 p-3 grid grid-cols-[7rem_1fr] gap-y-1.5 gap-x-3">
             <dt className="text-muted-foreground">Operation</dt>
             <dd className="font-semibold uppercase tracking-wide">{op}</dd>
-            {isTrade && (
+            {showSecurityQty && (
               <>
                 <dt className="text-muted-foreground">Security</dt>
                 <dd className="font-mono">{security}</dd>
@@ -89,7 +92,7 @@ export function InvestmentOpPreviewDialog({
                 <dd className="tabular-nums">{fmtQty(preview.quantity)}</dd>
               </>
             )}
-            {!isTrade && security !== "—" && (
+            {!showSecurityQty && security !== "—" && (
               <>
                 <dt className="text-muted-foreground">Security</dt>
                 <dd className="font-mono">{security}</dd>
@@ -103,7 +106,9 @@ export function InvestmentOpPreviewDialog({
           <p className="text-xs text-muted-foreground italic">
             {isTrade
               ? "Lots are matched FIFO automatically. The cash sleeve is adjusted and the bank row is linked."
-              : "Records the cash entry on the account's sleeve and links the bank row."}
+              : isShares
+                ? "Records the income AS SHARES on the holding (a lot opens at value ÷ quantity). No cash sleeve is touched; the bank row is linked."
+                : "Records the cash entry on the account's sleeve and links the bank row."}
           </p>
         </div>
         <div className="flex gap-2 mt-2">

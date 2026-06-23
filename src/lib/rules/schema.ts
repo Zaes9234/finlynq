@@ -189,6 +189,17 @@ const RecordInvestmentOpAction = z.object({
   qty: VarSource.optional(),
   total: VarSource.optional(),
   price: VarSource.optional(),
+  /** Income received AS SHARES — single-leg DRIP. Only meaningful for
+   *  `dividend`/`interest`: when "shares", the income is recorded as SHARES on
+   *  the resolved (required) position via `recordReinvestedIncomeInShares` —
+   *  qty + total bind like a trade (any two of {qty,total,price}) — instead of
+   *  crediting a cash sleeve. Absent / "cash" = the legacy cash-sleeve path. */
+  settleAs: z.enum(["cash", "shares"]).optional(),
+  /** Optional explicit category for the income/cash ops (dividend / interest /
+   *  fee — applies in both cash and shares settle modes). When unset, the
+   *  executor resolves the canonical income category by op kind (Dividends /
+   *  Interest / Investment Fees). Ignored by buy/sell/deposit/withdrawal. */
+  categoryId: z.number().int().positive().optional(),
 });
 
 export const Action = z.discriminatedUnion("kind", [
@@ -335,6 +346,7 @@ export function collectActionFKs(actions: Action[]): {
         accountIds.add(a.investmentAccountId);
         if (a.counterpartyAccountId != null) accountIds.add(a.counterpartyAccountId);
         if (a.holdingId != null) holdingIds.add(a.holdingId);
+        if (a.categoryId != null) categoryIds.add(a.categoryId);
         break;
       default:
         break;
@@ -390,6 +402,7 @@ export type InvestmentOpValidationError =
   | "missing_qty_binding"
   | "missing_total_binding"
   | "insufficient_trade_bindings"
+  | "shares_unsupported_op"
   | "fixed_value_nonpositive";
 
 function isPositiveFixed(src: VarSource | undefined): boolean | null {
@@ -411,6 +424,11 @@ export function validateInvestmentOpAction(
 ): InvestmentOpValidationError | null {
   if (!a.investmentAccountId || a.investmentAccountId <= 0) return "missing_account";
 
+  // Income-as-shares (DRIP) is only valid for dividend / interest income.
+  if (a.settleAs === "shares" && a.op !== "dividend" && a.op !== "interest") {
+    return "shares_unsupported_op";
+  }
+
   if (a.op === "deposit" || a.op === "withdrawal") {
     if (!a.counterpartyAccountId || a.counterpartyAccountId <= 0) return "missing_counterparty";
     if (a.counterpartyAccountId === a.investmentAccountId) return "self_counterparty";
@@ -430,7 +448,19 @@ export function validateInvestmentOpAction(
   }
 
   if (HOLDING_CASH_OPS.has(a.op)) {
-    // dividend / interest can attribute to a holding (optional); fee likewise.
+    if (a.settleAs === "shares") {
+      // DRIP: the income lands as SHARES on a REQUIRED position, derived from
+      // qty + total (any two of {qty,total,price}, like a trade).
+      if (!a.holdingId && !a.useRowTicker) return "missing_position";
+      const present = [a.qty, a.total, a.price].filter((s) => s != null).length;
+      if (present < 2) return "insufficient_trade_bindings";
+      if (isPositiveFixed(a.qty) === false) return "fixed_value_nonpositive";
+      if (isPositiveFixed(a.total) === false) return "fixed_value_nonpositive";
+      if (isPositiveFixed(a.price) === false) return "fixed_value_nonpositive";
+      return null;
+    }
+    // Cash settle (legacy): dividend / interest can attribute to a holding
+    // (optional); fee likewise.
     if (!a.total) return "missing_total_binding";
     if (isPositiveFixed(a.total) === false) return "fixed_value_nonpositive";
     return null;

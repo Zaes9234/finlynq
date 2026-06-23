@@ -51,6 +51,7 @@ import {
 } from "@/lib/portfolio/lots/write-hooks";
 import { closeCashLotsHook, openCashLotHook } from "@/lib/portfolio/lots/cash-hooks";
 import { InvalidLinkPairError } from "@/lib/portfolio/lots/engine";
+import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import type { LotSelectionStrategy } from "@/lib/portfolio/lots/types";
 import type { TransactionSource } from "@/lib/tx-source";
 
@@ -773,6 +774,137 @@ export async function recordPortfolioIncomeOrExpense(
     cashSleeveHoldingId: cashSleeve.id,
     kind,
   };
+}
+
+// ─── recordReinvestedIncomeInShares ──────────────────────────────────────
+//
+// Income (dividend / interest / etc.) received AS SHARES rather than cash —
+// a single-leg "DRIP". Instead of crediting a cash sleeve, this writes ONE
+// transaction directly on a STOCK holding (qty = shares received, amount =
+// dollar value of the income) and opens a cost-basis lot at value/qty via
+// the SAME path a Buy uses. No cash sleeve is touched (the income never
+// lands as cash), so there is no cash leg and no FX at record time — the
+// value is denominated in the holding's own currency.
+//
+// End state is identical to today's two-entry workaround (record income to
+// cash, then Buy shares with that cash): +shares, net worth +value. The
+// read layer already understands this shape — the dividends/income report
+// classifies the row by category (qty>0 → flagged "reinvested"), and the
+// lot's origin is tagged `reinvest_div` when the category is the user's
+// Dividends category, else `buy` (cosmetic only; cost basis is value/qty
+// either way — see openLotForBuy in lots/engine.ts).
+//
+// Income only: callers pass a positive value. The kind is `portfolio_income`
+// (category-neutral — the user may pick any category); it is NOT a paired
+// portfolio-op kind, so audit invariant #8 does not apply.
+
+export interface RecordReinvestedIncomeInSharesInput {
+  userId: string;
+  dek: Buffer | null;
+  accountId: number;
+  /** Destination stock holding the shares land on (must be non-cash). */
+  holdingId: number;
+  qty: number;        // > 0 — shares received
+  amount: number;     // > 0 — dollar value of the income (in holding currency)
+  categoryId?: number | null;
+  date: string;
+  payee?: string;
+  note?: string;
+  tags?: string;
+  source?: TransactionSource;
+}
+
+export interface RecordReinvestedIncomeInSharesResult {
+  txId: number;
+  holdingId: number;
+  lotId: number | null;
+  kind: "portfolio_income";
+}
+
+export async function recordReinvestedIncomeInShares(
+  input: RecordReinvestedIncomeInSharesInput,
+): Promise<RecordReinvestedIncomeInSharesResult> {
+  if (input.qty <= 0) {
+    throw new Error(
+      `recordReinvestedIncomeInShares: qty must be > 0 (got ${input.qty})`,
+    );
+  }
+  if (input.amount <= 0) {
+    throw new Error(
+      `recordReinvestedIncomeInShares: value must be > 0 (got ${input.amount})`,
+    );
+  }
+
+  const holding = await fetchHolding(input.userId, input.holdingId);
+  if (holding.isCash) {
+    throw new Error(
+      `recordReinvestedIncomeInShares: holding ${input.holdingId} is a cash sleeve; ` +
+        `income-as-shares must target a non-cash holding.`,
+    );
+  }
+
+  const source: TransactionSource = input.source ?? "manual";
+  const payee = enc(input.dek, input.payee ?? "");
+  const note = enc(input.dek, input.note ?? "");
+  const tags = enc(input.dek, input.tags ?? "");
+
+  // Single stock-leg row: qty = shares acquired, amount = the income's
+  // dollar value. No cash leg, no related_holding_id (the row IS on the
+  // paying position).
+  const inserted = await db
+    .insert(schema.transactions)
+    .values({
+      userId: input.userId,
+      date: input.date,
+      accountId: input.accountId,
+      portfolioHoldingId: input.holdingId,
+      relatedHoldingId: null,
+      categoryId: input.categoryId ?? null,
+      quantity: input.qty,
+      amount: input.amount,
+      currency: holding.currency,
+      payee,
+      note,
+      tags,
+      kind: "portfolio_income",
+      source,
+    })
+    .returning({ id: schema.transactions.id });
+  const txId = inserted[0]!.id;
+
+  // Open the cost-basis lot at value/qty — same hook a Buy uses. Tag the
+  // origin `reinvest_div` when the chosen category is the user's Dividends
+  // category (no DEK ⇒ resolveDividendsCategoryId returns null ⇒ origin
+  // falls back to `buy`; cost basis is unaffected either way).
+  const dividendsCategoryId = await resolveDividendsCategoryId(
+    db,
+    input.userId,
+    input.dek,
+  );
+  const categoryIsDividend =
+    dividendsCategoryId != null && input.categoryId === dividendsCategoryId;
+
+  const lotId = await openLotForBuyHook(
+    {
+      id: txId,
+      userId: input.userId,
+      date: input.date,
+      amount: input.amount,
+      currency: holding.currency,
+      enteredAmount: null,
+      enteredCurrency: null,
+      quantity: input.qty,
+      accountId: input.accountId,
+      categoryId: input.categoryId ?? null,
+      portfolioHoldingId: input.holdingId,
+      tradeLinkId: null,
+      kind: "portfolio_income",
+      source,
+    },
+    { holdingCurrency: holding.currency, categoryIsDividend },
+  );
+
+  return { txId, holdingId: input.holdingId, lotId, kind: "portfolio_income" };
 }
 
 // ─── recordFxConversion ──────────────────────────────────────────────────

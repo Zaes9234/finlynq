@@ -2,7 +2,10 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/db";
 import { apiHandler } from "@/lib/api-handler";
-import { recordPortfolioIncomeOrExpense } from "@/lib/portfolio/operations";
+import {
+  recordPortfolioIncomeOrExpense,
+  recordReinvestedIncomeInShares,
+} from "@/lib/portfolio/operations";
 import { resolveOrCreateInvestmentIncomeCategory } from "@/lib/investment-income-category";
 import { invalidateUser as invalidateUserTxCache } from "@/lib/mcp/user-tx-cache";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
@@ -10,7 +13,9 @@ import { mapOperationError, cascadeDeleteForReplace } from "../_helpers";
 
 const schema = z.object({
   accountId: z.number().int().positive(),
-  currency: z.string().min(2).max(8),
+  // Optional: the cash path requires it; the "shares" path derives currency
+  // from the destination holding and omits it.
+  currency: z.string().min(2).max(8).optional(),
   amount: z.number().refine((v) => v !== 0, { message: "amount cannot be 0" }),
   relatedHoldingId: z.number().int().positive().nullable().optional(),
   categoryId: z.number().int().positive().nullable().optional(),
@@ -24,6 +29,13 @@ const schema = z.object({
   note: z.string().optional(),
   tags: z.string().optional(),
   editId: z.number().int().positive().optional(),
+  // Income received AS SHARES (single-leg DRIP). When "shares", `holdingId`
+  // + `quantity` are required and the income lands on that stock holding
+  // instead of a cash sleeve (income only — positive amount = $ value). The
+  // user may pick any category. Defaults to the legacy cash-sleeve path.
+  settleAs: z.enum(["cash", "shares"]).optional(),
+  holdingId: z.number().int().positive().optional(),
+  quantity: z.number().positive().optional(),
 });
 
 // raw/compat mode — bare-shape consumers (web forms + mobile). See buy/route.ts.
@@ -36,7 +48,66 @@ export const POST = apiHandler(
     fallbackMessage: "Failed to record portfolio income/expense",
   },
   async ({ userId, dek, body }) => {
-    const { editId, incomeType, ...input } = body;
+    const { editId, incomeType, settleAs, holdingId, quantity, currency, ...input } =
+      body;
+
+    // ── Income received as shares (single-leg DRIP) ─────────────────────
+    // Create-only; the form never sends settleAs:"shares" with an editId.
+    if (settleAs === "shares") {
+      if (input.amount <= 0) {
+        return NextResponse.json(
+          { error: "Income value must be greater than 0." },
+          { status: 400 },
+        );
+      }
+      if (holdingId == null || quantity == null || quantity <= 0) {
+        return NextResponse.json(
+          { error: "Pick a holding and enter a share quantity greater than 0." },
+          { status: 400 },
+        );
+      }
+      // Category resolution mirrors the cash path: an explicit categoryId
+      // (any category the user picked) always wins; otherwise a dividend/
+      // interest preset resolves-or-creates its canonical category. "other"/
+      // unset leaves the category null.
+      let sharesCategoryId = input.categoryId ?? null;
+      if (
+        sharesCategoryId == null &&
+        (incomeType === "dividend" || incomeType === "interest")
+      ) {
+        sharesCategoryId = await resolveOrCreateInvestmentIncomeCategory(
+          db,
+          userId,
+          dek,
+          incomeType,
+        );
+      }
+      const sharesResult = await recordReinvestedIncomeInShares({
+        userId,
+        dek,
+        accountId: input.accountId,
+        holdingId,
+        qty: quantity,
+        amount: input.amount,
+        categoryId: sharesCategoryId,
+        date: input.date,
+        payee: input.payee,
+        note: input.note,
+        tags: input.tags,
+        source: "manual",
+      });
+      invalidateUserTxCache(userId);
+      await markSnapshotsDirty(userId, input.date);
+      return NextResponse.json(sharesResult, { status: 201 });
+    }
+
+    // ── Cash-sleeve income/expense (existing path) ──────────────────────
+    if (!currency) {
+      return NextResponse.json(
+        { error: "Pick a currency / cash sleeve." },
+        { status: 400 },
+      );
+    }
     if (editId != null) {
       const refusal = await cascadeDeleteForReplace(userId, editId);
       if (refusal) return refusal;
@@ -60,6 +131,7 @@ export const POST = apiHandler(
     }
     const result = await recordPortfolioIncomeOrExpense({
       ...input,
+      currency,
       categoryId,
       userId,
       dek,

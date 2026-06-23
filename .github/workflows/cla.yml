@@ -10,6 +10,16 @@ name: CLA
 #     recording via PR comment goes live with the next dev → main promotion.
 #     Until then the check will flag unsigned PRs but comments won't be
 #     auto-processed.
+#
+# Signature storage branch (REQUIRED — load-bearing):
+#   The contributor-assistant action persists `.github/cla/signatures.json` on
+#   the `cla-signatures` orphan branch (see `branch:` below). That branch MUST
+#   exist — the action does NOT create it and fails every run with
+#   "Branch cla-signatures not found" if it's missing (this happened until it
+#   was created 2026-06-22). If it ever goes missing again, recreate it as an
+#   orphan branch holding a single file `.github/cla/signatures.json` with
+#   contents `{"signedContributors":[]}`, and leave it UNPROTECTED so the
+#   action can push signature updates to it.
 
 on:
   issue_comment:

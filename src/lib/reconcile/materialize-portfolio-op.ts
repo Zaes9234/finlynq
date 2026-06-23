@@ -55,6 +55,7 @@ import {
   recordBuy,
   recordSell,
   recordPortfolioIncomeOrExpense,
+  recordReinvestedIncomeInShares,
   recordBrokerageDeposit,
   recordBrokerageWithdrawal,
   CashSleeveNotFoundError,
@@ -320,6 +321,14 @@ async function runHoldingCash(
   rowVars: { amount: number | null; quantity: number | null; price: number | null },
 ): Promise<MaterializePortfolioOpResult> {
   const { userId, dek, action, bank } = ctx;
+
+  // FINLYNQ — income received AS SHARES (single-leg DRIP). Only dividend /
+  // interest may settle into shares; the executor records ONE row on the
+  // resolved position and opens a lot at value/qty (no cash sleeve touched).
+  if (action.settleAs === "shares" && (action.op === "dividend" || action.op === "interest")) {
+    return await runIncomeInShares(ctx, rowVars);
+  }
+
   const cash = resolveCashAmount(action, rowVars);
   if (!cash.ok) return fail("price_underivable", `Could not derive the cash amount: ${cash.code}.`);
 
@@ -343,7 +352,11 @@ async function runHoldingCash(
   // runHoldingCash is only reached for these three ops (dispatched by the
   // switch in materializeBankRowAsPortfolioOp).
   const kind = action.op as "dividend" | "interest" | "fee";
-  const categoryId = await resolveOrCreateInvestmentIncomeCategory(db, userId, dek, kind);
+  // An explicit rule category wins; otherwise resolve the canonical income
+  // category by op kind (Dividends / Interest / Investment Fees).
+  const categoryId =
+    action.categoryId ??
+    (await resolveOrCreateInvestmentIncomeCategory(db, userId, dek, kind));
 
   // dividend / interest are income (+); fee is an expense (−).
   const signed = kind === "fee" ? -cash.amount : cash.amount;
@@ -358,6 +371,69 @@ async function runHoldingCash(
     currency: bank.currency,
     amount: signed,
     relatedHoldingId,
+    categoryId,
+    date: bank.date,
+    payee: ctx.payeePlain,
+    tags: ctx.tags,
+    source: "reconcile_link",
+  });
+  await stampLineage(userId, r.txId, bank.id);
+  return { ok: true, op: kind, transactionIds: [r.txId], linkedTransactionId: r.txId };
+}
+
+// ─── dividend / interest settled AS SHARES (DRIP) ─────────────────────────────
+
+async function runIncomeInShares(
+  ctx: OpCtx,
+  rowVars: { amount: number | null; quantity: number | null; price: number | null },
+): Promise<MaterializePortfolioOpResult> {
+  const { userId, dek, action, bank } = ctx;
+
+  // Resolve the REQUIRED destination position — the reinvested shares land
+  // here (unlike a cash dividend, where the holding is optional attribution).
+  let holdingId: number;
+  if (action.holdingId != null) {
+    const h = await fetchNonCashHolding(userId, action.holdingId);
+    if (!h) return fail("holding_not_found", "Configured holding not found.");
+    holdingId = h.id;
+  } else if (action.useRowTicker) {
+    const pos = await resolveOrCreateInvestmentPosition(userId, dek, action.investmentAccountId, {
+      ticker: ctx.tickerPlain,
+      name: ctx.securityNamePlain,
+      currency: bank.currency,
+    });
+    if (!pos.ok) {
+      return fail(
+        "position_unresolved",
+        "This row has no ticker / security name to resolve a holding for the reinvested shares. Pick an explicit holding in the rule.",
+      );
+    }
+    holdingId = pos.id;
+  } else {
+    return fail("position_unresolved", "No holding configured for the reinvested shares.");
+  }
+
+  // Derive shares (qty) + dollar value (total) from the bindings — any two of
+  // {qty, total, price}, same derivation as a trade.
+  const trade = resolveTrade(action, rowVars);
+  if (!trade.ok) {
+    return fail("price_underivable", `Could not derive the shares / value: ${trade.code}.`);
+  }
+
+  const kind = action.op as "dividend" | "interest";
+  // An explicit rule category wins; otherwise resolve the canonical income
+  // category by op kind (Dividends / Interest).
+  const categoryId =
+    action.categoryId ??
+    (await resolveOrCreateInvestmentIncomeCategory(db, userId, dek, kind));
+
+  const r = await recordReinvestedIncomeInShares({
+    userId,
+    dek,
+    accountId: action.investmentAccountId,
+    holdingId,
+    qty: trade.qty,
+    amount: trade.total,
     categoryId,
     date: bank.date,
     payee: ctx.payeePlain,
