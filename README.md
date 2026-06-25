@@ -44,7 +44,7 @@ Before the first `up`, create a sibling `.env` file with three secrets, each gen
 
 ## MCP server
 
-First-party Model Context Protocol server with 102 HTTP / 93 stdio tools covering accounts, transactions, budgets, goals, loans, portfolio, subscriptions, FX rates, rules, splits, bulk edits, and file imports.
+First-party Model Context Protocol server with 117 HTTP / 93 stdio tools covering accounts, transactions, budgets, goals, loans, portfolio, subscriptions, FX rates, rules, splits, bulk edits, and file imports.
 
 - **Claude Web / Mobile / Cursor / Windsurf** — OAuth 2.1 + Dynamic Client Registration. Paste `https://finlynq.com/mcp` into the connector setup; no config file.
 - **Claude Desktop (stdio)** — point at `mcp-server/index.ts` with `PF_USER_ID` in the env block.
