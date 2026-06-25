@@ -2,7 +2,7 @@
 
 Two ways to use Finlynq: a free managed cloud at [finlynq.com/cloud](https://finlynq.com/cloud), or self-host with Docker.
 
-Open-source personal finance with a first-party MCP server (102 HTTP / 93 stdio tools) so Claude, ChatGPT, Cursor, etc. can query and manage your finances.
+Open-source personal finance with a first-party MCP server (117 HTTP / 93 stdio tools) so Claude, ChatGPT, Cursor, etc. can query and manage your finances.
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
