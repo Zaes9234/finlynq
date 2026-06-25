@@ -74,8 +74,10 @@ export async function linkTransactionToBank(
     const owns = await tx
       .select({
         txId: schema.transactions.id,
+        txAccountId: schema.transactions.accountId,
         currentFk: schema.transactions.bankTransactionId,
         bankId: schema.bankTransactions.id,
+        bankAccountId: schema.bankTransactions.accountId,
       })
       .from(schema.transactions)
       .leftJoin(
@@ -101,6 +103,25 @@ export async function linkTransactionToBank(
       throw new LinkError(
         "not_found",
         "bank_transaction not found for user",
+      );
+    }
+
+    // Same-account guard (FINLYNQ-211). A transaction and the bank-ledger
+    // row it links to MUST belong to the same account. The match engine only
+    // ever SUGGESTS same-account pairs, so this guards purely against the raw
+    // API / bulk / MCP `accept_reconcile_suggestion` paths, which previously
+    // accepted any user-owned (tx, bank) pair. Without it, a transfer leg in
+    // account A linked to a bank row in account B renders "linked" in A's
+    // reconcile view even though A's own statement never matched it — the
+    // reported symptom where a transfer's peer leg reads as already-reconciled.
+    if (
+      row.txAccountId != null &&
+      row.bankAccountId != null &&
+      row.txAccountId !== row.bankAccountId
+    ) {
+      throw new LinkError(
+        "cross_account",
+        "transaction and bank row belong to different accounts",
       );
     }
 
@@ -263,7 +284,7 @@ export async function unlinkTransactionFromBank(
  */
 export class LinkError extends Error {
   constructor(
-    public code: "not_found",
+    public code: "not_found" | "cross_account",
     message: string,
   ) {
     super(message);

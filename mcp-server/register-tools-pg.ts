@@ -12054,7 +12054,14 @@ export function registerPgTools(
         });
         return dataResponse(result);
       } catch (e) {
-        if (e instanceof LinkError) return err("Not found");
+        if (e instanceof LinkError) {
+          if (e.code === "cross_account") {
+            return err(
+              "Transaction and bank row belong to different accounts; a transfer leg can only be linked to a bank row in its own account.",
+            );
+          }
+          return err("Not found");
+        }
         throw e;
       }
     },
