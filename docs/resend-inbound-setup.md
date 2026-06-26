@@ -95,7 +95,7 @@ This is the step that tells Resend "when mail arrives at finlynq.com, POST it to
 SSH to the prod server as a user with sudo access, then edit `/home/projects/pf/.env`:
 
 ```bash
-sudo -u paperclip-agent nano /home/projects/pf/.env
+sudo -u finlynq-agent nano /home/projects/pf/.env
 ```
 
 Find the block that ends with:
