@@ -85,7 +85,16 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const nonce = (await headers()).get("x-nonce") ?? undefined;
 
   return (
-    <html lang="en" suppressHydrationWarning>
+    // Font CSS variables (next/font) MUST live on <html> so they exist at :root —
+    // globals.css consumes them via --font-sans + the [data-font] overrides, which
+    // apply at :root/<html>. CSS custom properties inherit DOWN, not up; on <body>
+    // they'd be invisible to :root and --font-sans would resolve to nothing
+    // (FINLYNQ-225 cycle-2 fix).
+    <html
+      lang="en"
+      suppressHydrationWarning
+      className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} ${inter.variable} ${ibmPlexSans.variable} ${atkinsonHyperlegible.variable}`}
+    >
       {/* FOUC-prevention for font preference (FINLYNQ-225).
           Runs before paint, sets data-font on <html> from localStorage.
           nonce required by strict-dynamic CSP (mirrors next-themes pattern). */}
@@ -96,9 +105,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           dangerouslySetInnerHTML={{ __html: FONT_FOUC_SCRIPT }}
         />
       </head>
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} ${instrumentSerif.variable} ${inter.variable} ${ibmPlexSans.variable} ${atkinsonHyperlegible.variable} antialiased noise-bg`}
-      >
+      <body className="antialiased noise-bg">
         <JsonLd data={organizationSchema()} />
         <ThemeProvider
           attribute="class"
