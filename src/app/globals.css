@@ -142,9 +142,12 @@
 
 /* ═══════════════════════════════════════════════
    FONT SELECTOR (FINLYNQ-225)
-   data-font attribute on <html> overrides --font-sans.
-   Geist is the default (no attribute needed).
-   Numerics stay Geist Mono via --font-mono regardless.
+   The data-font attribute on <html> sets a RUNTIME --font-sans custom property
+   (the @theme inline --font-sans on line 11 is inlined into the font-sans utility
+   at build time and is NOT a readable :root property — so the html font-family
+   rule below reads --font-sans DIRECTLY to honor the selection).
+   Geist is the default (no attribute / :root). Numerics are pinned to Geist Mono
+   below via --font-geist-mono directly (never overridden by [data-font]).
    ═══════════════════════════════════════════════ */
 :root,
 [data-font="geist"] {
@@ -161,6 +164,20 @@
 }
 [data-font="system"] {
   --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Unlayered (beats the @layer base `html { @apply font-sans }` Geist pin) so the
+   selected runtime --font-sans actually drives the UI. Body inherits from html. */
+html {
+  font-family: var(--font-sans);
+}
+
+/* Numerics/tabular figures stay Geist Mono regardless of the chosen UI font.
+   Reference --font-geist-mono DIRECTLY (the next/font runtime var on <html>) —
+   NOT --font-mono, which is @theme inline and not a readable :root property.
+   Number-only spans/cells only — td/th carry table TEXT and keep the sans. */
+.tabular-nums, [data-value] {
+  font-family: var(--font-geist-mono);
 }
 
 /* ═══════════════════════════════════════════════
