@@ -29,11 +29,14 @@
  * See plan/encryption-plaintext-gaps.md Phase 5.
  */
 
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { db } from "@/db";
 import { encryptField, isEncrypted } from "@/lib/crypto/envelope";
 import { encryptRuleFields, ruleHasPlaintext } from "@/lib/rules/crypto";
-import { USER_ENCRYPTED_COLUMNS } from "./user-encrypted-registry";
+import {
+  USER_ENCRYPTED_COLUMNS,
+  type UserEncryptedColumn,
+} from "./user-encrypted-registry";
 
 /** Per-table/run cap so a huge legacy account doesn't block a login indefinitely.
  *  The next login picks up where this one left off (the NOT LIKE filter advances). */
@@ -49,6 +52,24 @@ function rowsOf(res: unknown): Array<Record<string, unknown>> {
   if (Array.isArray(res)) return res as Array<Record<string, unknown>>;
   const r = (res as { rows?: unknown } | null)?.rows;
   return Array.isArray(r) ? (r as Array<Record<string, unknown>>) : [];
+}
+
+/**
+ * Per-table user-ownership predicate for the sweep's SELECT + UPDATE.
+ *
+ * Default: a direct `user_id = $1` column. Tables registered with a
+ * `userScope` (e.g. `transaction_splits`, which has no `user_id` of its own)
+ * scope transitively through the parent FK so the sweep only ever re-encrypts
+ * a row under its owning user's DEK. Without this, the direct `user_id`
+ * predicate raises SQLSTATE 42703 and the whole table is silently skipped.
+ */
+function userScopeCondition(entry: UserEncryptedColumn, userId: string): SQL {
+  if (entry.userScope) {
+    const fkId = sql.identifier(entry.userScope.fkColumn);
+    const parentId = sql.identifier(entry.userScope.parentTable);
+    return sql`${fkId} IN (SELECT id FROM ${parentId} WHERE user_id = ${userId})`;
+  }
+  return sql`user_id = ${userId}`;
 }
 
 /**
@@ -78,16 +99,18 @@ export async function upgradeUserFieldEncryption(
   let failed = 0;
 
   // ─── Envelope note/payee/tags columns ────────────────────────────────────
-  for (const { table, column } of USER_ENCRYPTED_COLUMNS) {
+  for (const entry of USER_ENCRYPTED_COLUMNS) {
+    const { table, column } = entry;
     const tableId = sql.identifier(table);
     const colId = sql.identifier(column);
+    const userScope = userScopeCondition(entry, userId);
 
     let rows: Array<Record<string, unknown>>;
     try {
       const res = await db.execute(sql`
         SELECT id, ${colId} AS val
         FROM ${tableId}
-        WHERE user_id = ${userId}
+        WHERE ${userScope}
           AND ${colId} IS NOT NULL
           AND ${colId} <> ''
           AND ${colId} NOT LIKE 'v1:%'
@@ -116,7 +139,7 @@ export async function upgradeUserFieldEncryption(
           UPDATE ${tableId}
           SET ${colId} = ${ct}
           WHERE id = ${row.id}
-            AND user_id = ${userId}
+            AND ${userScope}
             AND ${colId} NOT LIKE 'v1:%'
         `);
         upgraded++;

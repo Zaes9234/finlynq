@@ -17,10 +17,35 @@
  * dropped), and they carry a `name_lookup` HMAC sibling that the generic
  * envelope sweep would not maintain.
  *
+ * Most registered tables have a direct `user_id` column and the sweep filters
+ * `WHERE user_id = $1`. A table WITHOUT a `user_id` of its own (only
+ * `transaction_splits` today — owned via `transaction_id → transactions`) MUST
+ * declare a `userScope` override (see {@link UserScopeViaParent}) or the sweep
+ * raises SQLSTATE 42703 and silently skips the whole table. The
+ * `tests/upgrade-user-fields.test.ts` registry/schema consistency test guards
+ * this.
+ *
  * See plan/encryption-plaintext-gaps.md.
  */
 
 export type UserEncryptedKind = "envelope";
+
+/**
+ * How the login sweep scopes a table's rows to one user when the table has NO
+ * `user_id` column of its own and is owned transitively through a parent FK.
+ *
+ * `transaction_splits` is the only such table today: a split is owned via
+ * `transaction_id → transactions.user_id`. The sweep filters
+ * `WHERE <fkColumn> IN (SELECT id FROM <parentTable> WHERE user_id = $1)`
+ * instead of a direct `WHERE user_id = $1` (which 42703s — the column doesn't
+ * exist).
+ */
+export interface UserScopeViaParent {
+  /** FK column on THIS table pointing at the parent's `id`. */
+  fkColumn: string;
+  /** Parent table that carries the `user_id` (and an `id` PK). */
+  parentTable: string;
+}
 
 export interface UserEncryptedColumn {
   /** PostgreSQL table name (snake_case, matches the physical schema). */
@@ -28,6 +53,17 @@ export interface UserEncryptedColumn {
   /** PostgreSQL column name (snake_case). */
   column: string;
   kind: UserEncryptedKind;
+  /**
+   * User-ownership scoping for the login sweep.
+   *
+   * DEFAULT (omitted): the table has a direct `user_id` column; the sweep
+   * filters `WHERE user_id = $1`.
+   *
+   * When set: the table has no `user_id` of its own and is scoped transitively
+   * through a parent FK (see {@link UserScopeViaParent}). REQUIRED for any
+   * table without a `user_id` column, or the sweep raises SQLSTATE 42703.
+   */
+  userScope?: UserScopeViaParent;
 }
 
 /**
@@ -44,9 +80,12 @@ export const USER_ENCRYPTED_COLUMNS: ReadonlyArray<UserEncryptedColumn> = [
   { table: "transactions", column: "payee", kind: "envelope" },
   { table: "transactions", column: "note", kind: "envelope" },
   { table: "transactions", column: "tags", kind: "envelope" },
-  { table: "transaction_splits", column: "note", kind: "envelope" },
-  { table: "transaction_splits", column: "description", kind: "envelope" },
-  { table: "transaction_splits", column: "tags", kind: "envelope" },
+  // transaction_splits has NO user_id column — splits are owned through their
+  // parent transaction (transaction_id → transactions.user_id). The sweep MUST
+  // scope via the parent or it 42703s ("column user_id does not exist").
+  { table: "transaction_splits", column: "note", kind: "envelope", userScope: { fkColumn: "transaction_id", parentTable: "transactions" } },
+  { table: "transaction_splits", column: "description", kind: "envelope", userScope: { fkColumn: "transaction_id", parentTable: "transactions" } },
+  { table: "transaction_splits", column: "tags", kind: "envelope", userScope: { fkColumn: "transaction_id", parentTable: "transactions" } },
   // New scope (this plan) — free-text note columns.
   { table: "loans", column: "note", kind: "envelope" },
   { table: "goals", column: "note", kind: "envelope" },

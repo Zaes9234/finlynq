@@ -14,6 +14,7 @@ import { and, eq, isNotNull, sql } from "drizzle-orm";
 import { db, schema } from "@/db";
 import { buildDailySnapshot } from "@/lib/portfolio/snapshots/builder";
 import { rebuildCashSnapshots } from "@/lib/portfolio/snapshots/cash-builder";
+import { withOp } from "@/lib/diagnostics/op-context";
 
 export interface RebuildResult {
   fromDate: string;
@@ -133,6 +134,19 @@ export function getRebuildProgress(userId: string): RebuildProgress | null {
   return cur ? { ...cur } : null;
 }
 
+/**
+ * Cross-user snapshot of every current/last investment rebuild in the registry,
+ * newest-activity first. Read-only — backs the /admin/system "Server Health"
+ * view so an operator can see which users' snapshot rebuilds are (or just were)
+ * burning CPU. The registry is per-process + in-memory, so this only reflects
+ * the running server (cleared on restart), same as the other diagnostic buffers.
+ */
+export function getAllRebuildProgress(): Array<RebuildProgress & { userId: string }> {
+  return [...progressMap().entries()]
+    .map(([userId, p]) => ({ userId, ...p }))
+    .sort((a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt));
+}
+
 // Parallel in-flight guard for the DEK-free CASH rebuild. Separate from the
 // investment set so a long investment rebuild doesn't block a cash self-heal
 // (and vice-versa); shared by the rebuild endpoint, the cron, and the
@@ -157,6 +171,11 @@ export function endCashRebuild(userId: string): void {
 
 export function isCashRebuildInFlight(userId: string): boolean {
   return cashInFlightSet().has(userId);
+}
+
+/** Cross-user list of in-flight cash rebuilds (for the /admin/system view). */
+export function getCashRebuildsInFlight(): string[] {
+  return [...cashInFlightSet()];
 }
 
 function addDayUTC(iso: string): string {
@@ -232,7 +251,22 @@ async function deleteInvestmentOrphanSnapshots(
   `);
 }
 
-export async function rebuildPortfolioSnapshots(
+export function rebuildPortfolioSnapshots(
+  userId: string,
+  fromDate?: string | null,
+  toDate?: string | null,
+  dek?: Buffer | null,
+  onProgress?: (daysProcessed: number, totalDays: number) => void,
+): Promise<RebuildResult> {
+  // Attribute the whole walk (and every query it runs) to the
+  // 'rebuild:investment' operation so the diagnostics rollup shows how much
+  // wall-clock/CPU the net-worth rebuild consumes (the #1 background consumer).
+  return withOp("rebuild:investment", () =>
+    rebuildPortfolioSnapshotsImpl(userId, fromDate, toDate, dek, onProgress),
+  );
+}
+
+async function rebuildPortfolioSnapshotsImpl(
   userId: string,
   fromDate?: string | null,
   toDate?: string | null,
