@@ -3,7 +3,7 @@
 /**
  * Rebuild balance history button — triggers a re-materialize of the user's
  * daily `portfolio_snapshots` (investment AND cash legs) from their first
- * transaction to today. Used by the Settings → Investments card AND the
+ * transaction to today. Used by the Settings → Data card AND the
  * net-worth chart's empty-state.
  *
  * FINLYNQ-230 — the progress panel is phase-aware: the manual rebuild runs the
@@ -224,7 +224,7 @@ export function RebuildSnapshotsButton({
             <span className="text-xs font-medium text-indigo-700 dark:text-indigo-300">
               {phase === "cash"
                 ? "Rebuilding cash balances…"
-                : "Rebuilding investment history…"}
+                : "Rebuilding balance history…"}
             </span>
             <span className="text-[11px] tabular-nums text-indigo-600/80 dark:text-indigo-400/80">
               {indeterminate

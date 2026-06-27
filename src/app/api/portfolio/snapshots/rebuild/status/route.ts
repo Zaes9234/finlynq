@@ -1,10 +1,10 @@
 /**
  * GET /api/portfolio/snapshots/rebuild/status
  *
- * Reports the caller's current/last "Rebuild investment history" run from the
+ * Reports the caller's current/last "Rebuild balance history" run from the
  * HMR-safe `globalThis` rebuild registry (FINLYNQ-205). The manual rebuild route
  * runs the day-by-day walk fire-and-forget and reports per-day progress here;
- * the "Rebuild investment history" button (Settings → Investments + the
+ * the "Rebuild balance history" button (Settings → Data + the
  * net-worth chart empty-state) polls this so:
  *   - a reload mid-rebuild still shows the in-progress state (the registry is
  *     server-side, not local component state), and

@@ -43,14 +43,16 @@ import {
   ToggleLeft,
   ToggleRight,
   FileSpreadsheet,
+  EyeOff,
+  ChevronRight,
 } from "lucide-react";
+import Link from "next/link";
 import { TemplateManager } from "@/app/(app)/import/components/template-manager";
 import { ConnectorTab } from "@/app/(app)/import/components/connector-tab";
 import { MoneyProConnectorTab } from "@/app/(app)/import/components/moneypro-connector-tab";
 import { GenericCsvConnectorTab } from "@/app/(app)/import/components/generic-csv-connector-tab";
 import { InvestmentStatementImporter } from "@/app/(app)/import/components/investment-statement-importer";
 import { EmailRulesManager } from "@/components/inbox/email-rules-manager";
-import { ReconcileHideAccountsCard } from "@/components/inbox/reconcile-hide-accounts-card";
 import type { ImportTemplate } from "@/lib/import-templates";
 
 type ImportProvider = "wealthposition" | "moneypro" | "generic-csv";
@@ -73,6 +75,9 @@ export default function ImportSettingsPage() {
   // override on the upload drawer (the "Don't ask again" checkbox) wins.
   const [confirmCsvMapping, setConfirmCsvMapping] = useState(true);
   const [confirmCsvLoading, setConfirmCsvLoading] = useState(false);
+
+  // FINLYNQ-241 — count of hidden accounts, shown on the entry-point card.
+  const [hiddenAccountCount, setHiddenAccountCount] = useState<number | null>(null);
 
   // FINLYNQ-138 — per-user imported-email retention window (days). Governs how
   // long raw forwarded emails (email_inbox) are kept before the cleanup sweep
@@ -138,6 +143,16 @@ export default function ImportSettingsPage() {
           setRetentionDays(data.retentionDays);
         }
         if (Array.isArray(data.options)) setRetentionOptions(data.options);
+      })
+      .catch(() => {});
+
+    // FINLYNQ-241 — load the hidden-account count for the entry-point card.
+    fetch("/api/settings/reconcile-hidden-accounts")
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data.accountIds)) {
+          setHiddenAccountCount(data.accountIds.length);
+        }
       })
       .catch(() => {});
   }, []);
@@ -279,8 +294,42 @@ export default function ImportSettingsPage() {
         </CardContent>
       </Card>
 
-      {/* FINLYNQ-147 — hide accounts from the /import reconcile dropdown. */}
-      <ReconcileHideAccountsCard />
+      {/* FINLYNQ-147 / FINLYNQ-241 — hide accounts from the /import reconcile
+          dropdown. The full list lives on a subpage to keep this page compact. */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-100 text-amber-600">
+              <EyeOff className="h-5 w-5" />
+            </div>
+            <div>
+              <CardTitle className="text-base">Reconcile dropdown visibility</CardTitle>
+              <CardDescription>
+                Choose which accounts appear in the account picker on the{" "}
+                <Link href="/import" className="underline hover:text-foreground">
+                  Import
+                </Link>{" "}
+                page. Hidden accounts stay fully accessible via direct links.
+              </CardDescription>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <Link
+            href="/settings/import/reconcile-visibility"
+            className="inline-flex items-center gap-2 rounded-md border border-input bg-background px-3 py-2 text-sm font-medium shadow-sm hover:bg-accent hover:text-accent-foreground transition-colors"
+          >
+            <EyeOff className="h-4 w-4 text-muted-foreground" />
+            Manage account visibility
+            {hiddenAccountCount !== null && hiddenAccountCount > 0 && (
+              <span className="ml-1 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                {hiddenAccountCount} hidden
+              </span>
+            )}
+            <ChevronRight className="h-4 w-4 text-muted-foreground ml-auto" />
+          </Link>
+        </CardContent>
+      </Card>
 
       <Tabs value={tab} onValueChange={(v) => setTab(v ?? "templates")}>
         <TabsList>
