@@ -35,32 +35,32 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
   const [detail, setDetail] = useState<AccountDetailRow | null>(null);
   const [working, setWorking] = useState(false);
 
-  useEffect(() => {
-    (async () => {
-      setLoading(true);
-      try {
-        const res = await endpoints.getTransactions(
-          `accountId=${account.accountId}&limit=50&sort=date&sortDir=desc`
-        );
-        if (res.success) {
-          setTransactions(res.data);
-          setError(null);
-        } else {
-          logger.warn("account-detail", "transactions fetch failed", { error: res.error });
-          setError(res.error);
-        }
-      } catch (e) {
-        const detail = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
-        logger.error("account-detail", "fetch threw", { detail });
-        setError("Cannot connect to server");
-      } finally {
-        setLoading(false);
+  // Extracted so we can call it on focus (re-sync after an edit in TransactionDetail).
+  const fetchTransactions = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await endpoints.getTransactions(
+        `accountId=${account.accountId}&limit=50&sort=date&sortDir=desc`
+      );
+      if (res.success) {
+        setTransactions(res.data);
+        setError(null);
+      } else {
+        logger.warn("account-detail", "transactions fetch failed", { error: res.error });
+        setError(res.error);
       }
-    })();
+    } catch (e) {
+      const d = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+      logger.error("account-detail", "fetch threw", { detail: d });
+      setError("Cannot connect to server");
+    } finally {
+      setLoading(false);
+    }
   }, [account.accountId]);
 
   // Load (and re-load on focus, so an edit/mode change is reflected on return)
-  // the full account row for the manage footer.
+  // the full account row for the manage footer, and re-sync the transaction list
+  // so edits made in TransactionDetail are visible immediately on return.
   const loadDetail = useCallback(async () => {
     const res = await endpoints.getAccountsDetailed();
     if (res.success) {
@@ -71,8 +71,11 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
   }, [account.accountId]);
 
   useEffect(() => {
-    if (isFocused) loadDetail();
-  }, [isFocused, loadDetail]);
+    if (isFocused) {
+      fetchTransactions();
+      loadDetail();
+    }
+  }, [isFocused, fetchTransactions, loadDetail]);
 
   // Big number = the account's NATIVE balance (matches the accounts list).
   const currency = account.currency;
@@ -244,24 +247,50 @@ export default function AccountDetailScreen({ route, navigation }: Props) {
           </View>
         }
         renderItem={({ item }) => (
-          <View style={[styles.txRow, { borderBottomColor: colors.border }]}>
-            <View style={styles.txLeft}>
-              <Text style={[styles.txPayee, { color: colors.foreground }]} numberOfLines={1}>
-                {safeName(item.payee || item.note, "Transaction")}
-              </Text>
-              <Text style={[styles.txDate, { color: colors.mutedForeground }]}>
-                {formatShortDate(item.date)}
+          <TouchableOpacity
+            activeOpacity={0.7}
+            onPress={() => navigation.navigate("TransactionDetail", { transaction: item })}
+            onLongPress={() => {
+              Alert.alert(
+                safeName(item.payee || item.note, "Transaction"),
+                formatCurrency(item.amount, item.currency),
+                [
+                  {
+                    text: "Edit",
+                    onPress: () =>
+                      navigation.navigate("TransactionDetail", { transaction: item }),
+                  },
+                  { text: "Cancel", style: "cancel" },
+                ]
+              );
+            }}
+          >
+            <View style={[styles.txRow, { borderBottomColor: colors.border }]}>
+              <View style={styles.txLeft}>
+                <Text style={[styles.txPayee, { color: colors.foreground }]} numberOfLines={1}>
+                  {safeName(item.payee || item.note, "Transaction")}
+                </Text>
+                <Text style={[styles.txDate, { color: colors.mutedForeground }]}>
+                  {formatShortDate(item.date)}
+                </Text>
+              </View>
+              <Text
+                style={[
+                  styles.txAmount,
+                  {
+                    color:
+                      item.amount > 0
+                        ? colors.pos
+                        : item.amount < 0
+                          ? colors.neg
+                          : colors.foreground,
+                  },
+                ]}
+              >
+                {formatCurrency(item.amount, item.currency)}
               </Text>
             </View>
-            <Text
-              style={[
-                styles.txAmount,
-                { color: item.amount > 0 ? colors.pos : item.amount < 0 ? colors.neg : colors.foreground },
-              ]}
-            >
-              {formatCurrency(item.amount, item.currency)}
-            </Text>
-          </View>
+          </TouchableOpacity>
         )}
         ListEmptyComponent={
           loading ? (

@@ -4,7 +4,10 @@ import AccountsScreen from "../screens/AccountsScreen";
 import AccountDetailScreen from "../screens/AccountDetailScreen";
 import AddAccountScreen from "../screens/AddAccountScreen";
 import AddTransactionScreen from "../screens/AddTransactionScreen";
-import type { AccountBalance, AccountDetailRow } from "../../../shared/types";
+// TransactionDetailScreen's Props are typed against TransactionsStackParamList;
+// cast to ComponentType to mount it in this stack without duplicating its type.
+import TransactionDetailScreen from "../screens/TransactionDetailScreen";
+import type { AccountBalance, AccountDetailRow, Transaction } from "../../../shared/types";
 
 export type AccountsStackParamList = {
   AccountsList: undefined;
@@ -15,6 +18,8 @@ export type AccountsStackParamList = {
     mode?: "expense" | "income" | "transfer";
     preselectedAccountId?: number;
   };
+  // Transaction view/edit screen reused from the Transactions tab.
+  TransactionDetail: { transaction: Transaction };
 };
 
 const Stack = createNativeStackNavigator<AccountsStackParamList>();
@@ -33,6 +38,11 @@ export default function AccountsStack() {
         name="AddTransaction"
         component={AddTransactionScreen}
         options={{ presentation: "modal" }}
+      />
+      <Stack.Screen
+        name="TransactionDetail"
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        component={TransactionDetailScreen as React.ComponentType<any>}
       />
     </Stack.Navigator>
   );
