@@ -15,6 +15,7 @@ import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import { cashLegSkipSql, dividendAttributionHoldingIdSql } from "@/lib/portfolio/aggregation-predicates";
 import { aggregateMovers } from "@/lib/portfolio/top-movers";
 import { todayISO } from "@/lib/utils/date";
+import { round2 } from "@/lib/utils/number";
 import { withOp } from "@/lib/diagnostics/op-context";
 
 export function GET(request: NextRequest) {
@@ -154,6 +155,22 @@ async function handleGet(request: NextRequest) {
   const fxRates = new Map<string, number>();
   for (const cur of currencies) {
     fxRates.set(cur, await getRate(cur, displayCurrency, todayDate, userId));
+  }
+
+  // FINLYNQ-246: prior-trading-day rates (one calendar day back) for every
+  // currency / metal symbol above, used to derive a DAY CHANGE for metals
+  // (GC=F/SI=F/PL=F/PA=F front-month futures move daily) and foreign-currency
+  // cash (the FX rate moves vs the display currency). getRate() at a past date
+  // routes through fetchYahooMetalRateToUsd / the <CCY>USD=X chart, which bias
+  // the lookup window backwards so a weekend/holiday resolves to the prior
+  // trading day's close. Same-currency cash has rate 1 today and 1 prior, so
+  // its day change stays 0 → "--" (correct), never fabricated.
+  const prevDate = new Date(`${todayDate}T00:00:00Z`);
+  prevDate.setUTCDate(prevDate.getUTCDate() - 1);
+  const prevDateISO = prevDate.toISOString().split("T")[0];
+  const prevFxRates = new Map<string, number>();
+  for (const cur of currencies) {
+    prevFxRates.set(cur, await getRate(cur, displayCurrency, prevDateISO, userId));
   }
 
   // Cross-currency-cost-basis cache: rate(entered_currency â†’ holding_currency,
@@ -576,6 +593,10 @@ async function handleGet(request: NextRequest) {
     let price: number | null = null;
     let change: number | null = null;
     let changePct: number | null = null;
+    // FINLYNQ-246: explicit display-currency day change for foreign cash, whose
+    // day change is an FX-rate move (no native per-unit change). Set in the cash
+    // branch and used to override the change×qty formula below; null otherwise.
+    let cashFxDayChangeDisplay: number | null = null;
     let quoteCurrency: string | null = null;
     let marketCap: number | null = null;
     let image: string | null = null;
@@ -659,6 +680,21 @@ async function handleGet(request: NextRequest) {
           quoteCurrency = h.currency;
           marketValue = quantity * priceInHoldingCcy; // in h.currency
           marketValueDisplay = quantity * symInDisplay; // in displayCurrency
+          // FINLYNQ-246: metals DO have a daily move — derive the per-unit day
+          // change in the holding's own currency from the prior-trading-day
+          // cross-rate (price_cache / fetchYahooMetalRateToUsd, one day back).
+          // change/changePct are in quoteCurrency (= h.currency), so the
+          // existing dayChangeDisplay formula (change × qty, FX-converted) and
+          // the native rollup both pick them up correctly.
+          const symInDisplayPrev = prevFxRates.get(symU) ?? 0;
+          const ccInDisplayPrev = prevFxRates.get(h.currency) ?? 0;
+          if (symInDisplayPrev > 0 && ccInDisplayPrev > 0) {
+            const priceInHoldingCcyPrev = symInDisplayPrev / ccInDisplayPrev;
+            if (priceInHoldingCcyPrev > 0) {
+              change = priceInHoldingCcy - priceInHoldingCcyPrev;
+              changePct = Math.round((change / priceInHoldingCcyPrev) * 100 * 100) / 100;
+            }
+          }
         }
       } else {
         const cashCurrency = symbolIsCurrency ? h.symbol!.toUpperCase() : h.currency;
@@ -667,6 +703,19 @@ async function handleGet(request: NextRequest) {
         quoteCurrency = cashCurrency;
         marketValue = quantity; // in cashCurrency
         marketValueDisplay = quantity * fxRate; // in displayCurrency despite the legacy field name
+        // FINLYNQ-246: foreign-currency cash has a DISPLAY-currency day change
+        // driven purely by the FX rate's day move vs the display currency
+        // (1 USD is still 1 USD natively, so the NATIVE change is genuinely 0 —
+        // keep `change` 0 so the native rollup shows 0, never a fake FX figure).
+        // The display contribution is set EXPLICITLY below as dayChangeDisplay;
+        // same-currency cash (rate 1 today and prior) stays 0 → "--".
+        if (cashCurrency !== displayCurrency.toUpperCase()) {
+          const prevRate = prevFxRates.get(cashCurrency) ?? 0;
+          if (prevRate > 0 && fxRate > 0) {
+            changePct = Math.round(((fxRate - prevRate) / prevRate) * 100 * 100) / 100;
+            cashFxDayChangeDisplay = round2(quantity * (fxRate - prevRate));
+          }
+        }
       }
     }
 
@@ -695,9 +744,15 @@ async function handleGet(request: NextRequest) {
     // to summary.dayChangeDisplay (change-per-unit × qty, FX-converted). Null
     // when there's no live change to show (mirrors the holdingsWithChange
     // filter used for the portfolio total below).
-    const dayChangeDisplay = changePct !== null && marketValueDisplay !== null
-      ? Math.round(convertCurrency((change ?? 0) * (quantity ?? 1), fxRate) * 100) / 100
-      : null;
+    // FINLYNQ-246: foreign-currency cash carries its display day change in
+    // cashFxDayChangeDisplay (FX-rate move × qty) since its NATIVE change is 0;
+    // metals/equities/crypto use the change-per-unit × qty path. Same-currency
+    // cash leaves both null → "--".
+    const dayChangeDisplay = cashFxDayChangeDisplay !== null
+      ? cashFxDayChangeDisplay
+      : changePct !== null && marketValueDisplay !== null
+        ? Math.round(convertCurrency((change ?? 0) * (quantity ?? 1), fxRate) * 100) / 100
+        : null;
 
     return {
       id: h.id,
@@ -781,13 +836,16 @@ async function handleGet(request: NextRequest) {
   const totalValueDisplay = enrichedHoldings.reduce((s, h) => s + (h.marketValueDisplay ?? 0), 0);
   const hasQuantityData = enrichedHoldings.some(h => h.quantity !== null && h.quantity !== 0);
 
-  // Day change: weighted sum of changePct across holdings with known values
-  const holdingsWithChange = enrichedHoldings.filter(h => h.changePct !== null && h.marketValueDisplay !== null);
-  const totalDayChangeDisplay = holdingsWithChange.reduce((s, h) => {
-    const fxRate = fxRates.get(h.quoteCurrency ?? h.currency) ?? 1;
-    const changeAmt = (h.change ?? 0) * (h.quantity ?? 1);
-    return s + convertCurrency(changeAmt, fxRate);
-  }, 0);
+  // Day change: sum the per-holding display-currency day-change contributions.
+  // FINLYNQ-246: sum the already-computed per-row `dayChangeDisplay` (the single
+  // source of truth) instead of re-deriving change×qty here. For equities/crypto
+  // this is byte-identical to the old formula (dayChangeDisplay == the old
+  // summand), but it ALSO folds in metals (real per-unit move) and
+  // foreign-currency cash (FX-rate move, whose native change is 0), so the tile
+  // reconciles exactly with the All-Holdings Day G/L column. Same-currency cash
+  // stays null and contributes nothing.
+  const holdingsWithChange = enrichedHoldings.filter(h => h.dayChangeDisplay !== null && h.marketValueDisplay !== null);
+  const totalDayChangeDisplay = holdingsWithChange.reduce((s, h) => s + (h.dayChangeDisplay ?? 0), 0);
   const totalDayChangePct = totalValueDisplay > 0
     ? (totalDayChangeDisplay / (totalValueDisplay - totalDayChangeDisplay)) * 100
     : 0;
@@ -1037,11 +1095,13 @@ async function handleGet(request: NextRequest) {
   // (canonical security key) BEFORE the top-5 slice — a ticker held across N
   // accounts must surface once. The consolidated day-change $ is the sum across
   // accounts; the % is a value-weighted aggregate (Σ day-change ÷ Σ prior-day
-  // value), NOT one account's percent. Cash/metals/custom (no symbol) stay
-  // excluded by aggregateMovers. Rank by absolute display-currency day-change
-  // (tie-break: symbol asc), then cap at 5 — AFTER aggregation.
+  // value), NOT one account's percent. Custom (no symbol) rows stay excluded by
+  // aggregateMovers; cash sleeves are filtered out here (FINLYNQ-246 gave
+  // foreign-currency cash a day change, but an FX-rate wiggle on "Cash USD" is
+  // not an investment "mover"). Metals (XAU/…) DO surface as real movers. Rank
+  // by absolute display-currency day-change (tie-break: symbol asc), cap at 5.
   const aggregatedMovers = aggregateMovers(
-    enrichedHoldings,
+    enrichedHoldings.filter(h => h.assetType !== "cash"),
     moverBucketKey,
     // FINLYNQ-194: the canonical row's display name comes from the security
     // table when resolvable (read-flip on + backfilled), else the legacy
