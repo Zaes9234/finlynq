@@ -31,7 +31,19 @@ import {
   type OverviewData,
 } from "../_types";
 
-type SortField = "name" | "marketValueDisplay" | "unrealizedGainPct";
+type SortField =
+  | "name"
+  | "totalQty"
+  | "avgCost"
+  | "price"
+  | "marketValueDisplay"
+  | "totalCost"
+  | "dayChangeDisplay"
+  | "dayChangePct"
+  | "unrealizedGainDisplay"
+  | "unrealizedGainPct"
+  | "realizedGain"
+  | "accounts";
 
 // Hoisted to module scope so it isn't re-created on every HoldingsTable render
 // (react-hooks/static-components, FINLYNQ-119). The active sort state is passed
@@ -164,23 +176,43 @@ export function HoldingsTable({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="cursor-pointer select-none w-8" />
-                <TableHead className="cursor-pointer select-none" onClick={() => handleSort("name")}>
+                <TableHead className="w-8" />
+                <TableHead className="cursor-pointer select-none" aria-sort={sortField === "name" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("name")}>
                   Holding <SortIcon field="name" sortField={sortField} sortDir={sortDir} />
                 </TableHead>
-                <TableHead className="text-right">Total Qty</TableHead>
-                <TableHead className="text-right">Avg Cost</TableHead>
-                <TableHead className="text-right">Price</TableHead>
-                <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("marketValueDisplay")}>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "totalQty" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("totalQty")}>
+                  Total Qty <SortIcon field="totalQty" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "avgCost" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("avgCost")}>
+                  Avg Cost <SortIcon field="avgCost" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "price" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("price")}>
+                  Price <SortIcon field="price" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "marketValueDisplay" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("marketValueDisplay")}>
                   Mkt Value <SortIcon field="marketValueDisplay" sortField={sortField} sortDir={sortDir} />
                 </TableHead>
-                <TableHead className="text-right">Total Cost</TableHead>
-                <TableHead className="text-right">Day G/L</TableHead>
-                <TableHead className="text-right cursor-pointer select-none" onClick={() => handleSort("unrealizedGainPct")}>
-                  Unrealized G/L <SortIcon field="unrealizedGainPct" sortField={sortField} sortDir={sortDir} />
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "totalCost" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("totalCost")}>
+                  Total Cost <SortIcon field="totalCost" sortField={sortField} sortDir={sortDir} />
                 </TableHead>
-                <TableHead className="text-right">Realized G/L</TableHead>
-                <TableHead className="text-right">Accounts</TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "dayChangeDisplay" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("dayChangeDisplay")}>
+                  Day G/L $ <SortIcon field="dayChangeDisplay" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "dayChangePct" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("dayChangePct")}>
+                  Day % <SortIcon field="dayChangePct" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "unrealizedGainDisplay" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("unrealizedGainDisplay")}>
+                  Unreal G/L $ <SortIcon field="unrealizedGainDisplay" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "unrealizedGainPct" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("unrealizedGainPct")}>
+                  Unreal % <SortIcon field="unrealizedGainPct" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "realizedGain" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("realizedGain")}>
+                  Realized G/L <SortIcon field="realizedGain" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
+                <TableHead className="text-right cursor-pointer select-none" aria-sort={sortField === "accounts" ? (sortDir === "asc" ? "ascending" : "descending") : "none"} onClick={() => handleSort("accounts")}>
+                  Accounts <SortIcon field="accounts" sortField={sortField} sortDir={sortDir} />
+                </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -287,24 +319,35 @@ export function HoldingsTable({
                       <TableCell className="text-right font-mono text-sm">
                         {totalCost !== 0 ? formatCurrency(totalCost, ccy) : <span className="text-muted-foreground text-xs">--</span>}
                       </TableCell>
-                      <TableCell className="text-right font-mono text-sm whitespace-nowrap">
+                      {/* Day G/L $ — split from % (FINLYNQ-245) */}
+                      <TableCell className="text-right font-mono text-sm">
                         {dayAmt != null ? (
                           <span className={`${dayAmt >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
                             {dayAmt >= 0 ? "+" : ""}{formatCurrency(dayAmt, ccy)}
-                            {r.dayChangePct != null && (
-                              <span className="ml-1 text-xs">({r.dayChangePct >= 0 ? "+" : ""}{r.dayChangePct.toFixed(2)}%)</span>
-                            )}
                           </span>
                         ) : <span className="text-muted-foreground text-xs">--</span>}
                       </TableCell>
-                      <TableCell className="text-right font-mono text-sm whitespace-nowrap">
-                        {/* Value + % on one line (compresses the row height). */}
+                      {/* Day % — separate sortable column (FINLYNQ-245) */}
+                      <TableCell className="text-right font-mono text-sm">
+                        {r.dayChangePct != null ? (
+                          <span className={`${r.dayChangePct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                            {r.dayChangePct >= 0 ? "+" : ""}{r.dayChangePct.toFixed(2)}%
+                          </span>
+                        ) : <span className="text-muted-foreground text-xs">--</span>}
+                      </TableCell>
+                      {/* Unrealized G/L $ — split from % (FINLYNQ-245) */}
+                      <TableCell className="text-right font-mono text-sm">
                         <span className={`font-medium ${unreal >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
                           {unreal >= 0 ? "+" : ""}{formatCurrency(unreal, ccy)}
-                          {r.unrealizedGainPct != null && (
-                            <span className="ml-1 text-xs">({r.unrealizedGainPct >= 0 ? "+" : ""}{r.unrealizedGainPct.toFixed(2)}%)</span>
-                          )}
                         </span>
+                      </TableCell>
+                      {/* Unrealized % — separate sortable column (FINLYNQ-245) */}
+                      <TableCell className="text-right font-mono text-sm">
+                        {r.unrealizedGainPct != null ? (
+                          <span className={`font-medium ${r.unrealizedGainPct >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}`}>
+                            {r.unrealizedGainPct >= 0 ? "+" : ""}{r.unrealizedGainPct.toFixed(2)}%
+                          </span>
+                        ) : <span className="text-muted-foreground text-xs">--</span>}
                       </TableCell>
                       <TableCell className="text-right font-mono text-sm">
                         {realized !== 0 ? (
@@ -322,7 +365,7 @@ export function HoldingsTable({
                     {isExpanded && (
                       <TableRow key={`${r.key}-detail`} className="bg-muted/10 border-0">
                         <TableCell />
-                        <TableCell colSpan={10} className="py-3">
+                        <TableCell colSpan={12} className="py-3">
                           {/* Aggregate-level info grid (shared across the
                               accounts inside this canonical position). */}
                           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 text-xs">
@@ -488,7 +531,7 @@ export function HoldingsTable({
               })}
               {filteredHoldings.length === 0 && (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center text-muted-foreground py-8">
+                  <TableCell colSpan={13} className="text-center text-muted-foreground py-8">
                     No {filter === "all" ? "" : ASSET_TYPE_CONFIG[filter]?.label} holdings found.
                     {hideEmpty && data.holdings.length > 0 && (
                       <span className="block mt-1 text-xs">
