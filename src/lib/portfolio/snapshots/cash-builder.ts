@@ -145,6 +145,43 @@ async function deleteOrphanCashSnapshots(
   `);
 }
 
+/**
+ * Reap stale LEADING `source='cash'` rows — rows dated BEFORE an account's OWN
+ * earliest cash transaction while that account still has activity (FINLYNQ-233).
+ *
+ * `deleteOrphanCashSnapshots` only reaps accounts that vanished from `byAccount`
+ * entirely; an account that still has a transaction kept its pre-first-tx rows
+ * forever. When an opening balance is back-dated (bulk import) and later
+ * corrected, every rebuild only ever rewrites `earliestDelta → today` (the walk
+ * `start` clamps UP to the account's earliest tx), leaving the old leading tail
+ * at its stale value — which `buildNetWorthHistory` carries forward, drawing a
+ * flat line years before the first real tx.
+ *
+ * `earliestByAccount` maps each account currently in scope to its own earliest
+ * delta date; this pass deletes every cash row for that account dated strictly
+ * before it. Owner- + (when set) account-scoped; never touches investment
+ * (`source <> 'cash'`) rows.
+ */
+async function deleteLeadingCashSnapshots(
+  userId: string,
+  earliestByAccount: Map<number, string>,
+  accountId?: number,
+): Promise<void> {
+  if (earliestByAccount.size === 0) return;
+  const accountScope = accountId != null ? sql` AND account_id = ${accountId}` : sql``;
+  const perAccount = sql.join(
+    [...earliestByAccount.entries()].map(
+      ([id, earliest]) => sql`(account_id = ${id} AND snap_date < ${earliest})`,
+    ),
+    sql` OR `,
+  );
+  await db.execute(sql`
+    DELETE FROM portfolio_snapshots
+    WHERE user_id = ${userId} AND source = 'cash' AND account_id IS NOT NULL${accountScope}
+      AND (${perAccount})
+  `);
+}
+
 export async function buildCashSnapshots(
   input: BuildCashSnapshotsInput,
 ): Promise<BuildCashSnapshotsResult> {
@@ -163,7 +200,7 @@ export async function buildCashSnapshots(
   // earliest cash-tx date so the walk never writes leading zero rows.
   const byAccount = new Map<
     number,
-    { currency: string; days: Array<{ date: string; delta: number }> }
+    { currency: string; days: Array<{ date: string; delta: number }>; earliest: string }
   >();
   let earliestDelta: string | null = null;
   for (const d of deltas) {
@@ -172,10 +209,11 @@ export async function buildCashSnapshots(
     if (excluded.has(accId)) continue;
     let entry = byAccount.get(accId);
     if (!entry) {
-      entry = { currency: String(d.currency).toUpperCase(), days: [] };
+      entry = { currency: String(d.currency).toUpperCase(), days: [], earliest: d.date };
       byAccount.set(accId, entry);
     }
     entry.days.push({ date: d.date, delta: Number(d.delta) });
+    if (d.date < entry.earliest) entry.earliest = d.date; // per-account first tx
     if (earliestDelta == null || d.date < earliestDelta) earliestDelta = d.date;
   }
 
@@ -190,6 +228,23 @@ export async function buildCashSnapshots(
   if (byAccount.size === 0 || earliestDelta == null) {
     return { accountsProcessed: 0, rowsWritten: 0, gapsFilled: false };
   }
+
+  // Per-account effective earliest (floored to EARLIEST_CASH_DATE) — the first
+  // grid day this account may carry a row. Used to (a) reap stale leading rows
+  // dated before it and (b) skip writing leading rows in the walk for accounts
+  // whose first tx is after the global start (FINLYNQ-233).
+  const earliestByAccount = new Map<number, string>();
+  for (const [accId, entry] of byAccount) {
+    const e = entry.earliest < EARLIEST_CASH_DATE ? EARLIEST_CASH_DATE : entry.earliest;
+    entry.earliest = e;
+    earliestByAccount.set(accId, e);
+  }
+
+  // Authoritative LEADING reap: drop any cash row dated before an account's own
+  // earliest tx (the case deleteOrphanCashSnapshots can't see — the account
+  // still has activity). Runs on every rebuild so a back-dated-then-corrected
+  // opening balance self-heals on the next chart load.
+  await deleteLeadingCashSnapshots(userId, earliestByAccount, accountId);
 
   // Resolve the effective start: caller window (or full history), floored to
   // EARLIEST_CASH_DATE, then clamped UP to the earliest cash tx (no leading
@@ -256,11 +311,15 @@ export async function buildCashSnapshots(
   let rowsWritten = 0;
 
   // Progress reporting (FINLYNQ-230) — reporting-only, does not touch any value
-  // written below. The denominator is grid-days × accounts so the bar advances
-  // monotonically across the whole walk; publish the total up front (mirrors the
+  // written below. The denominator is the count of grid-days actually WRITTEN
+  // (skipping each account's leading days before its own earliest tx, FINLYNQ-233)
+  // so the bar still reaches 100%; publish the total up front (mirrors the
   // investment leg's leading emit) so the button shows a determinate "day 0 of N"
   // immediately instead of sitting on "starting…" through the first cold-cache day.
-  const totalCashDays = gridDates.length * byAccount.size;
+  let totalCashDays = 0;
+  for (const entry of byAccount.values()) {
+    for (const day of gridDates) if (day >= entry.earliest) totalCashDays++;
+  }
   let cashDaysDone = 0;
   input.onProgress?.(0, totalCashDays);
 
@@ -282,6 +341,11 @@ export async function buildCashSnapshots(
         running += entry.days[ptr].delta;
         ptr++;
       }
+      // Skip writing leading rows for an account whose first tx is after the
+      // global walk start — no row before this account's own earliest tx so the
+      // chart doesn't draw a flat line back to the global earliest (FINLYNQ-233).
+      // (The delta fold above still runs to keep `running` correct.)
+      if (day < entry.earliest) continue;
       const { rate, fellBack } = await fx(entry.currency, reporting, day);
       const mv = running * rate;
       // Verbatim UPSERT shape from builder.ts (COALESCE conflict target — the
