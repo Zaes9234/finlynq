@@ -22,6 +22,7 @@ import type { TxRowForLots } from "@/lib/portfolio/lots/types";
 import { db, schema } from "@/db";
 import { and, eq, inArray } from "drizzle-orm";
 import { markSnapshotsDirty } from "@/lib/portfolio/snapshots/dirty";
+import { markCashSnapshotsDirty } from "@/lib/portfolio/snapshots/cash-dirty";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { isSortableColumnId } from "@/lib/transactions/columns";
@@ -557,9 +558,14 @@ export async function POST(request: NextRequest) {
       const ctx = await buildLotContext(auth.userId, auth.dek);
       await applyLotEffectsForTx(tx as TxRowForLots, ctx);
     }
-    // Snapshot history is stale from this date forward for investment rows.
+    // Snapshot history is stale from this date forward. Investment rows stamp
+    // the per-user investment marker; cash rows stamp the per-account cash
+    // marker so the chart-load cash self-heal rebuilds ONLY this account from
+    // this date forward (not full history across every cash account).
     if (tx && tx.portfolioHoldingId != null) {
       await markSnapshotsDirty(auth.userId, tx.date);
+    } else if (tx && tx.accountId != null) {
+      await markCashSnapshotsDirty(auth.userId, tx.accountId, tx.date);
     }
     return NextResponse.json(
       signWarn ? { ...tx, warning: signWarn.message } : tx,
@@ -687,6 +693,36 @@ export async function PUT(request: NextRequest) {
         }
       }
     }
+    // Capture the PRE-EDIT position so a date-moved-later or cross-account edit
+    // dirties the OLD (account, date) too — otherwise stamping only the new date
+    // misses the day the row LEFT. LEAST coalescing makes double-stamping safe.
+    let preEditCash: { accountId: number; date: string } | null = null;
+    let preEditInvestmentDate: string | null = null;
+    try {
+      const before = await db
+        .select({
+          accountId: schema.transactions.accountId,
+          date: schema.transactions.date,
+          portfolioHoldingId: schema.transactions.portfolioHoldingId,
+        })
+        .from(schema.transactions)
+        .where(
+          and(
+            eq(schema.transactions.id, id),
+            eq(schema.transactions.userId, auth.userId),
+          ),
+        )
+        .get();
+      if (before) {
+        if (before.portfolioHoldingId != null) {
+          preEditInvestmentDate = before.date;
+        } else if (before.accountId != null) {
+          preEditCash = { accountId: before.accountId, date: before.date };
+        }
+      }
+    } catch {
+      /* best-effort — never block the edit */
+    }
     const encrypted = encryptTxWrite(auth.dek, data);
     const tx = await updateTransaction(id, auth.userId, encrypted, auth.dek);
     invalidateUserTxCache(auth.userId);
@@ -712,10 +748,20 @@ export async function PUT(request: NextRequest) {
         await applyLotEffectsForTx(tx as TxRowForLots, ctx);
       }
     }
-    // Snapshot history is stale from this date forward for investment rows
-    // (a back-dated edit can move the affected date earlier than today).
+    // Snapshot history is stale from this date forward (a back-dated edit can
+    // move the affected date earlier than today). Stamp the NEW position's
+    // marker, plus the PRE-EDIT position's marker so a date/account move dirties
+    // both ends. Investment → per-user marker; cash → per-account marker.
     if (tx && tx.portfolioHoldingId != null) {
       await markSnapshotsDirty(auth.userId, tx.date);
+    } else if (tx && tx.accountId != null) {
+      await markCashSnapshotsDirty(auth.userId, tx.accountId, tx.date);
+    }
+    if (preEditInvestmentDate) {
+      await markSnapshotsDirty(auth.userId, preEditInvestmentDate);
+    }
+    if (preEditCash) {
+      await markCashSnapshotsDirty(auth.userId, preEditCash.accountId, preEditCash.date);
     }
     return NextResponse.json(
       signWarn ? { ...tx, warning: signWarn.message } : tx,
@@ -781,10 +827,14 @@ export async function DELETE(request: NextRequest) {
   // holding, capture the earliest affected date BEFORE the rows are gone so we
   // can mark snapshots dirty after the commit. Best-effort.
   let snapshotDirtyFrom: string | null = null;
+  // Per-cash-account earliest deleted date → stamp the cash dirty marker so the
+  // chart-load self-heal rebuilds only the affected account(s) from that date.
+  const cashDirtyByAccount = new Map<number, string>();
   try {
     const delRows = await db
       .select({
         date: schema.transactions.date,
+        accountId: schema.transactions.accountId,
         portfolioHoldingId: schema.transactions.portfolioHoldingId,
       })
       .from(schema.transactions)
@@ -792,6 +842,9 @@ export async function DELETE(request: NextRequest) {
     for (const r of delRows) {
       if (r.portfolioHoldingId != null) {
         if (snapshotDirtyFrom == null || r.date < snapshotDirtyFrom) snapshotDirtyFrom = r.date;
+      } else if (r.accountId != null) {
+        const cur = cashDirtyByAccount.get(r.accountId);
+        if (cur == null || r.date < cur) cashDirtyByAccount.set(r.accountId, r.date);
       }
     }
   } catch {
@@ -900,6 +953,9 @@ export async function DELETE(request: NextRequest) {
     }
     invalidateUserTxCache(userId);
     if (snapshotDirtyFrom) await markSnapshotsDirty(userId, snapshotDirtyFrom);
+    for (const [accId, date] of cashDirtyByAccount) {
+      await markCashSnapshotsDirty(userId, accId, date);
+    }
     return NextResponse.json({
       success: true,
       deletedIds: allIds,
@@ -920,6 +976,9 @@ export async function DELETE(request: NextRequest) {
   }
   invalidateUserTxCache(userId);
   if (snapshotDirtyFrom) await markSnapshotsDirty(userId, snapshotDirtyFrom);
+  for (const [accId, date] of cashDirtyByAccount) {
+    await markCashSnapshotsDirty(userId, accId, date);
+  }
   return NextResponse.json({
     success: true,
     deletedIds: allIds,

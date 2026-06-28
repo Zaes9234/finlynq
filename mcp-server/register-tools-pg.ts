@@ -73,6 +73,7 @@ import {
   getUserTransactions,
 } from "../src/lib/mcp/user-tx-cache";
 import { markSnapshotsDirty } from "../src/lib/portfolio/snapshots/dirty";
+import { markCashSnapshotsDirty } from "../src/lib/portfolio/snapshots/cash-dirty";
 import {
   applyLotEffectsForTx,
   buildLotContext,
@@ -3203,9 +3204,13 @@ export function registerPgTools(
         };
         await applyLotEffectsForTx(lotTx, lotCtx);
       }
-      // Snapshot history is stale from this date forward for investment rows.
+      // Snapshot history is stale from this date forward. Investment rows stamp
+      // the per-user marker; a cash row stamps the per-account cash marker so the
+      // chart-load cash self-heal rebuilds only this account from this date.
       if (resolvedHoldingId != null) {
         await markSnapshotsDirty(userId, txDate);
+      } else {
+        await markCashSnapshotsDirty(userId, Number(acct.id), txDate);
       }
       return text({
         success: true,
@@ -4236,6 +4241,18 @@ export function registerPgTools(
       }
 
       if (!result.ok) return err(result.message);
+
+      // Snapshot history is stale from `date` forward for both legs. An in-kind
+      // (investment) transfer stamps the per-user investment marker; a plain
+      // cash transfer stamps the per-account cash marker for BOTH accounts so
+      // the chart-load cash self-heal rebuilds only those accounts from `date`.
+      const stampDate = date ?? new Date().toISOString().slice(0, 10);
+      if (result.holding) {
+        await markSnapshotsDirty(userId, stampDate);
+      } else {
+        await markCashSnapshotsDirty(userId, Number(fromAcct.id), stampDate);
+        await markCashSnapshotsDirty(userId, Number(toAcct.id), stampDate);
+      }
 
       const inKindNote = result.holding
         ? (() => {

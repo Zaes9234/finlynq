@@ -1952,6 +1952,27 @@ export const portfolioSnapshotDirty = pgTable("portfolio_snapshot_dirty", {
   markedAt: timestamp("marked_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+// ─── portfolio_cash_snapshot_dirty — per-account cash auto-rebuild queue (2026-06-28)
+//
+// The cash twin of portfolio_snapshot_dirty, but keyed PER ACCOUNT. Every
+// cash-affecting tx write stamps the impacted (account, earliest-date) here
+// (markCashSnapshotsDirty) co-located with invalidateUser; the chart-load cash
+// self-heal rebuilds ONLY that account from `from_date` forward instead of the
+// previous full-history walk across every cash account. `from_date` is the
+// earliest affected date, coalesced via LEAST on conflict. The per-user cash
+// fingerprint (portfolio_cash_snapshot_meta) stays the robustness trigger: a
+// stale fingerprint with no dirty row falls back to a full rebuild.
+export const portfolioCashSnapshotDirty = pgTable(
+  "portfolio_cash_snapshot_dirty",
+  {
+    userId: text("user_id").notNull(),
+    accountId: integer("account_id").notNull(),
+    fromDate: text("from_date").notNull(),
+    markedAt: timestamp("marked_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.accountId] })],
+);
+
 // ─── reporting_recompute_status — currency-switch recompute progress (2026-06-06)
 //
 // Phase 3 of the currency rework. When a user switches their display/reporting

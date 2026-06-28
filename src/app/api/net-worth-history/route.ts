@@ -45,8 +45,19 @@ import {
   endCashRebuild,
 } from "@/lib/portfolio/snapshots/rebuild";
 import { rebuildCashSnapshots } from "@/lib/portfolio/snapshots/cash-builder";
-import { getCashSnapshotMeta, isCashStale } from "@/lib/portfolio/snapshots/cash-meta";
+import {
+  getCashSnapshotMeta,
+  isCashStale,
+  upsertCashSnapshotMeta,
+  type CashSnapshotMeta,
+  type CashTxFingerprint,
+} from "@/lib/portfolio/snapshots/cash-meta";
 import { listDirtySnapshotUsers, clearDirtyIfUnchanged } from "@/lib/portfolio/snapshots/dirty";
+import {
+  listCashDirtyAccounts,
+  clearCashDirtyIfUnchanged,
+  type CashDirtyRow,
+} from "@/lib/portfolio/snapshots/cash-dirty";
 import { withOp } from "@/lib/diagnostics/op-context";
 
 /**
@@ -103,7 +114,13 @@ function kickSelfHeal(
  * current response uses existing snapshots and the NEXT load reflects the
  * rebuild. plan/net-worth-cash-snapshots.md Phase 4.
  */
-function kickCashSelfHeal(userId: string, today: string): void {
+function kickCashSelfHeal(
+  userId: string,
+  today: string,
+  dirtyRows: CashDirtyRow[],
+  meta: CashSnapshotMeta | null,
+  live: CashTxFingerprint,
+): void {
   if (!tryBeginCashRebuild(userId)) return; // a cash rebuild is already running
   // Seed the SHARED progress registry (best-effort) so the "Rebuild balance
   // history" button shows a determinate cash bar while this background heal runs
@@ -116,20 +133,74 @@ function kickCashSelfHeal(userId: string, today: string): void {
   let cashDaysDone = 0;
   void (async () => {
     try {
-      // Full history + stamp the watermark fresh (it captures the fingerprint
-      // BEFORE building, so a mid-build write re-trips stale on the next load).
-      await rebuildCashSnapshots({
-        userId,
-        fromDate: null,
-        toDate: today,
-        stampMeta: true,
-        onProgress: ownsRegistry
-          ? (done, total) => {
-              cashDaysDone = done;
-              reportRebuildProgress(userId, done, total, "cash");
-            }
-          : undefined,
-      });
+      if (dirtyRows.length > 0) {
+        // ── FAST PATH — per-account scoped partial rebuild ──────────────────
+        // A transaction was booked/edited/deleted in one or more accounts; the
+        // dirty marker recorded the earliest impacted (account, date). Rebuild
+        // ONLY those accounts from their own from_date forward instead of a
+        // full-history walk across every cash account. `buildNetWorthHistory`
+        // carries forward sibling accounts' last snapshot + live-overrides
+        // today, so leaving them untouched is chart-correct.
+        //
+        // Stamp the per-user watermark fresh from `live` (captured in the
+        // handler BEFORE this build), so a write arriving mid-build leaves
+        // meta < live and re-trips on the next load — same safety the
+        // stampMeta path has. RESIDUAL: if a stamped change and an UNSTAMPED
+        // path's change (import/reconcile/backfill — see plan) land in the same
+        // un-built window, the unstamped account is missed until the nightly
+        // cron's 90-day all-account refresh corrects it; pure-unstamped changes
+        // (no dirty row) fall through to the full-rebuild fallback below.
+        const totalAccounts = dirtyRows.length;
+        let accountsDone = 0;
+        if (ownsRegistry) reportRebuildProgress(userId, 0, totalAccounts, "cash");
+        for (const row of dirtyRows) {
+          await rebuildCashSnapshots({
+            userId,
+            accountId: row.accountId,
+            fromDate: row.fromDate,
+            toDate: today,
+            stampMeta: false, // stamped once below for the whole user
+          });
+          accountsDone++;
+          cashDaysDone = accountsDone;
+          if (ownsRegistry) {
+            // Coarse progress (account X of Y) — fast path is typically a few
+            // days, so a per-day bar isn't worth the cross-account bookkeeping.
+            reportRebuildProgress(userId, accountsDone, totalAccounts, "cash");
+          }
+        }
+        await upsertCashSnapshotMeta(userId, live, today);
+        // Clear only the rows we consumed; a write arriving mid-build bumped
+        // marked_at and survives (re-drained next load) — no lost edits.
+        for (const row of dirtyRows) {
+          await clearCashDirtyIfUnchanged(userId, row.accountId, row.markedAt);
+        }
+      } else {
+        // ── FALLBACK — no dirty markers ────────────────────────────────────
+        // Robust path for an unstamped mutation (import/reconcile/backfill) or
+        // a pure new-day roll-forward. Scope to [builtThrough, today] when the
+        // fingerprint CONTENT is unchanged (only the day rolled over); else a
+        // full-history rebuild (never built, or an unstamped content change of
+        // unknown earliest date).
+        const liveMax = live.maxUpdated ? live.maxUpdated.getTime() : 0;
+        const metaMax = meta?.txMaxUpdated ? meta.txMaxUpdated.getTime() : 0;
+        const contentUnchanged =
+          meta != null && meta.txCount === live.count && liveMax <= metaMax;
+        const fromDate =
+          contentUnchanged && meta?.builtThrough ? meta.builtThrough : null;
+        await rebuildCashSnapshots({
+          userId,
+          fromDate,
+          toDate: today,
+          stampMeta: true, // captures the fingerprint BEFORE building (re-trip safe)
+          onProgress: ownsRegistry
+            ? (done, total) => {
+                cashDaysDone = done;
+                reportRebuildProgress(userId, done, total, "cash");
+              }
+            : undefined,
+        });
+      }
       if (ownsRegistry) {
         endRebuild(userId, {
           result: { fromDate: today, toDate: today, daysProcessed: cashDaysDone, gapsFilledDays: 0 },
@@ -330,7 +401,16 @@ async function handleGet(request: NextRequest) {
       const cashMeta = await getCashSnapshotMeta(userId);
       const hasCashOrphans = cashFp.count === 0 && cashSnapshots.length > 0;
       if (isCashStale(cashFp, cashMeta, today) || hasCashOrphans) {
-        kickCashSelfHeal(userId, today);
+        // Per-account dirty markers (the impacted account + earliest date) drive
+        // a scoped rebuild; their absence falls back to the full/windowed path.
+        // An orphan reap (count 0 but stale rows) has no markers → fallback.
+        let cashDirty: CashDirtyRow[] = [];
+        try {
+          cashDirty = hasCashOrphans ? [] : await listCashDirtyAccounts(userId);
+        } catch {
+          /* dirty lookup is best-effort — fall back to full rebuild */
+        }
+        kickCashSelfHeal(userId, today, cashDirty, cashMeta, cashFp);
       }
     } catch {
       /* cash staleness check is best-effort */
