@@ -138,6 +138,10 @@ const emptyForm = {
   group: "Checking",
   currency: "CAD",
   initialBalance: "0",
+  // FINLYNQ-206 — opening-balance date (seeded to today when the dialog opens).
+  // A back-dated opening balance keeps Net Worth / Balance-Over-Time history
+  // starting from the right point instead of spiking on today.
+  initialBalanceDate: "",
   note: "",
   alias: "",
 };
@@ -258,21 +262,18 @@ export default function AccountsPage() {
         return;
       }
 
-      // If initial balance is non-zero, create an opening balance transaction
+      // If initial balance is non-zero, set the account's opening balance
+      // (FINLYNQ-206) — backed by ONE kind='opening_balance' transaction with
+      // a partial-unique guarantee, dated as chosen (defaults to today).
       const initialBalance = parseFloat(form.initialBalance);
       if (!isNaN(initialBalance) && initialBalance !== 0) {
         const account = await res.json();
-        await fetch("/api/transactions", {
-          method: "POST",
+        await fetch(`/api/accounts/${account.id}/opening-balance`, {
+          method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            date: todayISO(),
-            accountId: account.id,
-            categoryId: 1,
-            currency: form.currency,
             amount: initialBalance,
-            payee: "Opening Balance",
-            note: "Initial account balance",
+            date: form.initialBalanceDate || todayISO(),
           }),
         });
       }
@@ -585,6 +586,21 @@ export default function AccountsPage() {
               />
             </div>
           </div>
+
+          {/* Opening-balance date (FINLYNQ-206) — only relevant when a non-zero
+              initial balance is set. Defaults to today; back-date it to the
+              account's open date so balance history starts correctly. */}
+          {Number.isFinite(parseFloat(form.initialBalance)) &&
+            parseFloat(form.initialBalance) !== 0 && (
+            <div className="space-y-1.5">
+              <Label>Opening balance date</Label>
+              <Input
+                type="date"
+                value={form.initialBalanceDate || todayISO()}
+                onChange={(e) => setForm({ ...form, initialBalanceDate: e.target.value })}
+              />
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
