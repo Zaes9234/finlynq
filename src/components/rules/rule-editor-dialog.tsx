@@ -153,6 +153,45 @@ export function blankAction(): Action {
   return defaultActionForKind("set_category", 0);
 }
 
+/**
+ * Strip op-irrelevant + placeholder-zero FK fields from a
+ * `record_investment_op` action before submit (FINLYNQ-208 fix).
+ *
+ * The op `Select` keeps the action's shape across op switches (e.g. selecting
+ * Deposit reveals the Bank-account picker, which seeds `counterpartyAccountId`,
+ * then switching back to Buy hides it again). The hidden field's value lingers,
+ * and a `0` (the editor's "unset" sentinel from `parseInt(v ?? "0")`) is a
+ * *present* value, so the server's `z.number().int().positive().optional()`
+ * rejects it with the cryptic "Too small: expected number to be >0" instead of
+ * the friendly per-op validator ever running. Drop any optional FK that the
+ * current op can't use, or that is non-positive, so the wire payload matches
+ * exactly the fields the op needs.
+ */
+function sanitizeActionForSubmit(action: Action): Action {
+  if (action.kind !== "record_investment_op") return action;
+  const a = { ...action };
+  const isCashOnAccount = a.op === "deposit" || a.op === "withdrawal";
+  const isIncome = a.op === "dividend" || a.op === "interest" || a.op === "fee";
+  const canSettleAsShares = a.op === "dividend" || a.op === "interest";
+  // Counterparty only applies to deposit/withdrawal.
+  if (!isCashOnAccount || !a.counterpartyAccountId || a.counterpartyAccountId <= 0) {
+    delete a.counterpartyAccountId;
+  }
+  // Explicit holding is dropped when resolving from the row ticker or when unset.
+  if (a.useRowTicker || !a.holdingId || a.holdingId <= 0) {
+    delete a.holdingId;
+  }
+  // Explicit category only applies to the income/cash ops.
+  if (!isIncome || !a.categoryId || a.categoryId <= 0) {
+    delete a.categoryId;
+  }
+  // Shares settle mode only applies to dividend/interest income.
+  if (!canSettleAsShares) {
+    delete a.settleAs;
+  }
+  return a;
+}
+
 export function RuleEditorDialog({
   rule,
   initialName,
@@ -215,7 +254,7 @@ export function RuleEditorDialog({
       const result = await onSubmit({
         name: name.trim(),
         conditions: { all: conditions },
-        actions,
+        actions: actions.map(sanitizeActionForSubmit),
         priority,
         isActive,
       });
@@ -702,9 +741,17 @@ function InvestmentOpFields({
         <Select
           value={op}
           onValueChange={(v) =>
-            // Switching op resets the settle mode to cash (shares only applies
-            // to dividend/interest); the user re-opts into shares below.
-            onChange({ op: (v ?? "buy"), settleAs: undefined } as Partial<Action>)
+            // Switching op resets op-specific fields so a hidden picker's stale
+            // value can't leak into the payload: settle mode (shares only
+            // applies to dividend/interest), the deposit/withdrawal counterparty,
+            // and the income category all clear here. The user re-fills whatever
+            // the new op surfaces below.
+            onChange({
+              op: (v ?? "buy"),
+              settleAs: undefined,
+              counterpartyAccountId: undefined,
+              categoryId: undefined,
+            } as Partial<Action>)
           }
         >
           <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
