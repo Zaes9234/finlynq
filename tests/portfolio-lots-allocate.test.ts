@@ -83,21 +83,37 @@ describe("planHoldingAllocation", () => {
     expect(r.errorCode).toBe("lot_not_eligible");
   });
 
-  it("depletes chronologically — a later sale overflows to a short", () => {
-    const early: AllocSell = { closeTxId: 1, closeDate: "2023-11-07", proceedsPerShare: 101.56, qty: 7.37, currency: "USD" };
-    const late: AllocSell = { closeTxId: 2, closeDate: "2026-04-09", proceedsPerShare: 125.3, qty: 7.37, currency: "USD" };
+  it("allows splitting a lot across sales up to its available qty", () => {
+    const early: AllocSell = { closeTxId: 1, closeDate: "2023-11-07", proceedsPerShare: 101.56, qty: 5, currency: "USD" };
+    const late: AllocSell = { closeTxId: 2, closeDate: "2026-04-09", proceedsPerShare: 125.3, qty: 2.37, currency: "USD" };
     const r = planHoldingAllocation({
       lots: [lots[0]], // only lot 2008 (7.37 available)
       sells: [early, late],
       spec: {
-        1: [{ lotId: 2008, qty: 7.37 }], // early sale consumes it fully
-        2: [{ lotId: 2008, qty: 7.37 }], // late sale finds it empty → short
+        1: [{ lotId: 2008, qty: 5 }],
+        2: [{ lotId: 2008, qty: 2.37 }], // 5 + 2.37 == 7.37 available
       },
     });
     expect(r.ok).toBe(true);
-    expect(r.openedShorts).toHaveLength(1);
-    expect(r.openedShorts[0].closeTxId).toBe(2);
-    expect(r.openedShorts[0].qty).toBeCloseTo(7.37, 4);
+    expect(r.openedShorts).toHaveLength(0);
+    expect(r.totals.openShares).toBeCloseTo(0, 6);
+  });
+
+  it("rejects over-allocating a long lot beyond its available qty (lot_overallocated)", () => {
+    const early: AllocSell = { closeTxId: 1, closeDate: "2023-11-07", proceedsPerShare: 101.56, qty: 7.37, currency: "USD" };
+    const late: AllocSell = { closeTxId: 2, closeDate: "2026-04-09", proceedsPerShare: 125.3, qty: 7.37, currency: "USD" };
+    const r = planHoldingAllocation({
+      lots: [lots[0]], // 7.37 available
+      sells: [early, late],
+      // lot 2008 allocated to BOTH sales = 14.74 > 7.37 available → error
+      // (the late sale's short belongs in the explicit SHORT_LOT_ID row).
+      spec: {
+        1: [{ lotId: 2008, qty: 7.37 }],
+        2: [{ lotId: 2008, qty: 7.37 }],
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.errorCode).toBe("lot_overallocated");
   });
 
   it("opens a short for an explicit SHORT_LOT_ID entry with no error", () => {

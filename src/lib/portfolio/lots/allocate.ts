@@ -81,6 +81,7 @@ export type AllocErrorCode =
   | "qty_mismatch"
   | "lot_not_in_scope"
   | "lot_not_eligible"
+  | "lot_overallocated"
   | "negative_qty";
 
 export interface AllocPlan {
@@ -122,6 +123,30 @@ export function planHoldingAllocation(
 
   const lotById = new Map(input.lots.map((l) => [l.id, l]));
   const remaining = new Map(input.lots.map((l) => [l.id, l.available]));
+
+  // Per-lot over-allocation guard. A long lot's TOTAL allocation across every
+  // sell must not exceed its available capacity — over-filling a long lot is
+  // an error, not a silent partial-close + short (intentional shorts go
+  // through the explicit SHORT_LOT_ID row). Without this the per-sell
+  // chronological cap would quietly route the overflow into a short and the
+  // sell would still "balance".
+  const requestedByLot = new Map<number, number>();
+  for (const sell of input.sells) {
+    for (const e of input.spec[sell.closeTxId] ?? []) {
+      if (e.lotId > SHORT_LOT_ID && e.qty > EPS) {
+        requestedByLot.set(e.lotId, (requestedByLot.get(e.lotId) ?? 0) + e.qty);
+      }
+    }
+  }
+  for (const [lotId, req] of requestedByLot) {
+    const lot = lotById.get(lotId);
+    if (lot && req > lot.available + EPS) {
+      setErr(
+        "lot_overallocated",
+        `Lot #${lotId}: allocated ${round(req)} sh exceeds its available ${round(lot.available)} sh.`,
+      );
+    }
+  }
 
   const closures: AllocClosure[] = [];
   const openedShorts: AllocPlan["openedShorts"] = [];

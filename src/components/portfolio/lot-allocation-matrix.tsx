@@ -229,6 +229,26 @@ export function LotAllocationMatrix({
 
   const shortRowActive = useMemo(() => sells.some((s) => num(`${s.closeTxId}_${SHORT_LOT_ID}`) > EPS) || plan.openedShorts.length > 0, [sells, alloc, plan]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Per-lot row totals (across ALL sells, not just the visible/filtered ones —
+  // this is the quantity the per-lot over-allocation guard validates, so it
+  // must surface even when a sell is filtered out of view).
+  const lotAllocated = useMemo(() => {
+    const m = new Map<number, number>();
+    for (const lot of longLots) {
+      let sum = 0;
+      for (const s of sells) sum += num(`${s.closeTxId}_${lot.id}`);
+      m.set(lot.id, sum);
+    }
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [longLots, sells, alloc]);
+  const shortAllocated = useMemo(() => {
+    let sum = 0;
+    for (const s of sells) sum += num(`${s.closeTxId}_${SHORT_LOT_ID}`);
+    return sum;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sells, alloc]);
+
   if (sells.length === 0) {
     return (
       <div className="space-y-3">
@@ -241,7 +261,7 @@ export function LotAllocationMatrix({
   const cur = sells[0].currency;
   const thBase = "px-2 py-1.5 text-right font-medium align-bottom whitespace-nowrap";
   const tdBase = "px-2 py-1 text-right align-top whitespace-nowrap";
-  const inputCls = "h-6 w-16 px-1.5 text-right text-[11px] tabular-nums";
+  const inputCls = "h-6 w-[58px] px-1 text-right text-[10px] tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none";
 
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-2.5">
@@ -295,20 +315,31 @@ export function LotAllocationMatrix({
           : plan.errors[0]}
       </div>
 
-      {/* Scrollable grid — sticky header row + sticky lot column */}
+      <div className="shrink-0 text-[11px] text-muted-foreground">
+        Each <span className="font-medium text-foreground">row is a buy lot</span> (a purchase) · each <span className="font-medium text-foreground">column is a sell</span>. A cell = shares of that lot the sale closes; the <span className="text-rose-600 dark:text-rose-400">Open short</span> row holds any remainder.
+      </div>
+
+      {/* Scrollable grid — sticky header row + sticky lot column + sticky total column */}
       <div className="flex-1 min-h-0 overflow-auto rounded-md border border-border">
         <table className="text-[11px] border-collapse">
           <thead>
             <tr>
-              <th className={`${thBase} text-left sticky left-0 top-0 z-20 bg-muted min-w-[148px]`}>Lot</th>
+              <th className={`${thBase} text-left sticky left-0 top-0 z-20 bg-muted min-w-[150px]`}>
+                <div className="text-foreground">Buy lots <span className="font-normal text-muted-foreground">↓</span></div>
+                <div className="font-normal text-muted-foreground">sells →</div>
+              </th>
               {visibleSells.map((s) => (
                 <th key={s.closeTxId} className={`${thBase} sticky top-0 z-10 bg-muted border-b-2 border-primary/40 min-w-[92px]`}>
-                  <div className="font-medium text-foreground">#{s.closeTxId}</div>
+                  <div className="font-medium text-foreground">Sell #{s.closeTxId}</div>
                   <div className="font-normal text-muted-foreground">{s.closeDate}</div>
                   <div className="font-normal text-muted-foreground">@{formatCurrency(s.proceedsPerShare, s.currency)}</div>
                   <div className="font-normal text-muted-foreground/80">need {qf(s.qty)}</div>
                 </th>
               ))}
+              <th className={`${thBase} sticky right-0 top-0 z-20 bg-muted border-l border-border min-w-[92px]`}>
+                <div className="text-foreground">Lot total</div>
+                <div className="font-normal text-muted-foreground">alloc / avail</div>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -340,6 +371,17 @@ export function LotAllocationMatrix({
                     </td>
                   );
                 })}
+                {(() => {
+                  const used = lotAllocated.get(lot.id) ?? 0;
+                  const avail = availableByLot.get(lot.id) ?? 0;
+                  const over = used > avail + EPS;
+                  return (
+                    <td className={`${tdBase} sticky right-0 z-10 bg-background border-l border-border tabular-nums ${over ? "text-rose-600 dark:text-rose-400 font-medium" : used > EPS ? "text-foreground" : "text-muted-foreground"}`}
+                      title={over ? `Over-allocated: ${qf(used)} sh assigned but the lot only has ${qf(avail)} sh.` : undefined}>
+                      {qf(used)} / {qf(avail)}
+                    </td>
+                  );
+                })()}
               </tr>
             ))}
             {shortRowActive && (
@@ -357,12 +399,15 @@ export function LotAllocationMatrix({
                     </td>
                   );
                 })}
+                <td className={`${tdBase} sticky right-0 z-10 bg-background border-l border-border tabular-nums text-rose-600 dark:text-rose-400`}>
+                  {qf(shortAllocated)}
+                </td>
               </tr>
             )}
           </tbody>
           <tfoot>
             <tr className="font-medium">
-              <td className={`${tdBase} text-left sticky left-0 bottom-0 z-10 bg-muted`}>Allocated / needed</td>
+              <td className={`${tdBase} text-left sticky left-0 bottom-0 z-20 bg-muted`}>Allocated / needed</td>
               {visibleSells.map((s) => {
                 let sum = num(`${s.closeTxId}_${SHORT_LOT_ID}`);
                 for (const lot of longLots) sum += num(`${s.closeTxId}_${lot.id}`);
@@ -373,6 +418,16 @@ export function LotAllocationMatrix({
                   </td>
                 );
               })}
+              {(() => {
+                let used = 0, avail = 0;
+                for (const lot of longLots) { used += lotAllocated.get(lot.id) ?? 0; avail += availableByLot.get(lot.id) ?? 0; }
+                const over = used > avail + EPS;
+                return (
+                  <td className={`${tdBase} sticky right-0 bottom-0 z-20 bg-muted border-l border-border tabular-nums ${over ? "text-rose-600 dark:text-rose-400" : "text-foreground"}`}>
+                    {qf(used)} / {qf(avail)}
+                  </td>
+                );
+              })()}
             </tr>
           </tfoot>
         </table>
