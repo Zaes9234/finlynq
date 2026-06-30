@@ -5,14 +5,8 @@ import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { useDropdownOrder } from "@/components/dropdown-order-provider";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { formatCurrency } from "@/lib/currency";
-import { todayISO } from "@/lib/utils/date";
 import { useDisplayCurrency } from "@/components/currency-provider";
 import { OnboardingTips } from "@/components/onboarding-tips";
 import { EmptyState } from "@/components/empty-state";
@@ -24,9 +18,8 @@ import {
   type AccountGroupOrder,
   type AccountGroupType,
 } from "@/lib/accounts/groups";
-import { GroupField } from "./_components/group-field";
 import { ManageGroupsDialog } from "./_components/manage-groups-dialog";
-import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
+import { AccountDialog } from "./_components/account-dialog";
 import {
   TrendingUp,
   TrendingDown,
@@ -34,10 +27,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Plus,
-  Pencil,
   Archive,
-  ArchiveRestore,
-  Trash2,
   FolderCog,
 } from "lucide-react";
 
@@ -132,62 +122,19 @@ function SummarySkeleton() {
   );
 }
 
-const emptyForm = {
-  name: "",
-  type: "A",
-  group: "Checking",
-  currency: "CAD",
-  initialBalance: "0",
-  // FINLYNQ-206 — opening-balance date (seeded to today when the dialog opens).
-  // A back-dated opening balance keeps Net Worth / Balance-Over-Time history
-  // starting from the right point instead of spiking on today.
-  initialBalanceDate: "",
-  note: "",
-  alias: "",
-  // FINLYNQ — whether the new account is an investment/brokerage account.
-  // When true, Initial Balance is hidden (opening balance is cash-only v1) and
-  // the API backfills a Cash holding so the is_investment constraint holds.
-  isInvestment: false,
-};
-
 export default function AccountsPage() {
   const { displayCurrency } = useDisplayCurrency();
   const [accounts, setAccounts] = useState<AccountBalance[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
-  // Create account dialog
+  // Create account dialog — the form + save flow live in the shared
+  // <AccountDialog> (FINLYNQ-206 follow-up); this page only owns open state.
+  // Editing an account lives on its detail page (/accounts/[id]).
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [form, setForm] = useState(emptyForm);
-  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState("");
-
-  // Edit account dialog
-  const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [editAccountId, setEditAccountId] = useState<number | null>(null);
-  const [editAccountArchived, setEditAccountArchived] = useState(false);
-  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "CAD", note: "", alias: "", isInvestment: false, openingBalanceAmount: "", openingBalanceDate: "" });
-  const [editFormErrors, setEditFormErrors] = useState<Record<string, string>>({});
-  const [editSaving, setEditSaving] = useState(false);
-  const [editSaveError, setEditSaveError] = useState("");
-  // FINLYNQ-206 — opening balance currently backing this (cash) account, loaded
-  // from its single kind='opening_balance' transaction. null = none yet.
-  const [editObOriginal, setEditObOriginal] = useState<{ amount: number; date: string } | null>(null);
-  const [archiving, setArchiving] = useState(false);
-  const [deleting, setDeleting] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Show-archived toggle (persists archived accounts in the list with a badge)
   const [showArchived, setShowArchived] = useState(false);
-
-  const sortCurrency = useDropdownOrder("currency");
-  // Currency dropdown options: built-in fiat UNION the user's active currencies
-  // (Settings → "Currencies you use"), so custom/regional/metal codes appear.
-  // `ensure` keeps the form's current value present even if it's not active
-  // (e.g. editing an account already denominated in a now-deselected currency).
-  const createCurrencyOptions = useActiveCurrencies(form.currency);
-  const editCurrencyOptions = useActiveCurrencies(editForm.currency);
   // FINLYNQ-148: the Settings → Dropdown Ordering "account" list is the user's
   // configured account sort order. The /accounts list must honour it (it was
   // ignoring the setting and rendering in raw API order). Pinned accounts lead
@@ -231,209 +178,6 @@ export default function AccountsPage() {
   }
 
   useEffect(() => { loadAccounts(showArchived);   }, [showArchived, displayCurrency]);
-
-  function resetForm() {
-    setForm(emptyForm);
-    setFormErrors({});
-    setSaveError("");
-  }
-
-  async function handleCreate(e: React.FormEvent) {
-    e.preventDefault();
-    const errs: Record<string, string> = {};
-    if (!form.name.trim()) errs.name = "Name is required";
-    if (!form.type) errs.type = "Type is required";
-    if (!form.group.trim()) errs.group = "Group is required";
-    setFormErrors(errs);
-    if (Object.keys(errs).length > 0) return;
-
-    setSaving(true);
-    setSaveError("");
-    try {
-      const res = await fetch("/api/accounts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: form.name.trim(),
-          type: form.type,
-          group: form.group.trim(),
-          currency: form.currency,
-          note: form.note.trim(),
-          alias: form.alias.trim() || undefined,
-          isInvestment: form.isInvestment,
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        setSaveError(data.error ?? "Failed to create account");
-        setSaving(false);
-        return;
-      }
-
-      // If initial balance is non-zero, set the account's opening balance
-      // (FINLYNQ-206) — backed by ONE kind='opening_balance' transaction with
-      // a partial-unique guarantee, dated as chosen (defaults to today).
-      // Skipped for investment accounts (opening balance is cash-only in v1).
-      const initialBalance = parseFloat(form.initialBalance);
-      if (!form.isInvestment && !isNaN(initialBalance) && initialBalance !== 0) {
-        const account = await res.json();
-        await fetch(`/api/accounts/${account.id}/opening-balance`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            amount: initialBalance,
-            date: form.initialBalanceDate || todayISO(),
-          }),
-        });
-      }
-
-      setDialogOpen(false);
-      resetForm();
-      loadAccounts();
-    } catch {
-      setSaveError("Failed to create account");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function openEditDialog(a: AccountBalance) {
-    setEditAccountId(a.accountId);
-    setEditAccountArchived(Boolean(a.archived));
-    setEditForm({ name: a.accountName, type: a.accountType, group: a.accountGroup || "", currency: a.currency, note: "", alias: a.alias ?? "", isInvestment: Boolean(a.isInvestment), openingBalanceAmount: "", openingBalanceDate: "" });
-    setEditObOriginal(null);
-    setEditFormErrors({});
-    setEditSaveError("");
-    setConfirmDelete(false);
-    setEditDialogOpen(true);
-    // FINLYNQ-206 — seed the opening-balance field from its backing transaction
-    // (cash accounts only; the field is hidden for investment accounts).
-    if (a.isInvestment !== true) {
-      fetch(`/api/accounts/${a.accountId}/opening-balance`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((j) => {
-          const ob: { amount: number; date: string } | null = j?.data ?? null;
-          setEditObOriginal(ob ? { amount: ob.amount, date: ob.date } : null);
-          setEditForm((f) => ({
-            ...f,
-            openingBalanceAmount: ob ? String(ob.amount) : "",
-            openingBalanceDate: ob ? ob.date : todayISO(),
-          }));
-        })
-        .catch(() => {});
-    }
-  }
-
-  async function handleToggleArchive() {
-    if (editAccountId == null) return;
-    setArchiving(true);
-    setEditSaveError("");
-    try {
-      const res = await fetch("/api/accounts", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: editAccountId, archived: !editAccountArchived }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setEditSaveError(data.error ?? "Failed to update account");
-        return;
-      }
-      setEditDialogOpen(false);
-      loadAccounts(showArchived);
-    } catch {
-      setEditSaveError("Failed to update account");
-    } finally {
-      setArchiving(false);
-    }
-  }
-
-  async function handleDelete() {
-    if (editAccountId == null) return;
-    setDeleting(true);
-    setEditSaveError("");
-    try {
-      const res = await fetch(`/api/accounts?id=${editAccountId}`, { method: "DELETE" });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        setEditSaveError(data.error ?? "Failed to delete account");
-        setConfirmDelete(false);
-        return;
-      }
-      setEditDialogOpen(false);
-      loadAccounts(showArchived);
-    } catch {
-      setEditSaveError("Failed to delete account");
-      setConfirmDelete(false);
-    } finally {
-      setDeleting(false);
-    }
-  }
-
-  async function handleEdit(e: React.FormEvent) {
-    e.preventDefault();
-    const errs: Record<string, string> = {};
-    if (!editForm.name.trim()) errs.name = "Name is required";
-    setEditFormErrors(errs);
-    if (Object.keys(errs).length > 0) return;
-
-    // Opening balance (FINLYNQ-206) — cash accounts only. Validate up front.
-    const amtStr = editForm.openingBalanceAmount.trim();
-    const newAmount: number | null = amtStr === "" ? null : Number(amtStr);
-    if (!editForm.isInvestment && amtStr !== "" && !Number.isFinite(newAmount as number)) {
-      setEditFormErrors({ openingBalance: "Opening balance must be a number" });
-      return;
-    }
-    const newDate = editForm.openingBalanceDate || todayISO();
-
-    setEditSaving(true);
-    setEditSaveError("");
-    try {
-      const res = await fetch("/api/accounts", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: editAccountId, name: editForm.name.trim(), type: editForm.type, group: editForm.group.trim(), currency: editForm.currency, note: editForm.note.trim(), alias: editForm.alias.trim() || null, isInvestment: editForm.isInvestment }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        setEditSaveError(data.error ?? "Failed to update account");
-        setEditSaving(false);
-        return;
-      }
-
-      // Persist the opening balance only when it changed (cash accounts only).
-      // A null amount with no existing row is a no-op (no row created).
-      const prevAmount = editObOriginal?.amount ?? null;
-      const obChanged =
-        newAmount !== prevAmount ||
-        (editObOriginal != null && newDate !== editObOriginal.date);
-      if (
-        !editForm.isInvestment &&
-        obChanged &&
-        !(newAmount == null && editObOriginal == null)
-      ) {
-        const obRes = await fetch(`/api/accounts/${editAccountId}/opening-balance`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amount: newAmount, date: newDate }),
-        });
-        if (!obRes.ok) {
-          const d = await obRes.json().catch(() => ({}));
-          setEditSaveError(d.error ?? "Account saved, but the opening balance failed to update");
-          setEditSaving(false);
-          loadAccounts();
-          return;
-        }
-      }
-
-      setEditDialogOpen(false);
-      loadAccounts();
-    } catch {
-      setEditSaveError("Failed to update account");
-    } finally {
-      setEditSaving(false);
-    }
-  }
 
   const assets = accounts.filter((a) => a.accountType === "A");
   const liabilities = accounts.filter((a) => a.accountType === "L");
@@ -521,20 +265,10 @@ export default function AccountsPage() {
                       {a.archived && <Badge variant="secondary" className="text-[10px] shrink-0">Archived</Badge>}
                     </div>
                   </div>
-                  <span className={`font-mono text-sm font-semibold shrink-0 ${a.balance >= 0 ? color : "text-rose-600"}`}>
+                  <span className={`font-mono text-sm font-semibold shrink-0 mr-2 ${a.balance >= 0 ? color : "text-rose-600"}`}>
                     {formatCurrency(a.balance, a.currency)}
                   </span>
                 </Link>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-7 w-7 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity mr-1"
-                  onClick={(e) => { e.preventDefault(); openEditDialog(a); }}
-                  title="Edit account"
-                  aria-label="Edit account"
-                >
-                  <Pencil className="h-3 w-3" />
-                </Button>
               </div>
             ))}
           </CardContent>
@@ -549,165 +283,24 @@ export default function AccountsPage() {
   const totalLiabilitiesConverted = activeLiabilities.reduce((s, a) => s + (a.convertedBalance ?? a.balance), 0);
 
   const createAccountDialog = (
-    <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
-      <DialogTrigger render={<Button size="sm" className="bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 shadow-sm" />}>
+    <>
+      <Button
+        size="sm"
+        className="bg-gradient-to-r from-primary to-primary/80 hover:from-primary/90 hover:to-primary/70 shadow-sm"
+        onClick={() => setDialogOpen(true)}
+      >
         <Plus className="h-4 w-4 mr-1.5" /> Create Account
-      </DialogTrigger>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Create Account</DialogTitle>
-        </DialogHeader>
-        <form onSubmit={handleCreate} className="space-y-4">
-          <div className="space-y-1.5">
-            <Label>Account Name</Label>
-            <Input
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="e.g. TD Chequing"
-              autoFocus
-            />
-            {formErrors.name && <p className="text-xs text-destructive">{formErrors.name}</p>}
-          </div>
-
-          <div className="space-y-1.5">
-            <Label>Alias <span className="text-muted-foreground text-xs">(optional)</span></Label>
-            <Input
-              value={form.alias}
-              onChange={(e) => setForm({ ...form, alias: e.target.value })}
-              placeholder="e.g. 1234 or Visa4242"
-              maxLength={64}
-            />
-            <p className="text-xs text-muted-foreground">Short nickname used when matching transactions — e.g. last 4 digits of a card, or a receipt label.</p>
-            {aliasWarning(accounts, form.alias, null) && (
-              <p className="text-xs text-amber-600">{aliasWarning(accounts, form.alias, null)}</p>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Type</Label>
-              <Select
-                items={ACCOUNT_TYPE_LABELS}
-                value={form.type}
-                onValueChange={(v) => {
-                  const t = v ?? "A";
-                  const defaultGroup = ACCOUNT_GROUPS[t]?.[0] ?? "";
-                  setForm({ ...form, type: t, group: defaultGroup });
-                }}
-              >
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {ACCOUNT_TYPES.map((t) => (
-                    <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {formErrors.type && <p className="text-xs text-destructive">{formErrors.type}</p>}
-            </div>
-
-            <div className="space-y-1.5">
-              <Label htmlFor="create-account-group">Group</Label>
-              <GroupField
-                inputId="create-account-group"
-                type={form.type}
-                value={form.group}
-                existingGroups={existingGroups}
-                onChange={(v) => setForm({ ...form, group: v })}
-              />
-              {formErrors.group && <p className="text-xs text-destructive">{formErrors.group}</p>}
-            </div>
-          </div>
-
-          <div className={`grid gap-3 ${form.isInvestment ? "grid-cols-1" : "grid-cols-2"}`}>
-            <div className="space-y-1.5">
-              <Label>Currency</Label>
-              <Combobox
-                value={form.currency}
-                onValueChange={(v) => setForm({ ...form, currency: v || "CAD" })}
-                items={sortCurrency(
-                  createCurrencyOptions.map((c): ComboboxItemShape => ({ value: c, label: c })),
-                  (c) => c.value,
-                  (a, z) => a.label.localeCompare(z.label),
-                )}
-                placeholder="CAD"
-                searchPlaceholder="Search…"
-                emptyMessage="No matches"
-                className="w-full"
-              />
-            </div>
-
-            {/* Initial Balance — cash accounts only (investment accounts start
-                from holdings; opening balance is cash-only in v1). */}
-            {!form.isInvestment && (
-              <div className="space-y-1.5">
-                <Label>Initial Balance</Label>
-                <Input
-                  type="number"
-                  step="0.01"
-                  value={form.initialBalance}
-                  onChange={(e) => setForm({ ...form, initialBalance: e.target.value })}
-                  placeholder="0.00"
-                />
-              </div>
-            )}
-          </div>
-
-          {/* Opening-balance date (FINLYNQ-206) — only relevant when a non-zero
-              initial balance is set. Defaults to today; back-date it to the
-              account's open date so balance history starts correctly. */}
-          {!form.isInvestment &&
-            Number.isFinite(parseFloat(form.initialBalance)) &&
-            parseFloat(form.initialBalance) !== 0 && (
-            <div className="space-y-1.5">
-              <Label>Opening balance date</Label>
-              <Input
-                type="date"
-                value={form.initialBalanceDate || todayISO()}
-                onChange={(e) => setForm({ ...form, initialBalanceDate: e.target.value })}
-              />
-            </div>
-          )}
-
-          <div className="space-y-1.5">
-            <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
-            <Input
-              value={form.note}
-              onChange={(e) => setForm({ ...form, note: e.target.value })}
-              placeholder="e.g. Joint account"
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="create-isInvestment"
-                checked={form.isInvestment}
-                onChange={(e) => setForm({ ...form, isInvestment: e.target.checked })}
-                className="h-4 w-4 rounded border-input"
-              />
-              <Label htmlFor="create-isInvestment" className="cursor-pointer">Investment account</Label>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              For brokerage / portfolio accounts where every transaction
-              references a holding (a security or the auto-created &quot;Cash&quot;
-              sleeve). Record trades from <code className="px-1 rounded bg-muted text-[10px]">/portfolio/new</code> instead of an initial balance.
-            </p>
-          </div>
-
-          {saveError && <p className="text-sm text-destructive">{saveError}</p>}
-
-          <div className="flex gap-2 pt-1">
-            <Button type="button" variant="outline" className="flex-1" onClick={() => setDialogOpen(false)}>
-              Cancel
-            </Button>
-            <Button type="submit" className="flex-1" disabled={saving}>
-              {saving ? "Creating…" : "Create Account"}
-            </Button>
-          </div>
-        </form>
-      </DialogContent>
-    </Dialog>
+      </Button>
+      <AccountDialog
+        mode="create"
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        defaultCurrency={displayCurrency}
+        existingGroups={existingGroups}
+        aliasWarning={(alias, excludeId) => aliasWarning(accounts, alias, excludeId)}
+        onCreated={() => loadAccounts()}
+      />
+    </>
   );
 
   if (loading) return <SummarySkeleton />;
@@ -793,191 +386,6 @@ export default function AccountsPage() {
         {renderSection("Assets", assets, "text-emerald-600", ArrowUpRight, "bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300")}
         {renderSection("Liabilities", liabilities, "text-rose-600", ArrowDownRight, "bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300")}
       </div>
-
-      {/* Edit account dialog */}
-      <Dialog open={editDialogOpen} onOpenChange={(open) => { setEditDialogOpen(open); if (!open) { setEditAccountId(null); } }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit Account</DialogTitle>
-          </DialogHeader>
-          <form onSubmit={handleEdit} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label>Account Name</Label>
-              <Input
-                value={editForm.name}
-                onChange={(e) => setEditForm({ ...editForm, name: e.target.value })}
-                autoFocus
-              />
-              {editFormErrors.name && <p className="text-xs text-destructive">{editFormErrors.name}</p>}
-            </div>
-            <div className="space-y-1.5">
-              <Label>Alias <span className="text-muted-foreground text-xs">(optional)</span></Label>
-              <Input
-                value={editForm.alias}
-                onChange={(e) => setEditForm({ ...editForm, alias: e.target.value })}
-                placeholder="e.g. 1234 or Visa4242"
-                maxLength={64}
-              />
-              <p className="text-xs text-muted-foreground">Short nickname used when matching transactions — e.g. last 4 digits of a card, or a receipt label.</p>
-              {aliasWarning(accounts, editForm.alias, editAccountId) && (
-                <p className="text-xs text-amber-600">{aliasWarning(accounts, editForm.alias, editAccountId)}</p>
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label>Type</Label>
-                <Select items={ACCOUNT_TYPE_LABELS} value={editForm.type} onValueChange={(v) => {
-                  const t = v ?? "A";
-                  const defaultGroup = ACCOUNT_GROUPS[t]?.[0] ?? "";
-                  setEditForm({ ...editForm, type: t, group: defaultGroup });
-                }}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {ACCOUNT_TYPES.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="edit-account-group">Group</Label>
-                <GroupField
-                  inputId="edit-account-group"
-                  type={editForm.type}
-                  value={editForm.group}
-                  existingGroups={existingGroups}
-                  onChange={(v) => setEditForm({ ...editForm, group: v })}
-                />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Currency</Label>
-              <Combobox
-                value={editForm.currency}
-                onValueChange={(v) => setEditForm({ ...editForm, currency: v || "CAD" })}
-                items={sortCurrency(
-                  editCurrencyOptions.map((c): ComboboxItemShape => ({ value: c, label: c })),
-                  (c) => c.value,
-                  (a, z) => a.label.localeCompare(z.label),
-                )}
-                placeholder="CAD"
-                searchPlaceholder="Search…"
-                emptyMessage="No matches"
-                className="w-full"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
-              <Input value={editForm.note} onChange={(e) => setEditForm({ ...editForm, note: e.target.value })} />
-            </div>
-
-            {/* Opening balance (FINLYNQ-206) — cash accounts only. Backed by ONE
-                kind='opening_balance' transaction; clearing zeroes it (never
-                deletes). Hidden when "Investment account" is checked. */}
-            {!editForm.isInvestment && (
-              <div className="space-y-2 rounded-lg border border-border/60 p-3">
-                <Label>Opening balance <span className="text-muted-foreground text-xs">(optional)</span></Label>
-                <p className="text-xs text-muted-foreground">
-                  A single starting-balance entry for this account. Set the date
-                  to when the account opened so Balance Over Time and Net Worth
-                  history start from the right point. Clearing the amount zeroes
-                  the entry — it is not deleted.
-                </p>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="edit-ob-amount">Amount</Label>
-                    <Input
-                      id="edit-ob-amount"
-                      type="number"
-                      step="0.01"
-                      value={editForm.openingBalanceAmount}
-                      onChange={(e) => setEditForm({ ...editForm, openingBalanceAmount: e.target.value })}
-                      placeholder="0.00"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="edit-ob-date">Date</Label>
-                    <Input
-                      id="edit-ob-date"
-                      type="date"
-                      value={editForm.openingBalanceDate}
-                      onChange={(e) => setEditForm({ ...editForm, openingBalanceDate: e.target.value })}
-                    />
-                  </div>
-                </div>
-                {editFormErrors.openingBalance && (
-                  <p className="text-xs text-destructive">{editFormErrors.openingBalance}</p>
-                )}
-              </div>
-            )}
-
-            <div className="space-y-1.5">
-              <div className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  id="isInvestment"
-                  checked={editForm.isInvestment}
-                  onChange={(e) => setEditForm({ ...editForm, isInvestment: e.target.checked })}
-                  className="h-4 w-4 rounded border-input"
-                />
-                <Label htmlFor="isInvestment" className="cursor-pointer">Investment account</Label>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                When enabled, every transaction in this account must reference a portfolio holding (a security or the auto-created &quot;Cash&quot; sleeve). Turning this on now will reassign any unattributed transactions to this account&apos;s Cash holding.
-              </p>
-            </div>
-            {editSaveError && <p className="text-sm text-destructive">{editSaveError}</p>}
-            <div className="flex gap-2 pt-1">
-              <Button type="button" variant="outline" className="flex-1" onClick={() => setEditDialogOpen(false)}>Cancel</Button>
-              <Button type="submit" className="flex-1" disabled={editSaving || archiving || deleting}>{editSaving ? "Saving…" : "Save Changes"}</Button>
-            </div>
-          </form>
-          <div className="mt-4 pt-4 border-t space-y-2">
-            <p className="text-xs uppercase tracking-wider text-muted-foreground">Account actions</p>
-            <div className="flex gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                className="flex-1"
-                onClick={handleToggleArchive}
-                disabled={archiving || editSaving || deleting}
-                title={editAccountArchived
-                  ? "Unarchive — show this account in balances and pickers again"
-                  : "Archive — hide from balances and pickers but keep history"}
-              >
-                {editAccountArchived ? (
-                  <><ArchiveRestore className="h-4 w-4 mr-1.5" />{archiving ? "Unarchiving…" : "Unarchive"}</>
-                ) : (
-                  <><Archive className="h-4 w-4 mr-1.5" />{archiving ? "Archiving…" : "Archive"}</>
-                )}
-              </Button>
-              {confirmDelete ? (
-                <Button
-                  type="button"
-                  variant="destructive"
-                  className="flex-1"
-                  onClick={handleDelete}
-                  disabled={deleting || archiving || editSaving}
-                >
-                  <Trash2 className="h-4 w-4 mr-1.5" />{deleting ? "Deleting…" : "Confirm delete"}
-                </Button>
-              ) : (
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="flex-1 text-destructive hover:text-destructive"
-                  onClick={() => setConfirmDelete(true)}
-                  disabled={deleting || archiving || editSaving}
-                  title="Permanently delete — only allowed if no transactions reference this account"
-                >
-                  <Trash2 className="h-4 w-4 mr-1.5" />Delete
-                </Button>
-              )}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Archive hides the account from balances and pickers but keeps its history. Delete is permanent and only works when no transactions reference the account.
-            </p>
-          </div>
-        </DialogContent>
-      </Dialog>
 
       {/* FINLYNQ-179 — rename / reorder / merge-into-Other account groups */}
       <ManageGroupsDialog
