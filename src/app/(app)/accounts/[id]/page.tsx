@@ -7,7 +7,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/currency";
-import { todayISO } from "@/lib/utils/date";
 import {
   ArrowLeft,
   Wallet,
@@ -24,7 +23,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { AccountDialog } from "../_components/account-dialog";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -34,13 +33,10 @@ import {
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Combobox, type ComboboxItemShape } from "@/components/ui/combobox";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { useActiveCurrencies } from "@/lib/hooks/useActiveCurrencies";
-import { GroupField } from "../_components/group-field";
 import { ModePicker } from "@/components/inbox/mode-picker";
 import { ImportPrefsPicker } from "@/components/inbox/import-prefs-picker";
 import { isMode, type Mode } from "@/components/inbox/modes";
@@ -70,6 +66,9 @@ type Account = {
   group: string;
   name: string;
   currency: string;
+  alias?: string | null;
+  note?: string | null;
+  archived?: boolean;
   isInvestment?: boolean;
   mode?: Mode;
   /** Statement-upload field-mapping prefs (2026-06-04). */
@@ -92,11 +91,6 @@ type AccountBalance = {
   holdingsValue?: number;
   holdingsCostBasis?: number;
 };
-
-const ACCOUNT_TYPES = [{ value: "A", label: "Asset" }, { value: "L", label: "Liability" }];
-const ACCOUNT_TYPE_LABELS: Record<string, string> = Object.fromEntries(
-  ACCOUNT_TYPES.map((t) => [t.value, t.label]),
-);
 
 /** Edit-dialog tab ids. `#reconciliation-mode` / `#import-prefs` deep-links
  *  map onto the reconciliation / import tabs (FINLYNQ-227). */
@@ -126,19 +120,11 @@ export default function AccountDetailPage() {
   const [cashFlowBasis, setCashFlowBasis] = useState<number | null>(null);
   const [holdingsValue, setHoldingsValue] = useState<number | null>(null);
 
-  // Edit dialog (Details / Reconciliation / Import / Cash sleeves tabs).
+  // Edit dialog (Details / Reconciliation / Import / Cash sleeves tabs). The
+  // form + save logic live in the shared <AccountDialog> (FINLYNQ-206 follow-up);
+  // this page only owns open/tab + the extra-tab content.
   const [editOpen, setEditOpen] = useState(false);
   const [editTab, setEditTab] = useState<EditTab>("details");
-  const [editForm, setEditForm] = useState({ name: "", type: "A", group: "", currency: "USD", note: "", isInvestment: false, openingBalanceAmount: "", openingBalanceDate: "" });
-  const [editSaving, setEditSaving] = useState(false);
-  const [editError, setEditError] = useState("");
-  // FINLYNQ-206 — the opening balance currently backing this (cash) account,
-  // loaded from its single kind='opening_balance' transaction. null = none yet.
-  // Used to detect a real change before issuing the opening-balance PUT.
-  const [obOriginal, setObOriginal] = useState<{ amount: number; date: string } | null>(null);
-  // Keep the form's current currency present in the dropdown even if it was
-  // later deselected under Settings → Currencies you use (#291).
-  const editCurrencyOptions = useActiveCurrencies(editForm.currency);
 
   // Generic "New transaction" dialog (normal accounts only) — embeds the shared
   // TransactionDialog seeded with this account pre-selected (FINLYNQ-227).
@@ -290,96 +276,22 @@ export default function AccountDetailPage() {
 
   function openEdit(tab: EditTab = "details") {
     if (!account) return;
-    setEditForm({ name: account.name, type: account.type, group: account.group || "", currency: account.currency, note: "", isInvestment: account.isInvestment === true, openingBalanceAmount: "", openingBalanceDate: "" });
-    setObOriginal(null);
-    setEditError("");
     setEditTab(tab);
     setEditOpen(true);
-    // FINLYNQ-206 — seed the opening-balance field from its backing
-    // transaction (cash accounts only; the field is hidden for investment).
-    if (account.isInvestment !== true) {
-      fetch(`/api/accounts/${account.id}/opening-balance`)
-        .then((r) => (r.ok ? r.json() : null))
-        .then((j) => {
-          const ob: { amount: number; date: string } | null = j?.data ?? null;
-          setObOriginal(ob ? { amount: ob.amount, date: ob.date } : null);
-          setEditForm((f) => ({
-            ...f,
-            openingBalanceAmount: ob ? String(ob.amount) : "",
-            openingBalanceDate: ob ? ob.date : todayISO(),
-          }));
-        })
-        .catch(() => {});
-    }
   }
 
-  async function handleEdit(e: React.FormEvent) {
-    e.preventDefault();
-    // Gate on the value being SAVED (editForm), so toggling the account to
-    // investment in this same submit skips the opening-balance write.
-    const isInvestmentAccount = editForm.isInvestment === true;
-
-    // Opening balance (cash accounts only). Validate before any write so a
-    // bad value doesn't half-save.
-    const amtStr = editForm.openingBalanceAmount.trim();
-    const newAmount: number | null = amtStr === "" ? null : Number(amtStr);
-    if (!isInvestmentAccount && amtStr !== "" && !Number.isFinite(newAmount as number)) {
-      setEditError("Opening balance must be a number");
-      return;
-    }
-    const newDate = editForm.openingBalanceDate || todayISO();
-
-    setEditSaving(true);
-    setEditError("");
-    try {
-      // `editForm` carries the opening-balance fields too; strip them from the
-      // account PUT (the /api/accounts route doesn't know them).
-      const { openingBalanceAmount: _a, openingBalanceDate: _d, ...accountFields } = editForm;
-      void _a; void _d;
-      const res = await fetch("/api/accounts", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: Number(id), ...accountFields }),
-      });
-      if (!res.ok) {
-        const data = await res.json();
-        setEditError(data.error ?? "Failed to update");
-        return;
-      }
-      const updated = await res.json();
-      setAccount(updated);
-
-      // Persist the opening balance only when it actually changed. A
-      // null amount with no existing row is a no-op (no row created).
-      const prevAmount = obOriginal?.amount ?? null;
-      const obChanged =
-        newAmount !== prevAmount ||
-        (obOriginal != null && newDate !== obOriginal.date);
-      if (
-        !isInvestmentAccount &&
-        obChanged &&
-        !(newAmount == null && obOriginal == null)
-      ) {
-        const obRes = await fetch(`/api/accounts/${id}/opening-balance`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ amount: newAmount, date: newDate }),
-        });
-        if (!obRes.ok) {
-          const d = await obRes.json().catch(() => ({}));
-          setEditError(d.error ?? "Account saved, but the opening balance failed to update");
-          refreshBalanceAndTxns();
-          return;
-        }
-      }
-
-      setEditOpen(false);
-      refreshBalanceAndTxns();
-    } catch {
-      setEditError("Failed to update account");
-    } finally {
-      setEditSaving(false);
-    }
+  // Re-fetch this account fresh (decrypted name/alias) after a save — avoids
+  // depending on the PUT response shape and keeps `accounts` in sync.
+  function reloadAccount() {
+    fetch("/api/accounts")
+      .then((r) => r.json())
+      .then((accts: Account[]) => {
+        if (!Array.isArray(accts)) return;
+        setAccounts(accts);
+        const found = accts.find((a) => a.id === Number(id));
+        if (found) setAccount(found);
+      })
+      .catch(() => {});
   }
 
   // Lazily fetch categories + holdings the first time the user opens the
@@ -745,262 +657,148 @@ export default function AccountDetailPage() {
         onConfirm={() => void confirmDeleteSleeve()}
       />
 
-      {/* Edit account dialog — Details / Reconciliation / Import / Cash sleeves
-          tabs (FINLYNQ-227). Widened with sm:max-w-* (never bare max-w-*) per
-          FINLYNQ-144; keeps the base phone gutter + internal scroll. */}
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="sm:max-w-xl">
-          <DialogHeader>
-            <DialogTitle>Edit Account</DialogTitle>
-          </DialogHeader>
-          <Tabs
-            value={editTab}
-            onValueChange={(v) => setEditTab((v as EditTab) ?? "details")}
-          >
-            <TabsList className="w-full">
-              <TabsTrigger value="details">Details</TabsTrigger>
-              <TabsTrigger value="reconciliation">Reconciliation</TabsTrigger>
-              <TabsTrigger value="import">Import</TabsTrigger>
-              <TabsTrigger value="sleeves">Cash sleeves</TabsTrigger>
-            </TabsList>
-
-            {/* Details */}
-            <TabsContent value="details" className="pt-4">
-              <form onSubmit={handleEdit} className="space-y-4">
-                <div className="space-y-1.5">
-                  <Label>Account Name</Label>
-                  <Input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} autoFocus />
+      {/* Edit account dialog — the shared <AccountDialog> (FINLYNQ-206
+          follow-up). Identical form to the Create dialog; only the title and
+          footer buttons differ. Reconciliation / Import / Cash sleeves are
+          edit-only extra tabs (they act on this account's id). */}
+      <AccountDialog
+        mode="edit"
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        account={account}
+        existingGroups={existingGroups}
+        initialTab={editTab}
+        onSaved={() => { reloadAccount(); refreshBalanceAndTxns(); }}
+        onRemoved={() => router.push("/accounts")}
+        extraTabs={[
+          {
+            value: "reconciliation",
+            label: "Reconciliation",
+            content: (
+              <>
+                <div className="flex items-center gap-2">
+                  <Inbox className="h-4 w-4 text-sky-600" />
+                  <h3 className="text-sm font-medium">Reconciliation mode</h3>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label>Type</Label>
-                    <Select
-                      items={ACCOUNT_TYPE_LABELS}
-                      value={editForm.type}
-                      onValueChange={(v) => setEditForm({ ...editForm, type: v ?? "A" })}
-                    >
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        {ACCOUNT_TYPES.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="edit-detail-group">Group</Label>
-                    <GroupField
-                      inputId="edit-detail-group"
-                      type={editForm.type}
-                      value={editForm.group}
-                      existingGroups={existingGroups}
-                      onChange={(v) => setEditForm({ ...editForm, group: v })}
-                    />
-                  </div>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Currency</Label>
-                  <Combobox
-                    value={editForm.currency}
-                    onValueChange={(v) => setEditForm({ ...editForm, currency: v || "USD" })}
-                    items={editCurrencyOptions.map(
-                      (c): ComboboxItemShape => ({ value: c, label: c }),
-                    )}
-                    placeholder="USD"
-                    searchPlaceholder="Search…"
-                    emptyMessage="No matches"
-                    className="w-full"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Note <span className="text-muted-foreground text-xs">(optional)</span></Label>
-                  <Input value={editForm.note} onChange={(e) => setEditForm({ ...editForm, note: e.target.value })} />
-                </div>
-
-                <div className="space-y-1.5">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      id="edit-detail-isInvestment"
-                      checked={editForm.isInvestment}
-                      onChange={(e) => setEditForm({ ...editForm, isInvestment: e.target.checked })}
-                      className="h-4 w-4 rounded border-input"
-                    />
-                    <Label htmlFor="edit-detail-isInvestment" className="cursor-pointer">Investment account</Label>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    When enabled, every transaction in this account must reference a portfolio holding (a security or the auto-created &quot;Cash&quot; sleeve). Turning this on now will reassign any unattributed transactions to this account&apos;s Cash holding.
-                  </p>
-                </div>
-
-                {/* Opening balance (FINLYNQ-206) — cash accounts only. Backed
-                    by ONE kind='opening_balance' transaction; clearing zeroes
-                    it (never deletes). Hidden for investment accounts (their
-                    balance comes from holdings; out of v1 scope). */}
-                {!editForm.isInvestment && (
-                  <div className="space-y-2 rounded-lg border border-border/60 p-3">
-                    <Label>Opening balance <span className="text-muted-foreground text-xs">(optional)</span></Label>
-                    <p className="text-xs text-muted-foreground">
-                      A single starting-balance entry for this account. Set the
-                      date to when the account opened so Balance Over Time and
-                      Net Worth history start from the right point. Clearing the
-                      amount zeroes the entry — it is not deleted.
-                    </p>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <Label htmlFor="ob-amount">Amount</Label>
-                        <Input
-                          id="ob-amount"
-                          type="number"
-                          step="0.01"
-                          value={editForm.openingBalanceAmount}
-                          onChange={(e) => setEditForm({ ...editForm, openingBalanceAmount: e.target.value })}
-                          placeholder="0.00"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label htmlFor="ob-date">Date</Label>
-                        <Input
-                          id="ob-date"
-                          type="date"
-                          value={editForm.openingBalanceDate}
-                          onChange={(e) => setEditForm({ ...editForm, openingBalanceDate: e.target.value })}
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {editError && <p className="text-sm text-destructive">{editError}</p>}
-                <div className="flex gap-2 pt-1">
-                  <Button type="button" variant="outline" className="flex-1" onClick={() => setEditOpen(false)}>Cancel</Button>
-                  <Button type="submit" className="flex-1" disabled={editSaving}>{editSaving ? "Saving…" : "Save Changes"}</Button>
-                </div>
-              </form>
-            </TabsContent>
-
-            {/* Reconciliation mode — Inbox v4 Phase 5. Persists `accounts.mode`
-                via PATCH /api/accounts/[id]/mode. The /inbox lens-chip gear
-                deep-links here via #reconciliation-mode. */}
-            <TabsContent value="reconciliation" className="pt-4 space-y-3">
-              <div className="flex items-center gap-2">
-                <Inbox className="h-4 w-4 text-sky-600" />
-                <h3 className="text-sm font-medium">Reconciliation mode</h3>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                How uploads to this account flow through the pipeline. The{" "}
-                <code className="px-1 mx-0.5 rounded bg-muted text-[10px]">/inbox</code>{" "}
-                chip is a per-render lens; this picker is the persisted policy.
-              </p>
-              <ModePicker
-                accountId={account.id}
-                initialMode={isMode(account.mode) ? account.mode : "manual"}
-                onSaved={(m) => setAccount({ ...account, mode: m })}
-              />
-            </TabsContent>
-
-            {/* Import field-mapping preferences (2026-06-04). The canonical home
-                for resetting an account from "apply automatically" back to
-                "ask me first". Deep-linked via #import-prefs. */}
-            <TabsContent value="import" className="pt-4 space-y-3">
-              <div className="flex items-center gap-2">
-                <FileCog className="h-4 w-4 text-violet-600" />
-                <h3 className="text-sm font-medium">Import preferences</h3>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Whether CSV / OFX / QFX uploads to this account show a
-                field-mapping preview before staging, and which OFX field becomes
-                the payee.
-              </p>
-              <ImportPrefsPicker
-                accountId={account.id}
-                initialCsvMappingMode={
-                  account.csvMappingMode === "auto" ? "auto" : "confirm"
-                }
-                initialOfxPayeeSource={
-                  account.ofxPayeeSource === "memo" ? "memo" : "name"
-                }
-                onSaved={(prefs) =>
-                  setAccount({
-                    ...account,
-                    csvMappingMode: prefs.csvMappingMode,
-                    ofxPayeeSource: prefs.ofxPayeeSource,
-                  })
-                }
-              />
-            </TabsContent>
-
-            {/* Cash sleeves — list + add + delete-when-no-tx. */}
-            <TabsContent value="sleeves" className="pt-4 space-y-3">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <Coins className="h-4 w-4 text-emerald-600" />
-                    <h3 className="text-sm font-medium">Cash sleeves</h3>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Per-currency cash positions inside this account. Required
-                    before recording buys, sells, or FX conversions in a new
-                    currency.
-                  </p>
-                </div>
-                <Button size="sm" variant="outline" onClick={openNewSleeve}>
-                  <Plus className="h-3.5 w-3.5 mr-1.5" /> Add sleeve
-                </Button>
-              </div>
-              {sleevesLoading && sleeves.length === 0 ? (
-                <div className="h-12 bg-muted animate-pulse rounded-md" />
-              ) : sleeves.length === 0 ? (
-                <p className="text-sm text-muted-foreground py-4 text-center">
-                  No cash sleeves yet. Add one to start recording trades.
+                <p className="text-xs text-muted-foreground">
+                  How uploads to this account flow through the pipeline. The{" "}
+                  <code className="px-1 mx-0.5 rounded bg-muted text-[10px]">/inbox</code>{" "}
+                  chip is a per-render lens; this picker is the persisted policy.
                 </p>
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="text-xs">Currency</TableHead>
-                      <TableHead className="text-xs">Name</TableHead>
-                      <TableHead className="text-xs text-right">Transactions</TableHead>
-                      <TableHead className="text-xs text-right">Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {sleeves.map((s) => (
-                      <TableRow key={s.id} className="hover:bg-muted/30">
-                        <TableCell>
-                          <Badge variant="outline" className="text-[10px] font-mono">
-                            {s.currency}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-sm">{s.name ?? `Cash ${s.currency}`}</TableCell>
-                        <TableCell className="text-right text-sm tabular-nums">
-                          {s.txCount ?? 0}
-                        </TableCell>
-                        <TableCell className="text-right">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            disabled={(s.txCount ?? 0) > 0}
-                            title={
-                              (s.txCount ?? 0) > 0
-                                ? "Sleeve has transactions — delete or reassign them first"
-                                : "Delete sleeve"
-                            }
-                            onClick={() => {
-                              setDeleteSleeveError("");
-                              setDeleteSleeveId(s.id);
-                            }}
-                          >
-                            <Trash2 className="h-3.5 w-3.5 text-rose-600" />
-                          </Button>
-                        </TableCell>
+                <ModePicker
+                  accountId={account.id}
+                  initialMode={isMode(account.mode) ? account.mode : "manual"}
+                  onSaved={(m) => setAccount({ ...account, mode: m })}
+                />
+              </>
+            ),
+          },
+          {
+            value: "import",
+            label: "Import",
+            content: (
+              <>
+                <div className="flex items-center gap-2">
+                  <FileCog className="h-4 w-4 text-violet-600" />
+                  <h3 className="text-sm font-medium">Import preferences</h3>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Whether CSV / OFX / QFX uploads to this account show a
+                  field-mapping preview before staging, and which OFX field
+                  becomes the payee.
+                </p>
+                <ImportPrefsPicker
+                  accountId={account.id}
+                  initialCsvMappingMode={account.csvMappingMode === "auto" ? "auto" : "confirm"}
+                  initialOfxPayeeSource={account.ofxPayeeSource === "memo" ? "memo" : "name"}
+                  onSaved={(prefs) =>
+                    setAccount({
+                      ...account,
+                      csvMappingMode: prefs.csvMappingMode,
+                      ofxPayeeSource: prefs.ofxPayeeSource,
+                    })
+                  }
+                />
+              </>
+            ),
+          },
+          {
+            value: "sleeves",
+            label: "Cash sleeves",
+            content: (
+              <>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Coins className="h-4 w-4 text-emerald-600" />
+                      <h3 className="text-sm font-medium">Cash sleeves</h3>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Per-currency cash positions inside this account. Required
+                      before recording buys, sells, or FX conversions in a new
+                      currency.
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={openNewSleeve}>
+                    <Plus className="h-3.5 w-3.5 mr-1.5" /> Add sleeve
+                  </Button>
+                </div>
+                {sleevesLoading && sleeves.length === 0 ? (
+                  <div className="h-12 bg-muted animate-pulse rounded-md" />
+                ) : sleeves.length === 0 ? (
+                  <p className="text-sm text-muted-foreground py-4 text-center">
+                    No cash sleeves yet. Add one to start recording trades.
+                  </p>
+                ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead className="text-xs">Currency</TableHead>
+                        <TableHead className="text-xs">Name</TableHead>
+                        <TableHead className="text-xs text-right">Transactions</TableHead>
+                        <TableHead className="text-xs text-right">Actions</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-            </TabsContent>
-          </Tabs>
-        </DialogContent>
-      </Dialog>
+                    </TableHeader>
+                    <TableBody>
+                      {sleeves.map((s) => (
+                        <TableRow key={s.id} className="hover:bg-muted/30">
+                          <TableCell>
+                            <Badge variant="outline" className="text-[10px] font-mono">
+                              {s.currency}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-sm">{s.name ?? `Cash ${s.currency}`}</TableCell>
+                          <TableCell className="text-right text-sm tabular-nums">
+                            {s.txCount ?? 0}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              disabled={(s.txCount ?? 0) > 0}
+                              title={
+                                (s.txCount ?? 0) > 0
+                                  ? "Sleeve has transactions — delete or reassign them first"
+                                  : "Delete sleeve"
+                              }
+                              onClick={() => {
+                                setDeleteSleeveError("");
+                                setDeleteSleeveId(s.id);
+                              }}
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-rose-600" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </>
+            ),
+          },
+        ]}
+      />
     </div>
   );
 }
