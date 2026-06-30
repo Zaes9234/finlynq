@@ -130,6 +130,14 @@ export function LotAllocationMatrix({
   const [toDate, setToDate] = useState("");
   const [onlyUsedLots, setOnlyUsedLots] = useState(false);
 
+  const lotYears = useMemo(
+    () => [...new Set(longLots.map((l) => l.openDate.slice(0, 4)))].sort((a, b) => b.localeCompare(a)),
+    [longLots],
+  );
+  const [buyYear, setBuyYear] = useState<string>("all");
+  const [buyFrom, setBuyFrom] = useState("");
+  const [buyTo, setBuyTo] = useState("");
+
   const elig = (lot: LotRow, sell: { closeDate: string }) => lot.openDate <= sell.closeDate;
   const num = (k: string) => { const n = Number(alloc[k]); return Number.isFinite(n) && n > 0 ? n : 0; };
 
@@ -144,12 +152,18 @@ export function LotAllocationMatrix({
     [sells, yearFilter, fromDate, toDate],
   );
   const visibleLots = useMemo(() => {
-    if (!onlyUsedLots) return longLots;
-    return longLots.filter((lot) =>
-      visibleSells.some((s) => elig(lot, s) || num(`${s.closeTxId}_${lot.id}`) > EPS),
-    );
+    let ls = longLots.filter((lot) => {
+      if (buyYear !== "all" && lot.openDate.slice(0, 4) !== buyYear) return false;
+      if (buyFrom && lot.openDate < buyFrom) return false;
+      if (buyTo && lot.openDate > buyTo) return false;
+      return true;
+    });
+    if (onlyUsedLots) {
+      ls = ls.filter((lot) => visibleSells.some((s) => elig(lot, s) || num(`${s.closeTxId}_${lot.id}`) > EPS));
+    }
+    return ls;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [longLots, visibleSells, onlyUsedLots, alloc]);
+  }, [longLots, visibleSells, onlyUsedLots, buyYear, buyFrom, buyTo, alloc]);
   const filtered = visibleSells.length !== sells.length || visibleLots.length !== longLots.length;
 
   // ─── Build the spec + run the shared planner for live feedback ──────────
@@ -261,7 +275,10 @@ export function LotAllocationMatrix({
   const cur = sells[0].currency;
   const thBase = "px-2 py-1.5 text-right font-medium align-bottom whitespace-nowrap";
   const tdBase = "px-2 py-1 text-right align-top whitespace-nowrap";
-  const inputCls = "h-6 w-[58px] px-1 text-right text-[10px] tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none";
+  // md:text-[10px] is REQUIRED: the base Input carries `md:text-sm`, a md:
+  // responsive variant that beats a plain `text-[10px]` at ≥768px — so the
+  // override must also be md:-prefixed for tailwind-merge to drop md:text-sm.
+  const inputCls = "h-6 w-[58px] px-1 text-right text-[10px] md:text-[10px] tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none";
 
   return (
     <div className="flex flex-1 min-h-0 flex-col gap-2.5">
@@ -278,35 +295,61 @@ export function LotAllocationMatrix({
         </div>
       </div>
 
-      <div className="shrink-0 flex items-center gap-x-3 gap-y-1.5 flex-wrap text-[11px] text-muted-foreground">
-        <span className="font-medium">Sales:</span>
-        <div className="flex items-center gap-1">
-          <button type="button" onClick={() => { setYearFilter("all"); setFromDate(""); setToDate(""); }}
-            className={`rounded-md border px-2 py-0.5 ${yearFilter === "all" && !fromDate && !toDate ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-muted"}`}>
-            All
-          </button>
-          {sellYears.map((y) => (
-            <button key={y} type="button" onClick={() => { setYearFilter(y); setFromDate(""); setToDate(""); }}
-              className={`rounded-md border px-2 py-0.5 ${yearFilter === y ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-muted"}`}>
-              {y}
+      <div className="shrink-0 space-y-1 text-[11px] text-muted-foreground">
+        {/* Sales filter — columns */}
+        <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
+          <span className="font-medium w-9 shrink-0">Sales:</span>
+          <div className="flex items-center gap-1 flex-wrap">
+            <button type="button" onClick={() => { setYearFilter("all"); setFromDate(""); setToDate(""); }}
+              className={`rounded-md border px-2 py-0.5 ${yearFilter === "all" && !fromDate && !toDate ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-muted"}`}>
+              All
             </button>
-          ))}
+            {sellYears.map((y) => (
+              <button key={y} type="button" onClick={() => { setYearFilter(y); setFromDate(""); setToDate(""); }}
+                className={`rounded-md border px-2 py-0.5 ${yearFilter === y ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-muted"}`}>
+                {y}
+              </button>
+            ))}
+          </div>
+          <span className="text-border">|</span>
+          <label className="flex items-center gap-1">From
+            <Input type="date" value={fromDate} onChange={(e) => { setFromDate(e.target.value); setYearFilter("all"); }} className="h-6 w-[130px] text-[11px] px-1.5" />
+          </label>
+          <label className="flex items-center gap-1">To
+            <Input type="date" value={toDate} onChange={(e) => { setToDate(e.target.value); setYearFilter("all"); }} className="h-6 w-[130px] text-[11px] px-1.5" />
+          </label>
         </div>
-        <span className="text-border">|</span>
-        <label className="flex items-center gap-1">From
-          <Input type="date" value={fromDate} onChange={(e) => { setFromDate(e.target.value); setYearFilter("all"); }} className="h-6 w-[130px] text-[11px] px-1.5" />
-        </label>
-        <label className="flex items-center gap-1">To
-          <Input type="date" value={toDate} onChange={(e) => { setToDate(e.target.value); setYearFilter("all"); }} className="h-6 w-[130px] text-[11px] px-1.5" />
-        </label>
-        <span className="text-border">|</span>
-        <label className="flex items-center gap-1.5 cursor-pointer select-none">
-          <input type="checkbox" checked={onlyUsedLots} onChange={(e) => setOnlyUsedLots(e.target.checked)} className="h-3.5 w-3.5 accent-primary" />
-          Used lots only
-        </label>
-        {filtered && (
-          <span className="text-muted-foreground/80">· showing {visibleSells.length}/{sells.length} sales, {visibleLots.length}/{longLots.length} lots</span>
-        )}
+        {/* Buys filter — rows */}
+        <div className="flex items-center gap-x-3 gap-y-1 flex-wrap">
+          <span className="font-medium w-9 shrink-0">Buys:</span>
+          <div className="flex items-center gap-1 flex-wrap">
+            <button type="button" onClick={() => { setBuyYear("all"); setBuyFrom(""); setBuyTo(""); }}
+              className={`rounded-md border px-2 py-0.5 ${buyYear === "all" && !buyFrom && !buyTo ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-muted"}`}>
+              All
+            </button>
+            {lotYears.map((y) => (
+              <button key={y} type="button" onClick={() => { setBuyYear(y); setBuyFrom(""); setBuyTo(""); }}
+                className={`rounded-md border px-2 py-0.5 ${buyYear === y ? "border-primary bg-primary/10 text-primary" : "border-border hover:bg-muted"}`}>
+                {y}
+              </button>
+            ))}
+          </div>
+          <span className="text-border">|</span>
+          <label className="flex items-center gap-1">From
+            <Input type="date" value={buyFrom} onChange={(e) => { setBuyFrom(e.target.value); setBuyYear("all"); }} className="h-6 w-[130px] text-[11px] px-1.5" />
+          </label>
+          <label className="flex items-center gap-1">To
+            <Input type="date" value={buyTo} onChange={(e) => { setBuyTo(e.target.value); setBuyYear("all"); }} className="h-6 w-[130px] text-[11px] px-1.5" />
+          </label>
+          <span className="text-border">|</span>
+          <label className="flex items-center gap-1.5 cursor-pointer select-none">
+            <input type="checkbox" checked={onlyUsedLots} onChange={(e) => setOnlyUsedLots(e.target.checked)} className="h-3.5 w-3.5 accent-primary" />
+            Used lots only
+          </label>
+          {filtered && (
+            <span className="text-muted-foreground/80">· {visibleSells.length}/{sells.length} sales, {visibleLots.length}/{longLots.length} lots</span>
+          )}
+        </div>
       </div>
 
       <div className={`shrink-0 rounded-md px-3 py-1.5 text-xs ${plan.ok ? "bg-emerald-50/60 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300" : "bg-rose-50/60 dark:bg-rose-950/30 text-rose-700 dark:text-rose-300"}`}>
