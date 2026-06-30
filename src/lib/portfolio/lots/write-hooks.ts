@@ -381,7 +381,7 @@ export async function closeLotsForSellHook(
             closeKind: "sell",
             source: tx.source,
           });
-          const newRemaining = lot.qtyRemaining - closeQty;
+          const newRemaining = Math.max(0, lot.qtyRemaining - closeQty);
           const closed = newRemaining <= 1e-9;
           await db
             .update(schema.holdingLots)
@@ -458,7 +458,10 @@ export async function closeLotsForSellHook(
           for (const [lotId, delta] of result.qtyDeltas) {
             const lot = lotsById.get(lotId);
             if (!lot) continue;
-            const newRemaining = lot.qtyRemaining - delta;
+            // Math.max(0, …): float noise can push a full close a hair below
+            // zero, violating the `qty_remaining >= 0` check. Mirror of the
+            // LEAST() upper-clamp in reverseLotsForDeleteHook.
+            const newRemaining = Math.max(0, lot.qtyRemaining - delta);
             const closed = newRemaining <= 1e-9;
             await db
               .update(schema.holdingLots)
@@ -813,11 +816,19 @@ export async function reverseLotsForDeleteHook(
       );
 
     for (const c of closures) {
-      // Restore qty_remaining; flip status back to 'open'.
+      // Restore qty_remaining; flip status back to 'open'. CLAMP to
+      // qty_original via LEAST(): restoring can never legitimately exceed the
+      // lot's original quantity, and floating-point noise in qty_remaining +
+      // qty_closed (e.g. 8.0063000000000010 + 0.00069999999999954 =
+      // 8.0070000000000010 > qty_original 8.007) would otherwise violate the
+      // `holding_lots_check` (qty_remaining <= qty_original) constraint and
+      // throw — which, mid-loop in applyHoldingAllocation, half-applies and
+      // corrupts the allocation. The clamp also self-heals any pre-existing
+      // over-consumed inconsistency.
       await db
         .update(schema.holdingLots)
         .set({
-          qtyRemaining: sql`${schema.holdingLots.qtyRemaining} + ${c.qtyClosed}`,
+          qtyRemaining: sql`LEAST(${schema.holdingLots.qtyRemaining} + ${c.qtyClosed}, ${schema.holdingLots.qtyOriginal})`,
           status: "open",
           updatedAt: sql`NOW()`,
         })
