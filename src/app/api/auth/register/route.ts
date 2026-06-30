@@ -21,6 +21,7 @@ import {
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sendEmail, emailVerificationEmail, welcomeEmail } from "@/lib/email";
+import { notifyAdminsNewSignup } from "@/lib/feedback/notify";
 import { createWrappedDEKForPassword } from "@/lib/crypto/envelope";
 import { putDEK } from "@/lib/crypto/dek-cache";
 import { validatePasswordStrength } from "@/lib/auth/password-policy";
@@ -153,6 +154,10 @@ export async function POST(request: NextRequest) {
       sendEmail(emailVerificationEmail(email, user.emailVerifyToken)).catch(() => {});
       sendEmail(welcomeEmail(email, displayName)).catch(() => {});
     }
+
+    // Best-effort maintainer growth notification (admin DB email(s) ∪
+    // FEEDBACK_EMAIL override) — fire-and-forget, never blocks the signup.
+    notifyAdminsNewSignup({ userId: user.id, username, email }).catch(() => {});
 
     // Issue session token, and cache the DEK under its jti so this new session
     // can immediately read/write encrypted columns.

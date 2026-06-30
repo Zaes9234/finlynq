@@ -1,6 +1,6 @@
 /**
  * Admin notification for in-app feedback activity (new submissions + user
- * replies on a thread).
+ * replies on a thread) AND new user signups.
  *
  * Recipients are resolved at send time from the actual admin account(s) in the
  * DB (users.role = 'admin'), unioned with the optional `FEEDBACK_EMAIL`
@@ -12,11 +12,12 @@
  * config / unreachable admin never blocks (or 500s) the user's submit/reply.
  */
 
-import { listAdminEmails, getUserById } from "@/lib/auth/queries";
+import { listAdminEmails, getUserById, getUserCount } from "@/lib/auth/queries";
 import {
   sendEmail,
   feedbackNotificationEmail,
   feedbackReplyNotificationEmail,
+  newSignupNotificationEmail,
 } from "@/lib/email";
 
 /**
@@ -76,6 +77,34 @@ export async function notifyAdminsNewFeedback(opts: {
       userLabel,
       pageUrl: opts.pageUrl ?? null,
       appVersion: opts.appVersion ?? null,
+    }),
+  );
+}
+
+/**
+ * Notify admins of a NEW user signup so the maintainer can monitor growth
+ * without logging into /admin. Best-effort + fire-and-forget by the caller.
+ */
+export async function notifyAdminsNewSignup(opts: {
+  userId: string;
+  username: string;
+  email?: string | null;
+}): Promise<void> {
+  const recipients = await getFeedbackNotificationRecipients();
+  if (recipients.length === 0) return;
+  let totalUsers: number | null = null;
+  try {
+    totalUsers = await getUserCount();
+  } catch {
+    totalUsers = null;
+  }
+  await fanOut(recipients, (to) =>
+    newSignupNotificationEmail({
+      to,
+      userId: opts.userId,
+      username: opts.username,
+      email: opts.email ?? null,
+      totalUsers,
     }),
   );
 }

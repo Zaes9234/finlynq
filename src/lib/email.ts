@@ -340,6 +340,45 @@ export function feedbackNotificationEmail(opts: {
 }
 
 /**
+ * Maintainer notification for a NEW user signup. Sent TO the admin
+ * recipient(s) resolved by the caller (admin user email from the DB ∪ the
+ * operator override — never a hardcoded address), NOT the new user. Lets the
+ * maintainer monitor growth without logging into /admin. Every user-derived
+ * field is escaped (rendered as HTML). Best-effort: callers fire-and-forget so
+ * a missing SMTP config never blocks (or 500s) the signup.
+ */
+export function newSignupNotificationEmail(opts: {
+  to: string;
+  userId: string;
+  username: string;
+  email?: string | null;
+  totalUsers?: number | null;
+}): EmailMessage {
+  const to = opts.to;
+  const safeUsername = escapeHtml(opts.username);
+  const safeEmail = opts.email ? escapeHtml(opts.email) : "— (no recovery email)";
+  const safeTotal =
+    typeof opts.totalUsers === "number" ? String(opts.totalUsers) : "—";
+  const html = baseLayout(
+    `New signup: ${safeUsername}`,
+    `<table style="width:100%;border-collapse:collapse;color:#3f3f46;font-size:14px;margin-bottom:16px">
+       <tr><td style="padding:4px 0;color:#71717a;width:110px">Username</td><td style="padding:4px 0"><strong>${safeUsername}</strong></td></tr>
+       <tr><td style="padding:4px 0;color:#71717a">Email</td><td style="padding:4px 0">${safeEmail}</td></tr>
+       <tr><td style="padding:4px 0;color:#71717a">Total users</td><td style="padding:4px 0"><strong>${safeTotal}</strong></td></tr>
+     </table>
+     <p style="color:#71717a;font-size:13px;margin-top:16px">Review at ${escapeHtml(APP_URL())}/admin</p>`,
+  );
+  return {
+    to,
+    subject: `[Finlynq] New signup: ${opts.username}`,
+    html,
+    text: `New signup: ${opts.username} (${opts.email || "no email"}). Total users: ${
+      typeof opts.totalUsers === "number" ? opts.totalUsers : "—"
+    }.`,
+  };
+}
+
+/**
  * Maintainer notification for a user REPLY on an existing feedback thread.
  * Same routing + best-effort contract as feedbackNotificationEmail: sent TO
  * the admin recipient(s) resolved by the caller (never hardcoded). The reply
