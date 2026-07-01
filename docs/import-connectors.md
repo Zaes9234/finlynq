@@ -223,6 +223,17 @@ warn-but-allow). The transform maps **`mcc`** (merchant category code) to a `mcc
 tag so rules can match it. The pending-imports list labels `connector` imports by
 `originalFilename` ("SimpleFIN — <account>"), not the email subject/from.
 
+**Pending / holds.** SimpleFIN's `pending` boolean is the standard signal, but some
+aggregators (RBC via MX) never set it — they encode status as a word in the
+`description` (`"<merchant> Pending …"` for a hold vs `"… Approved …"` once posted).
+`isPendingTransaction(tx)` treats a `\bPending\b` description token as pending too, so a
+gas-station hold (−$250 "Pending") is skipped while the real posted charge (−$69.08
+"Approved", a distinct id) still imports. Detected-pending rows aren't just dropped — the
+transform surfaces them (`SimplefinAccountRows.pending`) and the sync snapshots them into
+`simplefin_pending_transactions`, **refreshed per-account every sync** (delete + re-insert
+via `replacePendingTransactions`) so it always reflects the current pending set — for a
+future report / notification. payee/description are DEK-encrypted; the rest is plaintext.
+
 **Deferred:** background scheduled pulls; asset-vs-liability inference (v1 defaults every
 account to Asset); investment/holdings (SimpleFIN is banking-only); MCP/mobile parity.
 
