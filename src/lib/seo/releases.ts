@@ -38,11 +38,72 @@ export type Release = {
 
 export const RELEASES: Release[] = [
   {
+    version: "3.3.2",
+    slug: "v3.3.2",
+    name: "Finlynq v3.3.2",
+    date: "2026-07-01",
+    current: true,
+    tagline:
+      "Finlynq v3.3.2 brings native iOS and Android apps, direct bank connections, a unified import pipeline, and more control over investing accuracy.",
+    summary: [
+      "Finlynq v3.3.2 is an interim update since v3.3.1. The headline: native mobile apps are here, and you can now connect your bank so transactions sync in automatically.",
+      "Finlynq is an open-source (AGPL v3) personal finance app with a first-party Model Context Protocol (MCP) server, so you can track your money in the app and analyze it from Claude, Cursor, Windsurf, or any MCP-compatible assistant.",
+    ],
+    sections: [
+      {
+        heading: "Mobile",
+        items: [
+          "Native iOS and Android apps, free on the App Store and Google Play. They cover Dashboard, Transactions, Import, Budgets, and Settings, and sign in to the same encrypted account as the web app, on the managed cloud or your own self-hosted instance.",
+        ],
+      },
+      {
+        heading: "Bank connections and import",
+        items: [
+          "Connect your bank directly and transactions flow in automatically, with a review step before anything lands. Your bank login stays with a third-party aggregator and never touches Finlynq's servers.",
+          "One unified import pipeline: bank feeds and uploaded statements flow through the same staged review, and a per-account mode (manual, approve, or auto) decides how far each import advances on its own.",
+          "Auto-skip duplicates you already have, so re-syncing or re-importing never doubles up your ledger.",
+        ],
+      },
+      {
+        heading: "Investing",
+        items: [
+          "Manual and custom pricing for your own securities, so holdings your providers can't price still value correctly.",
+          "A whole-ticker lot allocation editor: assign each sale to specific lots in one matrix, with FIFO, HIFO, and LIFO quick strategies.",
+          "Per-ticker lot rebuild plus an out-of-order-import warning, to fix positions where a sell was imported before its buy.",
+          "The All Holdings page now reads the lot engine, so cost basis and realized gains match the rest of your reports.",
+        ],
+      },
+      {
+        heading: "Portfolio views",
+        items: [
+          "All Holdings gains sortable columns, split Day and Unrealized gain columns, Price, Total Cost, and Day G/L columns, a holding-currency toggle, and Day G/L for metals and foreign-currency cash.",
+        ],
+      },
+      {
+        heading: "Accounts",
+        items: [
+          "Set an account opening balance, backed by a single linked transaction so your history stays correct.",
+          "An investment-account toggle on the create and edit dialogs.",
+        ],
+      },
+      {
+        heading: "Fixes",
+        items: [
+          "Realized-gain conversion is now correct in a non-USD display currency, including short positions in the Show in CAD view.",
+          "Editing a dividend received as shares (DRIP) no longer converts it to cash.",
+          "More reliable crypto prices, plus fixes to the transactions ticker filter and holding drill-through.",
+          "Paste a screenshot straight into the feedback box to attach it.",
+        ],
+      },
+    ],
+    githubUrl: "https://github.com/finlynq/finlynq/releases/tag/v3.3.2",
+  },
+  {
     version: "3.3.1",
     slug: "v3.3.1",
     name: "Finlynq v3.3.1",
     date: "2026-06-26",
-    current: true,
+    current: false,
     tagline:
       "Finlynq v3.3.1 adds Money Pro and Generic CSV importers, transaction quick-actions on account pages, a UI font picker, file attachments on feedback, and new MCP reconciliation tools (now 117 tools).",
     summary: [
