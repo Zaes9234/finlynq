@@ -2489,10 +2489,66 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       positions.sort((a, b) => b.book_value - a.book_value);
 
       // Issue #209: `totalInvested` reduces over the FULL `positions` array
-      // (sum across all holdings, not the top-5 displayed). `topPositions` is
-      // the display-only slice further down.
+      // (sum across all holdings, not the top-5 displayed). This stays LIFETIME
+      // contributions (every dollar ever invested) and is the labelled
+      // `summary.totalInvested` figure below.
       const totalInvested = positions.reduce((s, p) => s + Number(p.book_value), 0);
-      const top3Pct = positions.slice(0, 3).reduce((s, p) => s + Number(p.book_value), 0) / (totalInvested || 1);
+
+      // FINLYNQ-253: diversification / concentration / topPositions must NOT be
+      // weighted on lifetime book cost. The prior code reused `positions`
+      // (lifetime `aggregateHoldings().buy_amount`), so the cash sleeves —
+      // whose lifetime value is every dollar that ever transited the brokerage,
+      // not a held position — dominated the top-3, mislabelling a 15+ holding
+      // ~55%-ETF portfolio as "Concentrated (in cash)". Mirror the FINLYNQ-251
+      // rebalancing fix: value ACTIVE positions via the canonical
+      // `getHoldingsValueByHolding` (the "account with holdings = holdings.value"
+      // basis shared with /api/portfolio/overview + net-worth) — prefer current
+      // MARKET value, fall back to remaining ACTIVE cost basis (excl. sold-out)
+      // when no live prices are available (e.g. a pf_ API key with no DEK) —
+      // AND exclude cash-sleeve rows entirely from the concentration set (no
+      // investor should read "concentrated in cash" off flow-through). Cash is
+      // held wealth but not an investment position, so it's dropped from the
+      // diversification-of-investments weighting.
+      const cashSleeveIdRows = await q(db, sql`
+        SELECT id FROM portfolio_holdings
+        WHERE user_id = ${userId} AND is_cash = TRUE
+      `);
+      const cashSleeveIds = new Set(cashSleeveIdRows.map((r) => Number(r.id)));
+      const holdingValues = await getHoldingsValueByHolding(userId, dek);
+      // Prefer market value; fall back to active cost basis when nothing priced
+      // (no DEK / all unpriced) so the score stays meaningful either way.
+      const anyMarketValue = holdingValues.some((h) => !cashSleeveIds.has(Number(h.holdingId)) && Number(h.value) !== 0);
+      const activeBasis: "market" | "active-cost" = anyMarketValue ? "market" : "active-cost";
+      // Sum active value across same-name rows (VUN.TO across TFSA + RRSP is one
+      // line), FX-converting each holding's ACCOUNT currency to the reporting
+      // currency first. Cash sleeves are excluded from this set.
+      const activeByName = new Map<string, { name: string; value: number; value_native: number; currency: string }>();
+      for (const h of holdingValues) {
+        if (cashSleeveIds.has(Number(h.holdingId))) continue;
+        const nativeValue = activeBasis === "market" ? Number(h.value) : Number(h.costBasis);
+        if (!(nativeValue > 0)) continue; // sold-out / zero-value positions don't weigh
+        const ccy = String(h.currency || reporting).toUpperCase();
+        const fx = await fxFor(ccy);
+        const key = h.name ?? "(unnamed holding)";
+        const prev = activeByName.get(key);
+        if (prev) {
+          prev.value += nativeValue * fx;
+          prev.value_native += nativeValue;
+        } else {
+          activeByName.set(key, { name: key, value: nativeValue * fx, value_native: nativeValue, currency: ccy });
+        }
+      }
+      const activePositions = Array.from(activeByName.values());
+      activePositions.sort((a, b) => b.value - a.value);
+      // Merge the lifetime `purchases` count (per name) from `aggregateHoldings`
+      // for the topPositions display — value comes from the active set, the
+      // purchase count is a lifetime fact.
+      const purchasesByName = new Map<string, number>();
+      for (const p of positions) purchasesByName.set(p.name, Number(p.purchases));
+
+      // Weight diversification / concentration on the ACTIVE, cash-excluded set.
+      const activeTotal = activePositions.reduce((s, p) => s + Number(p.value), 0);
+      const top3Pct = activePositions.slice(0, 3).reduce((s, p) => s + Number(p.value), 0) / (activeTotal || 1);
       const diversificationScore = Math.max(0, Math.round((1 - top3Pct) * 100));
 
       // Issue #209 — average reconciles against the trailing-12 population,
@@ -2525,15 +2581,27 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           // higher = more diversified; previously implicit.
           diversificationScoreMax: 100,
           diversificationLabel: diversificationScore > 70 ? "Well diversified" : diversificationScore > 40 ? "Moderately diversified" : "Concentrated",
-          concentration: `Top 3 positions = ${Math.round(top3Pct * 1000) / 10}% of portfolio`,
+          // FINLYNQ-253: concentration + diversificationScore are weighted on
+          // ACTIVE, cash-excluded positions (see topPositions). `totalInvested`
+          // above stays LIFETIME contributions.
+          concentration: `Top 3 active positions = ${Math.round(top3Pct * 1000) / 10}% of active holdings`,
+          // 'market' when live prices were available for the active set, else
+          // 'active-cost' (remaining cost basis of active positions). NEVER
+          // lifetime book cost, and cash sleeves are excluded.
+          diversificationValuationBasis: activeBasis,
         },
-        topPositions: positions.slice(0, 5).map(p => ({
+        // FINLYNQ-253: topPositions are the top-5 ACTIVE positions (cash
+        // sleeves excluded), valued at market (or active cost basis when no
+        // live prices), NOT lifetime book cost. `pct` is the share of the
+        // active, cash-excluded portfolio — so the concentration figure and
+        // these rows agree.
+        topPositions: activePositions.slice(0, 5).map(p => ({
           name: p.name,
-          bookValue: Math.round(Number(p.book_value) * 100) / 100,
-          bookValueReporting: tagAmount(p.book_value, reporting, "reporting"),
-          bookValueNative: tagAmount(p.book_value_native, p.currency, "account"),
-          pct: Math.round((Number(p.book_value) / totalInvested) * 1000) / 10,
-          purchases: Number(p.purchases),
+          value: Math.round(Number(p.value) * 100) / 100,
+          valueReporting: tagAmount(p.value, reporting, "reporting"),
+          valueNative: tagAmount(p.value_native, p.currency, "account"),
+          pct: Math.round((Number(p.value) / (activeTotal || 1)) * 1000) / 10,
+          purchases: Number(purchasesByName.get(p.name) ?? 0),
         })),
         // Issue #209 — already sorted ASC by month and sliced to the trailing
         // 6 (most recent) above. Months are formatted as "YYYY-MM".
