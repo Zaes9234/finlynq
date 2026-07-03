@@ -1,4 +1,5 @@
-// One "top mover" row — up/down chip + symbol/name + %change + day-change $.
+// One "top mover" row — up/down chip + symbol/name + signed day-change $ (primary)
+// + signed %change (secondary), both colored by sign (FINLYNQ-238 — was muted-grey $).
 import React from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { useTheme } from "../../theme";
@@ -45,13 +46,13 @@ export function GainerLoserRow({
         )}
       </View>
       <View style={styles.right}>
+        <Text style={[styles.change, { color: tone }]}>
+          {dayChange >= 0 ? "+" : ""}
+          {formatCurrency(dayChange, holding.quoteCurrency ?? currency, { decimals: 0 })}
+        </Text>
         <Text style={[styles.pct, { color: tone }]}>
           {up ? "+" : ""}
           {pct.toFixed(1)}%
-        </Text>
-        <Text style={[styles.change, { color: colors.mutedForeground }]}>
-          {dayChange >= 0 ? "+" : ""}
-          {formatCurrency(dayChange, holding.quoteCurrency ?? currency, { decimals: 0 })}
         </Text>
       </View>
     </View>
@@ -77,6 +78,6 @@ const styles = StyleSheet.create({
   symbol: { fontSize: 14, fontWeight: "600" },
   name: { fontSize: 12, marginTop: 1 },
   right: { alignItems: "flex-end" },
-  pct: { fontSize: 14, fontWeight: "700", fontVariant: ["tabular-nums"] },
-  change: { fontSize: 12, marginTop: 1, fontVariant: ["tabular-nums"] },
+  change: { fontSize: 14, fontWeight: "700", fontVariant: ["tabular-nums"] },
+  pct: { fontSize: 12, marginTop: 1, fontVariant: ["tabular-nums"] },
 });
