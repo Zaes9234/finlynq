@@ -324,14 +324,15 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_spending_trends ────────────────────────────────────────────────────
   server.tool(
     "get_spending_trends",
-    "Get spending trends over time grouped by category. Totals are in the user's display currency by default; pass reportingCurrency to override. Issue #210: `priorMonths: N` returns N+1 monthly buckets — the current (partial) month plus N priors. `months` is accepted as a deprecated alias.",
+    "Get spending trends over time grouped by category. Rollups-first (FINLYNQ-269): the default payload returns `totalsByPeriod` (per-bucket grand totals) + `totalsByCategory` (each category summed over the window) — a small bounded shape suited to a context window — and OMITS the verbose per-(period,category) cells. Pass `detail: true` to also get the full cell `rows`. Totals are in the user's display currency by default; pass reportingCurrency to override. Issue #210: `priorMonths: N` returns N+1 monthly buckets — the current (partial) month plus N priors. `months` is accepted as a deprecated alias.",
     {
       period: z.enum(["weekly", "monthly", "yearly"]).describe("Aggregation period"),
       priorMonths: z.number().optional().describe("Months to look back, in addition to the current (partial) month. Default 12 → returns 13 buckets (current + 12 priors)."),
       months: z.number().optional().describe("DEPRECATED (issue #210) — alias for priorMonths."),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency."),
+      detail: z.boolean().optional().describe("Include the full per-(period,category) cell rows. Default false — the rollup totals are returned without them."),
     },
-    async ({ period, priorMonths, months, reportingCurrency }) => {
+    async ({ period, priorMonths, months, reportingCurrency, detail }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       if (months !== undefined && priorMonths === undefined) {
 
@@ -370,11 +371,51 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
+
+      // FINLYNQ-269 rollups-first: lead with bounded aggregates so a context-
+      // window consumer gets per-bucket totals without summing ~90 cells.
+      // `totalsByPeriod` = one grand total per bucket; `totalsByCategory` =
+      // each category summed across the whole window (one row per category).
+      const periodMap = new Map<string, number>();
+      const catMap = new Map<
+        number,
+        { categoryId: number | null; category: string | null; group: string | null; total: number }
+      >();
+      for (const r of rows as Array<Record<string, unknown>>) {
+        const amt = Number(r.total) || 0;
+        const period = String(r.period);
+        periodMap.set(period, (periodMap.get(period) ?? 0) + amt);
+        const categoryId = r.category_id == null ? null : Number(r.category_id);
+        const key = categoryId ?? -1;
+        const existing = catMap.get(key);
+        if (existing) {
+          existing.total += amt;
+        } else {
+          catMap.set(key, {
+            categoryId,
+            category: (r.category as string | null) ?? null,
+            group: (r.category_group as string | null) ?? null,
+            total: amt,
+          });
+        }
+      }
+      const totalsByPeriod = [...periodMap.entries()].map(([period, total]) => ({
+        period,
+        total: roundMoney(total, reporting),
+      }));
+      const totalsByCategory = [...catMap.values()].map((c) => ({
+        ...c,
+        total: roundMoney(c.total, reporting),
+      }));
+
       // Issue #210 — surface `currentMonth` + `priorMonths` so downstream
       // dashboards can flag the partial-month row, and echo `reportingCurrency`
       // for shape symmetry with the current-totals branch.
       return dataResponse({
-        rows,
+        totalsByPeriod,
+        totalsByCategory,
+        // Verbose per-(period,category) cells gated behind `detail` (FINLYNQ-269).
+        ...(detail ? { rows } : {}),
         reportingCurrency: reporting,
         priorMonths: lookback,
         currentMonth: currentMonthStr,
@@ -1520,7 +1561,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
     "finlynq_help",
     "Discover available Finlynq tools, schema, and usage examples. Finlynq is a personal-finance TRACKING app: every write tool records a bookkeeping entry in the user's own database and never connects to a bank or brokerage or moves real money. Full docs: https://finlynq.com/mcp-guide",
     {
-      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile"]).optional().describe("Help topic (default: tools)"),
+      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile", "modes"]).optional().describe("Help topic (default: tools). `modes` documents every multi-mode tool's modes with an example each."),
       tool_name: z.string().optional().describe("Get help for a specific tool"),
     },
     async ({ topic, tool_name }) => {
@@ -1576,7 +1617,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
           transfer_tools: ["record_transfer"],
           reconcile_tools: ["upload_statement", "get_reconcile_suggestions", "get_reconciliation_summary", "find_duplicate_bank_rows", "get_balance_anchors", "upsert_balance_anchor", "delete_bank_transaction", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "accept_reconcile_suggestions", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
-          tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools.",
+          tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools, or topic='modes' for the mode/lifecycle map of every multi-mode tool (get_investment_insights, get_net_worth, get_spending_trends, staged-import lifecycle).",
         });
       }
 
@@ -1648,6 +1689,47 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           bulk_tools: ["accept_reconcile_suggestions", "apply_rules_to_bank_rows"],
           flow: "-2) get_reconciliation_summary() → portfolio-wide reconcile health in ONE call (per-account linked / suggestions / bankOnly / txOnly counts + balanceDelta) — run this at session start instead of one get_reconcile_suggestions per account, then drill into the off accounts. -1) upload_statement(fileContent[base64], fileName, accountId) → stage a CSV/OFX/QFX statement over MCP (no browser session) — returns a real stagedImportId (NOT the mcp_uploads artifact of the legacy /api/mcp/upload path) for the steps below. 0) send_to_bank_ledger(stagedImportId) → promote a pending statement import into the BANK LEDGER ONLY (no `transactions` rows) + load its balance anchor — the normal reconcile setup when the account already has ledger transactions for the period (use approve_staged_rows only for a first import of a brand-new account). 0.5) find_duplicate_bank_rows(accountId) → list groups of duplicate bank-ledger rows (distinct ids for one event from overlapping imports); canonicalId is the oldest to keep, then delete_bank_transaction(bankTransactionId) removes each extra (dryRun:true to preview the affected transactions first). 0.7) get_balance_anchors(accountId) → read the bank balance anchors (the bank's reported balance per date the reconcile engine validates against); upsert_balance_anchor(accountId, date, amount, currency) creates/corrects one (keyed by (accountId,date); created:false on update) and immediately shifts the balanceDelta. 1) get_reconcile_suggestions(accountId) → see linked / suggestions / bankOnly rows, each bank row carrying suggestedCategoryId / suggestedTransferAccountId / duplicateOfTransactionId. 2) materialize_bank_row(bankTransactionId, categoryId) for a category tx, or (bankTransactionId, destAccountId) for a transfer pair (outflow rows only). 3) accept_reconcile_suggestion / unlink_reconcile to link/undo an existing tx ↔ bank pairing, or accept_reconcile_suggestions(pairs[]) to link MANY tx↔bank pairs in ONE call (positional results; partial commit — a bad/cross-account id carries `error` and the rest still land). 4) set_account_mode(accountId, mode) to flip the per-account pipeline policy (auto/approve/manual). 5) apply_rules_to_staged_import(stagedImportId) to re-fire rules over a pending import. 6) apply_rules_to_bank_rows(bankRowIds) → preview + confirmationToken; resend with the token + autoMaterialize:true to bulk-materialize matched rows.",
           note: "All reconcile tools are HTTP-only and need an unlocked DEK. upload_statement decodes a base64 file (CSV/OFX/QFX, 5 MB decoded cap) and stages it → a real staged_imports.id for send_to_bank_ledger / approve_staged_rows; an unrecognised/unparseable file returns detectedFormat:'unrecognised' and creates nothing. send_to_bank_ledger writes ONLY bank_transactions (never `transactions`); approve_staged_rows is the one that CREATES ledger transactions (first-import only). delete_bank_transaction removes a bank row (cascade clears its links + nulls transactions.bank_transaction_id; the `transactions` rows survive) — dryRun first. apply_rules_to_bank_rows uses a two-step confirmation token (preview never writes).",
+        });
+      }
+
+      if (t === "modes") {
+        // FINLYNQ-269 — per-mode docs for every multi-mode tool so agents can
+        // self-serve the right call instead of trial-calling. One example each.
+        return dataResponse({
+          get_investment_insights: {
+            summary: "One tool, three modes selected by the `mode` param.",
+            modes: [
+              { mode: "patterns", when: "default — behavioral spending/allocation patterns", example: "get_investment_insights()" },
+              { mode: "rebalancing", when: "compare current allocation to target weights (needs `targets`)", example: 'get_investment_insights(mode="rebalancing", targets=[{holding:"VEQT", target_pct:60}, {holding:"VAB", target_pct:40}])' },
+              { mode: "benchmark", when: "compare performance to an index (needs `benchmark` ∈ SP500|TSX|MSCI_WORLD|BONDS_CA)", example: 'get_investment_insights(mode="benchmark", benchmark="SP500")' },
+            ],
+          },
+          get_net_worth: {
+            summary: "Two modes selected by `priorMonths`: current totals vs a month-by-month trend.",
+            modes: [
+              { mode: "current-totals", when: "omit priorMonths — snapshot totals; investment accounts at MARKET (basis:'market') on OAuth/built-in-chat", example: "get_net_worth()" },
+              { mode: "trend", when: "priorMonths>0 — month-by-month series (ALWAYS contribution-basis, basis:'ledger')", example: "get_net_worth(priorMonths=12)" },
+            ],
+          },
+          get_spending_trends: {
+            summary: "Rollups-first (FINLYNQ-269): the `detail` flag toggles the payload shape.",
+            modes: [
+              { mode: "rollups (default)", when: "detail omitted/false — returns totalsByPeriod + totalsByCategory only (bounded, context-window friendly)", example: 'get_spending_trends(period="monthly", priorMonths=6)' },
+              { mode: "detail", when: "detail:true — ALSO returns the full per-(period,category) cell rows", example: 'get_spending_trends(period="monthly", priorMonths=6, detail=true)' },
+            ],
+          },
+          staged_import_lifecycle: {
+            summary: "Ordered tool sequence to bring a statement from a file to a reconciled ledger. All HTTP-only; need an unlocked DEK. See topic='reconcile' for the full flow.",
+            steps: [
+              { step: 1, tool: "upload_statement", when: "stage a CSV/OFX/QFX file over MCP (base64) → a real stagedImportId", example: 'upload_statement(fileContent="<base64>", fileName="oct.csv", accountId=12)' },
+              { step: 2, tool: "get_staged_import / list_staged_imports", when: "inspect what was staged before promoting", example: "get_staged_import(stagedImportId=88)" },
+              { step: "3a", tool: "send_to_bank_ledger", when: "NORMAL reconcile — account already has ledger tx for the period; promotes to bank_transactions ONLY (no `transactions`)", example: "send_to_bank_ledger(stagedImportId=88)" },
+              { step: "3b", tool: "approve_staged_rows", when: "FIRST import of a brand-new account — CREATES ledger transactions", example: "approve_staged_rows(stagedImportId=88)" },
+              { step: 4, tool: "get_reconcile_suggestions", when: "review link/materialize suggestions per bank row", example: "get_reconcile_suggestions(accountId=12)" },
+            ],
+            decision_rule: "Account already has ledger tx for the period → send_to_bank_ledger. Brand-new account, first import → approve_staged_rows. Unsure → default send_to_bank_ledger.",
+          },
+          tip: "These are the genuinely multi-mode tools. For a specific tool's full parameter docs use tool_name='<name>'; for the reconcile cohort use topic='reconcile'.",
         });
       }
 

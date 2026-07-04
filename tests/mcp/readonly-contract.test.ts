@@ -98,7 +98,14 @@ const CONTRACT: Record<string, Entry> = {
     args: () => ({ start_date: "2000-01-01", end_date: "2999-12-31" }),
     assert: (d) => expect(isObj(d)).toBe(true),
   },
-  get_spending_trends: { assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true) },
+  get_spending_trends: {
+    // FINLYNQ-269 — rollups-first: default payload leads with totalsByPeriod
+    // (per-bucket grand totals) and OMITS the verbose cell rows.
+    assert: (d) => {
+      expect(isObj(d)).toBe(true);
+      expect(Array.isArray((d as Record<string, unknown>).totalsByPeriod)).toBe(true);
+    },
+  },
   get_spending_anomalies: { assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true) },
   get_cash_flow_forecast: { assert: (d) => expect(isObj(d)).toBe(true) },
   get_weekly_recap: { assert: (d) => expect(isObj(d)).toBe(true) },

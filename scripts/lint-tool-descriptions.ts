@@ -19,6 +19,19 @@
  *   (c) a description longer than DESCRIPTION_MAX chars.
  *
  * Wired into CI via `npm run lint:tool-descriptions` in `.github/workflows`.
+ *
+ * Rollups-first response convention (FINLYNQ-269, epic child G)
+ * ------------------------------------------------------------
+ * A READ tool that can return a large array (many category×period cells,
+ * unbounded time series, per-row detail) MUST lead its response with bounded
+ * aggregate rollups — a `totalsBy*` / `summary` block sized for a context
+ * window — and gate the row-level detail behind a `detail: true` flag (or a
+ * dedicated `*_detail` call). The default payload is the rollups; the verbose
+ * rows are opt-in. `get_spending_trends` is the reference implementation:
+ * default = `totalsByPeriod` + `totalsByCategory`; `detail:true` adds `rows`.
+ * (A future lint tier can assert new large-array read tools carry a summary
+ * block key.) Every multi-mode tool's modes must be documented in
+ * `finlynq_help(topic="modes")` with one example each.
  */
 
 import { randomBytes } from "node:crypto";
