@@ -70,9 +70,24 @@ describe("MCP toolset registry (FINLYNQ-263)", () => {
   it("default toolsets hide import-pipeline but expose analytics + ledger-write", () => {
     const importTool = "upload_statement";
     const analyticsTool = "get_net_worth";
-    const ledgerTool = "add_goal";
+    const ledgerTool = "manage_goals";
     expect(isToolInEnabledToolsets(importTool, DEFAULT_TOOLSETS)).toBe(false);
     expect(isToolInEnabledToolsets(analyticsTool, DEFAULT_TOOLSETS)).toBe(true);
     expect(isToolInEnabledToolsets(ledgerTool, DEFAULT_TOOLSETS)).toBe(true);
+  });
+
+  it("the DEFAULT-PROFILE tools/list is <= 60 (tc-1) + import-pipeline hidden", async () => {
+    // Owner decision #6: the <= 60 bar is measured against the default profile
+    // (analytics + ledger-write), NOT the full registry. The 25 import/reconcile
+    // tools are toolset-gated OFF by default.
+    const { dumpToolsList } = await import("./eval/dump-tools-list");
+    const defProfile = await dumpToolsList((n) =>
+      isToolInEnabledToolsets(n, DEFAULT_TOOLSETS),
+    );
+    expect(defProfile.length).toBeLessThanOrEqual(60);
+    const leaked = defProfile
+      .map((t) => t.name)
+      .filter((n) => IMPORT_PIPELINE_TOOLS.has(n));
+    expect(leaked, `import tools in default profile: ${leaked.join(", ")}`).toEqual([]);
   });
 });

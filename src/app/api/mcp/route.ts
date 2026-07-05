@@ -19,14 +19,15 @@ import { db } from "@/db";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { accountStrategy } from "@/lib/auth/require-auth";
 import { validateOauthToken, getIssuer } from "@/lib/oauth";
-import { DEFAULT_SCOPE, parseScope, isToolAllowedForScope } from "@/lib/oauth-scopes";
+import { DEFAULT_SCOPE, parseScope, isToolAllowedForScope, enabledToolsetsForRequest } from "@/lib/oauth-scopes";
+import { getImportToolsetEnabled } from "@/lib/mcp/import-toolset-setting";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { registerPgTools } from "../../../../mcp-server/register-tools-pg";
 import { withAutoAnnotations } from "../../../../mcp-server/auto-annotations";
 import { buildFilteredToolsList } from "../../../../mcp-server/tools/_consolidate";
 import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION, MCP_SERVER_INSTRUCTIONS } from "@/lib/mcp/tool-counts";
-import { isToolInEnabledToolsets, type Toolset } from "@/lib/mcp/toolsets";
+import { isToolInEnabledToolsets } from "@/lib/mcp/toolsets";
 
 // Origin allowlist - defense-in-depth against DNS rebinding and cross-site
 // cookie attacks against the session-cookie auth path. Bearer-token requests
@@ -185,14 +186,23 @@ export async function POST(request: NextRequest) {
 
   const scopeString = "scope" in auth.context ? auth.context.scope : DEFAULT_SCOPE;
   const scopeSet = parseScope(scopeString);
+
+  // FINLYNQ-263 phase 5 — resolve the session toolsets. Default profile is
+  // analytics + ledger-write; the import-pipeline set (the 25 statement-import +
+  // bank-reconcile tools) is added ONLY when the token carries the `mcp:import`
+  // scope (a) OR the per-user connection setting opts in (b). An out-of-toolset
+  // tool is NEVER registered → it is neither listed NOR callable this session.
+  const importSettingEnabled = await getImportToolsetEnabled(auth.context.userId);
+  const enabledSets = enabledToolsetsForRequest(scopeSet, { importSettingEnabled });
+
   // The SDK types `tool` as a read-only overloaded method, so reach it through
-  // a single named interface (ScopeFilterableServer) rather than `any`.
+  // a single named interface (ScopeFilterableServer) rather than `any`. The
+  // wrap composes the OAuth scope gate (read/write) with the toolset gate.
   const scopable = server as unknown as ScopeFilterableServer;
   const originalTool = scopable.tool.bind(server);
   scopable.tool = (name: string, ...args: unknown[]) => {
-    if (!isToolAllowedForScope(name, scopeSet)) {
-      return undefined;
-    }
+    if (!isToolAllowedForScope(name, scopeSet)) return undefined;
+    if (!isToolInEnabledToolsets(name, enabledSets)) return undefined;
     return originalTool(name, ...args);
   };
 
@@ -200,14 +210,11 @@ export async function POST(request: NextRequest) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   registerPgTools(server, db as any, auth.context.userId, dek);
 
-  // FINLYNQ-263 — post-process `tools/list`: hide back-compat aliases (callable
-  // but not advertised, decision #1), substitute the pre-computed `oneOf` JSON
-  // schema for consolidated `manage_*` tools (the SDK renders a union input as
-  // an empty object otherwise), and gate by session toolset. Phase 1 keeps ALL
-  // toolsets enabled (analytics + ledger-write + import-pipeline); Phase 5 flips
-  // the default to hide import-pipeline unless the `mcp:import` scope / setting
-  // opts in. `enabledSets` is where that flip lands.
-  const enabledSets = new Set<Toolset>(["analytics", "ledger-write", "import-pipeline"]);
+  // Post-process `tools/list`: hide back-compat aliases (callable but not
+  // advertised, decision #1) + substitute the pre-computed `oneOf` JSON schema
+  // for consolidated tools (the SDK renders a union input as an empty object).
+  // Out-of-toolset tools are already unregistered above, so the list filter's
+  // toolset predicate is a no-op belt-and-braces pass.
   const toolFilter = (name: string) => isToolInEnabledToolsets(name, enabledSets);
   {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
