@@ -75,6 +75,41 @@ export function verifyPreviewToken(
 /** The human-readable preview summary — any JSON-serializable value. */
 export type PreviewSummary = unknown;
 
+/**
+ * `expected_summary` echo gate (FINLYNQ-264 tier-2). Cheaper than a token
+ * round-trip: the caller passes what it BELIEVES it's deleting; a mismatch
+ * against the loaded row is refused. Defends the hallucinated-id threat (agent
+ * deletes #812 thinking it's Starbucks when it's rent) with a pure comparison,
+ * no state, no round-trip.
+ *
+ * Returns `null` when the echo passes (or was omitted — echo is OPTIONAL /
+ * non-breaking), or a human-readable mismatch message when it fails.
+ *
+ * `payee` is compared case-insensitively + trimmed; `amount` within a $0.01
+ * epsilon (float-safe). A field the caller DIDN'T assert is not checked.
+ */
+export function checkExpectedEcho(
+  expected: { payee?: string; amount?: number } | undefined,
+  actual: { payee?: string | null; amount?: number | null },
+  label: string,
+): string | null {
+  if (!expected) return null;
+  if (expected.payee != null) {
+    const want = expected.payee.trim().toLowerCase();
+    const got = String(actual.payee ?? "").trim().toLowerCase();
+    if (want !== got) {
+      return `Refusing to delete ${label}: you said payee "${expected.payee}", but it is "${actual.payee ?? ""}". Re-check the id.`;
+    }
+  }
+  if (expected.amount != null) {
+    const got = Number(actual.amount ?? NaN);
+    if (!Number.isFinite(got) || Math.abs(got - expected.amount) > 0.01) {
+      return `Refusing to delete ${label}: you said amount ${expected.amount}, but it is ${actual.amount ?? "?"}. Re-check the id.`;
+    }
+  }
+  return null;
+}
+
 export interface ConfirmSpec<A extends { confirmation_token?: string }> {
   /**
    * Operation label bound into the token (e.g. "delete_transfer"). MUST be

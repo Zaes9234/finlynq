@@ -81,6 +81,7 @@ import {
   verifyPreviewToken,
   withConfirmation,
   PreviewAbortError,
+  checkExpectedEcho,
 } from "./_confirm";
 import {
   randomUUID,
@@ -1310,17 +1311,29 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
 
 
   // ── delete_transaction ─────────────────────────────────────────────────────
+  // FINLYNQ-264 Phase 2 (tier-2): single-row delete guarded by an OPTIONAL
+  // `expected` echo (payee/amount) — the high-frequency, round-trip-free
+  // hallucinated-id guard. When `expected` is passed and mismatches the loaded
+  // row the delete is REFUSED; when omitted the delete proceeds (back-compat)
+  // but the tool is annotated destructive so hosts can prompt.
   server.tool(
     "delete_transaction",
-    "Permanently delete a transaction by ID",
+    "Permanently delete a transaction by ID. RECOMMENDED: pass `expected` (the payee and/or amount you believe #id has) — if it doesn't match the stored row the delete is refused, guarding against a hallucinated / mis-copied id. Omitting `expected` still deletes (back-compat).",
     {
       id: z.number().describe("Transaction ID to delete"),
+      expected: z.object({
+        payee: z.string().optional().describe("The payee you believe this transaction has (case-insensitive)."),
+        amount: z.number().optional().describe("The amount you believe this transaction has (±0.01)."),
+      }).optional().describe("Optional row-content echo. If present and it doesn't match the stored row, the delete is refused."),
     },
-    async ({ id }) => {
+    async ({ id, expected }) => {
       const existing = await q(db, sql`SELECT id, payee, amount, date FROM transactions WHERE user_id = ${userId} AND id = ${id}`);
       if (!existing.length) return err(`Transaction #${id} not found`);
       const t = existing[0];
       const plainPayee = dek ? (decryptField(dek, String(t.payee ?? "")) ?? "") : t.payee;
+      // Echo gate — refuse on a payee/amount mismatch (hallucinated-id guard).
+      const mismatch = checkExpectedEcho(expected, { payee: plainPayee as string, amount: Number(t.amount) }, `transaction #${id}`);
+      if (mismatch) return err(mismatch);
       // Portfolio lot tracking — reverse BEFORE the DELETE so closure rows
       // are still in place for the lookup. CASCADE on holding_lots.open_tx_id
       // catches anything reverseLotsForDeleteHook missed.
@@ -1838,17 +1851,27 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
 
 
   // ── delete_split ──────────────────────────────────────────────────────────
+  // FINLYNQ-264 Phase 2 (tier-2): OPTIONAL `expected` amount echo — the
+  // round-trip-free hallucinated-id guard. A split carries no payee, so only
+  // `amount` is echoable. Omitting `expected` still deletes (back-compat).
   server.tool(
     "delete_split",
-    "Delete a split by id",
-    { split_id: z.number().describe("Split id") },
-    async ({ split_id }) => {
+    "Delete a split by id. RECOMMENDED: pass `expected.amount` (the amount you believe this split has) — a mismatch refuses the delete, guarding against a mis-copied id. Omitting `expected` still deletes (back-compat).",
+    {
+      split_id: z.number().describe("Split id"),
+      expected: z.object({
+        amount: z.number().optional().describe("The amount you believe this split has (±0.01)."),
+      }).optional().describe("Optional row-content echo. If present and it doesn't match the stored split, the delete is refused."),
+    },
+    async ({ split_id, expected }) => {
       const owner = await q(db, sql`
-        SELECT s.id FROM transaction_splits s
+        SELECT s.id, s.amount FROM transaction_splits s
         JOIN transactions t ON t.id = s.transaction_id
         WHERE s.id = ${split_id} AND t.user_id = ${userId}
       `);
       if (!owner.length) return err(`Split #${split_id} not found`);
+      const mismatch = checkExpectedEcho(expected, { amount: Number(owner[0].amount) }, `split #${split_id}`);
+      if (mismatch) return err(mismatch);
       await db.execute(sql`DELETE FROM transaction_splits WHERE id = ${split_id}`);
       invalidateUserTxCache(userId);
       return text({ success: true, data: { id: split_id, message: `Split #${split_id} deleted` } });
