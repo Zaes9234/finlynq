@@ -77,12 +77,13 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_account_balances ───────────────────────────────────────────────────
   server.tool(
     "get_account_balances",
-    "Get current balances for all accounts. Each account's balance is in its own (account) currency. INVESTMENT accounts are valued at MARKET (current `holdings.value`, cash sleeve included), matching the web dashboard — but only on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key (no key) investment accounts fall back to ledger (net contributions = SUM(transactions.amount)) and a top-level `note` explains the fallback. Each account row carries `isInvestment` and `balanceBasis` ('market'|'ledger'); market-valued rows also carry `costBasis` and `cashFlowBasis` (the underlying tx-sum). When reportingCurrency is set, also returns a unified total converted to that currency. Default reporting = user's display currency.",
+    "Get current balances for all accounts. Each account's balance is in its own (account) currency. INVESTMENT accounts are valued at MARKET (current `holdings.value`, cash sleeve included), matching the web dashboard — but only on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key (no key) investment accounts fall back to ledger (net contributions = SUM(transactions.amount)) and a top-level `note` explains the fallback. Each account row carries `isInvestment` and `basis` ('market'|'ledger'; `balanceBasis` kept as a deprecated alias through v4.1); market-valued rows also carry `asOf`, `costBasis`, and `cashFlowBasis` (the underlying tx-sum). Pass `basis:'ledger'` to force ledger (net-contribution) valuation for every account. When reportingCurrency is set, also returns a unified total converted to that currency. Default reporting = user's display currency.",
     {
       currency: z.string().optional().describe("Filter rows by currency (ISO code, e.g. USD/CAD/EUR; omit or 'all' for every currency)"),
       reportingCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) — if set, response includes per-account converted balance + a grand total in this currency. Defaults to user's display currency."),
+      basis: z.enum(["market", "ledger"]).optional().describe("Valuation basis override. Default 'market' (investment accounts at market value when a decryption key is present). 'ledger' forces net-contribution (SUM of transactions) valuation for every account."),
     },
-    async ({ currency, reportingCurrency }) => {
+    async ({ currency, reportingCurrency, basis }) => {
       const raw = await q(db, sql`
         SELECT a.id, a.name_ct, a.alias_ct, a.type, a."group", a.currency,
                a.is_investment,
@@ -109,16 +110,27 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       // ledger numbers + a note instead. The Issue #210 `items` array MUST be
       // fed from the OVERLAID balances so `totalReporting` ties to
       // `get_net_worth.total.net.amount` on identical state.
-      const overlay = await applyInvestmentMarketOverlay(
-        raw.map((r, i) => ({
-          id: Number(r.id),
-          currency: String(decrypted[i].currency),
-          isInvestment: r.is_investment === true,
-          ledgerBalance: Number(r.balance),
-        })),
-        dek,
-        () => getHoldingsValueByAccount(userId, dek),
-      );
+      // FINLYNQ-268 decision 5: a `basis:'ledger'` override forces net-
+      // contribution valuation for every account (skips the market overlay
+      // WITHOUT the misleading no-DEK note). Otherwise (default 'market') the
+      // overlay applies market to investment rows when a DEK is present.
+      const overlayRows = raw.map((r, i) => ({
+        id: Number(r.id),
+        currency: String(decrypted[i].currency),
+        isInvestment: r.is_investment === true,
+        ledgerBalance: Number(r.balance),
+      }));
+      const overlay = basis === "ledger"
+        ? {
+            rows: overlayRows.map((r) => ({ ...r, balance: r.ledgerBalance, balanceBasis: "ledger" as const })),
+            marketApplied: false,
+            note: undefined as string | undefined,
+          }
+        : await applyInvestmentMarketOverlay(
+            overlayRows,
+            dek,
+            () => getHoldingsValueByAccount(userId, dek),
+          );
 
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const today = new Date().toISOString().split("T")[0];
@@ -152,13 +164,17 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           balanceTagged: tagAmount(rawBalance, ccy, "account"),
           balanceReporting: tagAmount(reportingAmount, reporting, "reporting"),
           isInvestment: ov.isInvestment,
+          // FINLYNQ-268: uniform `basis` field; `balanceBasis` retained as a
+          // deprecated alias through v4.1 (dual-emit, decision 2).
+          basis: ov.balanceBasis,
           balanceBasis: ov.balanceBasis,
         };
         if (ov.balanceBasis === "market") {
-          // Market-valued investment rows: surface the remaining cost basis
-          // and the net-contribution figure (the underlying tx-sum) so the
-          // contribution number stays reachable. Field name mirrors the
-          // dashboard's `cashFlowBasis`.
+          // Market-valued investment rows: surface `asOf` (basis === 'market'),
+          // the remaining cost basis, and the net-contribution figure (the
+          // underlying tx-sum) so the contribution number stays reachable.
+          // Field name mirrors the dashboard's `cashFlowBasis`.
+          out.asOf = today;
           out.costBasis = tagAmount(ov.costBasis ?? 0, ccy, "account");
           out.cashFlowBasis = tagAmount(roundMoney(ov.ledgerBalance, ccy), ccy, "account");
         }
@@ -526,14 +542,15 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_net_worth ──────────────────────────────────────────────────────────
   server.tool(
     "get_net_worth",
-    "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). INVESTMENT accounts are valued at MARKET (current holdings value, cash sleeve included) on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key they fall back to ledger (net contributions) with a top-level `note`. The current-totals response carries `basis` ('market'|'ledger'); `total.net.amount` equals `get_account_balances.totalReporting.amount` on identical state. Pass `priorMonths` > 0 for a month-by-month trend (current month plus N priors, `currentMonth` flagged) — the trend is ALWAYS contribution-basis (`basis: 'ledger'`), so its current-month row won't match a market-valued current-totals call. Omit `priorMonths` for current totals only. Legacy `months` param is a deprecated alias.",
+    "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). INVESTMENT accounts are valued at MARKET (current holdings value, cash sleeve included) on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key they fall back to ledger (net contributions) with a top-level `note`. The current-totals response carries `basis` ('market'|'ledger'), plus `asOf` when basis is 'market'; `total.net.amount` equals `get_account_balances.totalReporting.amount` on identical state. Pass `basis:'ledger'` to force net-contribution valuation. Pass `priorMonths` > 0 for a month-by-month trend (current month plus N priors, `currentMonth` flagged) — the trend is ALWAYS contribution-basis (`basis: 'ledger'`), so its current-month row won't match a market-valued current-totals call. Omit `priorMonths` for current totals only. Legacy `months` param is a deprecated alias.",
     {
       currency: z.string().optional().describe("Filter by currency (per-row ISO code, e.g. USD/CAD/EUR; omit or 'all' for every currency)"),
       priorMonths: z.number().optional().describe("If set, return a trend covering the current (partial) month plus N prior months. Omit or set to 0 for current totals."),
       months: z.number().optional().describe("DEPRECATED (issue #210) — alias for priorMonths. New callers should use priorMonths."),
       reportingCurrency: z.string().optional().describe("ISO code — unified total currency. Defaults to user's display currency."),
+      basis: z.enum(["market", "ledger"]).optional().describe("Valuation basis override for the CURRENT-totals response. Default 'market' (investment accounts at market value when a decryption key is present). 'ledger' forces net-contribution valuation. Ignored for the trend (priorMonths>0), which is always ledger."),
     },
-    async ({ currency, priorMonths, months, reportingCurrency }) => {
+    async ({ currency, priorMonths, months, reportingCurrency, basis }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const today = new Date().toISOString().split("T")[0];
       // Issue #210 — `priorMonths` is the new contract; `months` is a
@@ -566,16 +583,26 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         // Apply the identical market overlay get_account_balances uses. With a
         // DEK, investment accounts are valued at market; without one (pf_ API
         // key) they stay at ledger and `overlay.note` explains the fallback.
-        const overlay = await applyInvestmentMarketOverlay(
-          acctRows.map((r) => ({
-            id: Number(r.id),
-            currency: r.currency ?? "CAD",
-            isInvestment: r.is_investment === true,
-            ledgerBalance: Number(r.total),
-          })),
-          dek,
-          () => getHoldingsValueByAccount(userId, dek),
-        );
+        // FINLYNQ-268 decision 5: a `basis:'ledger'` override forces ledger for
+        // every account (skips the overlay), IDENTICALLY to get_account_balances
+        // so the #210 parity contract holds when the same override is passed.
+        const nwOverlayRows = acctRows.map((r) => ({
+          id: Number(r.id),
+          currency: r.currency ?? "CAD",
+          isInvestment: r.is_investment === true,
+          ledgerBalance: Number(r.total),
+        }));
+        const overlay = basis === "ledger"
+          ? {
+              rows: nwOverlayRows.map((r) => ({ ...r, balance: r.ledgerBalance, balanceBasis: "ledger" as const })),
+              marketApplied: false,
+              note: undefined as string | undefined,
+            }
+          : await applyInvestmentMarketOverlay(
+              nwOverlayRows,
+              dek,
+              () => getHoldingsValueByAccount(userId, dek),
+            );
 
         // Roll up per-currency assets/liabilities/net from the OVERLAID
         // per-account balances (+= so multiple accounts per currency sum).
@@ -628,6 +655,8 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           // contributions ('ledger', pf_ API key). `note` mirrors
           // get_account_balances.
           basis: overlay.marketApplied ? "market" : "ledger",
+          // FINLYNQ-268: `asOf` present iff basis === 'market'.
+          ...(overlay.marketApplied ? { asOf: today } : {}),
           total: {
             assets: tagAmount(aggAssets.totalReporting, reporting, "reporting"),
             liabilities: tagAmount(aggLiab.totalReporting, reporting, "reporting"),
