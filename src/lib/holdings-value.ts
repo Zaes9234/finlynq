@@ -41,6 +41,7 @@ export type HoldingValue = {
   accountId: number;
   name: string | null;  // decrypted display name (null without a DEK)
   symbol: string | null; // decrypted symbol (null without a DEK)
+  isCash: boolean;      // cash sleeve (is_cash=true) — excluded from diversification weighting (FINLYNQ-253)
   value: number;        // market value in account currency
   costBasis: number;    // remaining cost basis in account currency
   currency: string;     // account currency
@@ -78,6 +79,7 @@ async function valueHoldingsAtDate(
       symbolCt: schema.portfolioHoldings.symbolCt,
       currency: schema.portfolioHoldings.currency,
       isCrypto: schema.portfolioHoldings.isCrypto,
+      isCash: schema.portfolioHoldings.isCash,
       accountCurrency: schema.accounts.currency,
       // Manual-pricing flag (custom securities). NULL for un-backfilled
       // (security_id IS NULL) positions → treated as 'auto'.
@@ -394,6 +396,7 @@ async function valueHoldingsAtDate(
       accountId: h.accountId,
       name: h.name,
       symbol: h.symbol,
+      isCash: h.isCash === true,
       value: valueInAccountCcy,
       costBasis: costBasisInAccountCcy,
       currency: accountCurrency,
