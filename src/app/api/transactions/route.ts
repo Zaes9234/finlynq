@@ -103,7 +103,7 @@ export async function GET(request: NextRequest) {
   // source of truth and the legacy text column is NULL on every row.
   const portfolioHoldingNameParam = params.get("portfolioHolding") ?? undefined;
   const portfolioHoldingIdParam = params.get("portfolioHoldingId");
-  let portfolioHoldingId = portfolioHoldingIdParam
+  const portfolioHoldingId = portfolioHoldingIdParam
     ? parseInt(portfolioHoldingIdParam)
     : undefined;
   // Resolve `portfolioHolding` → holding-id set via the user's lookup HMAC.

@@ -1,0 +1,5025 @@
+[
+  {
+    "name": "accept_reconcile_suggestion",
+    "description": "Link an existing transaction to a bank-ledger row (accept a reconcile suggestion). linkType 'primary' also sets transactions.bank_transaction_id when it's currently NULL; 'extra' just adds the join row. Idempotent. Returns {linkId, setPrimaryFk, alreadyLinked}. Reverse with unlink_reconcile.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "transactionId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "transactions.id to link."
+        },
+        "bankTransactionId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "description": "bank_transactions.id to link to."
+        },
+        "linkType": {
+          "default": "extra",
+          "description": "'primary' sets the lineage FK if unset; 'extra' is an additional link.",
+          "type": "string",
+          "enum": [
+            "primary",
+            "extra"
+          ]
+        }
+      },
+      "required": [
+        "transactionId",
+        "bankTransactionId"
+      ]
+    }
+  },
+  {
+    "name": "accept_reconcile_suggestions",
+    "description": "Bulk-accept reconcile suggestions: link MANY existing transactions to bank-ledger rows in ONE call. `pairs` is an array of {bankTransactionId, transactionId, linkType?} (linkType defaults to 'primary'). Each pair is independent: a bad/cross-account/unknown id carries an `error` and the rest still commit (partial commit). Idempotent — a re-submitted already-linked pair returns alreadyLinked:true with no error. Returns an array POSITIONAL with the input: {bankTransactionId, transactionId, linkId, setPrimaryFk, alreadyLinked, error?}. Reverse individual links with unlink_reconcile.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "pairs": {
+          "minItems": 1,
+          "maxItems": 200,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "bankTransactionId": {
+                "type": "string",
+                "format": "uuid",
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+                "description": "bank_transactions.id to link to."
+              },
+              "transactionId": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991,
+                "description": "transactions.id to link."
+              },
+              "linkType": {
+                "default": "primary",
+                "description": "'primary' sets the lineage FK if unset; 'extra' is an additional link. Defaults to 'primary'.",
+                "type": "string",
+                "enum": [
+                  "primary",
+                  "extra"
+                ]
+              }
+            },
+            "required": [
+              "bankTransactionId",
+              "transactionId"
+            ]
+          },
+          "description": "Bank↔transaction pairs to link. Response is positional with this array."
+        }
+      },
+      "required": [
+        "pairs"
+      ]
+    }
+  },
+  {
+    "name": "add_account",
+    "description": "Create a new financial account (bank, investment, credit card, etc.)",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Account name (must be unique)"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "A",
+            "L"
+          ],
+          "description": "Account type: 'A' for asset, 'L' for liability"
+        },
+        "group": {
+          "description": "Account group (e.g. 'Banks', 'Credit Cards', 'Investment')",
+          "type": "string"
+        },
+        "currency": {
+          "description": "ISO 4217 currency code (default CAD). Issue #206: any currency in SUPPORTED_CURRENCIES is accepted; FX engine triangulates through USD.",
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ]
+        },
+        "note": {
+          "description": "Optional note",
+          "type": "string"
+        },
+        "alias": {
+          "description": "Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label).",
+          "type": "string",
+          "maxLength": 64
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ]
+    }
+  },
+  {
+    "name": "add_goal",
+    "description": "Create a new financial goal. `account_ids` (issue #130) accepts 0..N account ids — the goal's progress sums across all linked accounts. Legacy single `account` (fuzzy-matched name) is still accepted as a single-element list. Pass `account_ids: []` for a manual-tracking goal.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Goal name"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "savings",
+            "debt_payoff",
+            "investment",
+            "emergency_fund"
+          ],
+          "description": "Goal type"
+        },
+        "target_amount": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Target amount (must be > 0)"
+        },
+        "deadline": {
+          "description": "Deadline (YYYY-MM-DD)",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "account": {
+          "description": "Legacy single-account linker — name or alias (fuzzy matched). Prefer `account_ids` for multi-account goals.",
+          "type": "string"
+        },
+        "account_ids": {
+          "description": "Multi-account linker (issue #130). Goal progress sums transactions across every account id supplied. Each id must belong to the user. Empty array = unlinked (manual tracking).",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "target_amount"
+      ]
+    }
+  },
+  {
+    "name": "add_loan",
+    "description": "Create a new loan or lease. Term-driven (term_months → payment derived) or payment-driven (payment_amount → payoff date solved); at least one of the two is required. Leases set residual_value (balance remaining at term end).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Loan name"
+        },
+        "type": {
+          "type": "string",
+          "description": "Loan type (e.g. 'mortgage', 'lease', 'auto', 'student', 'personal')"
+        },
+        "principal": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Original loan principal (must be > 0)"
+        },
+        "annual_rate": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0; zero allowed for 0% promo)"
+        },
+        "term_months": {
+          "description": "Loan term in months (optional when payment_amount is given — the term is solved from the payment)",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "start_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$",
+          "description": "Loan start date (YYYY-MM-DD)"
+        },
+        "account": {
+          "description": "Linked account — name or alias (fuzzy matched against name; exact match on alias). When linked, the account's ledger balance drives the outstanding balance.",
+          "type": "string"
+        },
+        "payment_amount": {
+          "description": "Payment per period (must be > 0). Must exceed the period interest or the call is refused.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "payment_frequency": {
+          "description": "weekly | biweekly | semi_monthly | monthly | quarterly | annual (default monthly)",
+          "type": "string",
+          "enum": [
+            "weekly",
+            "biweekly",
+            "semi_monthly",
+            "monthly",
+            "quarterly",
+            "annual"
+          ]
+        },
+        "extra_payment": {
+          "description": "Extra principal per payment (must be >= 0; default 0)",
+          "type": "number",
+          "minimum": 0
+        },
+        "residual_value": {
+          "description": "Lease residual/buyout — the schedule amortizes down to this instead of 0 (must be < principal)",
+          "type": "number",
+          "minimum": 0
+        },
+        "min_payment": {
+          "description": "Alias for payment_amount — minimum required payment (must be > 0)",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "type",
+        "principal",
+        "annual_rate",
+        "start_date"
+      ]
+    }
+  },
+  {
+    "name": "add_portfolio_holding",
+    "description": "Create a portfolio holding (a single position like 'VEQT.TO' inside a brokerage account). The import pipeline auto-creates these from CSV/ZIP uploads; this tool is for manually adding a position the user wants to track without an import.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Display name of the holding (e.g. 'Vanguard All-Equity ETF')"
+        },
+        "account": {
+          "type": "string",
+          "description": "Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required because uniqueness is scoped per (account, name)."
+        },
+        "symbol": {
+          "description": "Ticker symbol (e.g. 'VEQT.TO', 'BTC')",
+          "type": "string",
+          "maxLength": 50
+        },
+        "currency": {
+          "description": "ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list.",
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ]
+        },
+        "isCrypto": {
+          "description": "Flag this holding as crypto (default: false)",
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "name",
+        "account"
+      ]
+    }
+  },
+  {
+    "name": "add_snapshot",
+    "description": "Record a net-worth snapshot for tracking wealth over time",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "date": {
+          "description": "YYYY-MM-DD (default: today)",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "add_split",
+    "description": "Add a single split to an existing transaction",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "transaction_id": {
+          "type": "number",
+          "description": "Parent transaction id"
+        },
+        "category_id": {
+          "description": "Category id (split into this category)",
+          "type": "number"
+        },
+        "account_id": {
+          "description": "Account id (rare — override parent account)",
+          "type": "number"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Split amount (same sign convention as parent)"
+        },
+        "note": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transaction_id",
+        "amount"
+      ]
+    }
+  },
+  {
+    "name": "add_subscription",
+    "description": "Create a new subscription. Issue #210 — `amount` MUST be positive (the storage convention). A subscription is by definition an outflow; the sign is implicit, not in the value.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Subscription name (unique per user)"
+        },
+        "amount": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Amount per billing cycle (must be > 0)"
+        },
+        "cadence": {
+          "type": "string",
+          "enum": [
+            "weekly",
+            "monthly",
+            "quarterly",
+            "annual",
+            "yearly"
+          ],
+          "description": "Billing frequency"
+        },
+        "next_billing_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$",
+          "description": "Next billing date (YYYY-MM-DD)"
+        },
+        "currency": {
+          "description": "ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list.",
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ]
+        },
+        "category": {
+          "description": "Category name (fuzzy matched)",
+          "type": "string"
+        },
+        "account": {
+          "description": "Account name or alias (fuzzy matched against name; exact match on alias)",
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "amount",
+        "cadence",
+        "next_billing_date"
+      ]
+    }
+  },
+  {
+    "name": "analyze_holding",
+    "description": "Deep-dive on a single holding: avg cost, realized gain, dividends, days held, full transaction history. Per-row amounts stay in the holding's account currency; aggregates also surface in reportingCurrency (defaults to user's display currency). When `symbol` substring-matches multiple holdings sharing the same name (TFSA + RRSP), pass `holdingId` to scope the analysis to a single position; otherwise the response includes an `ambiguous` array listing every candidate's `{holdingId, name, symbol, account}` and the caller must pick one.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "description": "Holding name or symbol (fuzzy matched). Required when `holdingId` is omitted.",
+          "type": "string"
+        },
+        "holdingId": {
+          "description": "Filter to this exact portfolio_holdings.id — bypasses fuzzy matching. Use this when `symbol` matches multiple positions sharing the same name (resolves the ambiguity).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "apply_rules_to_bank_rows",
+    "description": "Fire active rules over a batch of bank-ledger rows (Auto-pilot bulk). On confirm, auto-materializes matched rows into transactions. Two-step: first call (no confirmation_token) runs a PREVIEW pass (autoMaterialize=false — no writes) and returns a summary + confirmationToken (5-min TTL); second call with the token + autoMaterialize:true commits. Returns {materialized, rulesFired, possibleDuplicates, perRow}. Requires an unlocked DEK when materializing.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "bankRowIds": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+          },
+          "description": "bank_transactions.id UUIDs to run rules over."
+        },
+        "autoMaterialize": {
+          "description": "Write matched rows to transactions. Only honored on the confirmed (token) call.",
+          "type": "boolean"
+        },
+        "confirmation_token": {
+          "description": "Token from the preview call. Omit to preview; pass to commit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bankRowIds"
+      ]
+    }
+  },
+  {
+    "name": "apply_rules_to_staged_import",
+    "description": "Re-apply active transaction rules to a PENDING staged import in place. Rewrites the staged rows (renames payees, flips tx_type to transfer, sets category/account, etc.) so the review surface reflects rule effects before approval. Optional rowIds = subset; optional onlyRuleId = a single rule. Returns {rowsTouched, matches}. Requires an unlocked DEK; staged import must be pending.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "stagedImportId": {
+          "type": "string",
+          "description": "staged_imports.id (must be status='pending')."
+        },
+        "rowIds": {
+          "description": "Subset of staged_transactions.id to apply to. Omit for the whole batch.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "onlyRuleId": {
+          "description": "Restrict to a single transaction_rules.id (e.g. a just-created rule).",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "stagedImportId"
+      ]
+    }
+  },
+  {
+    "name": "apply_rules_to_uncategorized",
+    "description": "Run all active categorization rules against uncategorized transactions. Rules with side-effect actions (set_account, create_transfer) are refused and surfaced in skipped[]; they need approve-time context.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "dry_run": {
+          "description": "Preview matches without saving (default false)",
+          "type": "boolean"
+        },
+        "limit": {
+          "description": "Max transactions to process (default 500)",
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "approve_staged_rows",
+    "description": "Create REAL ledger transactions from staged rows (writes into the live `transactions` table). Use this ONLY for a first-time import of a brand-new account that has no existing transactions — running it on an account that already has manual/imported transactions for the period DUPLICATES them. For the normal reconcile workflow (load the bank side without creating ledger entries) use send_to_bank_ledger instead. Two-step: first call returns a summary + confirmationToken (5-min TTL); second call with the token + same payload commits. Optional rowIds = subset (omit = all). Optional idempotencyKey is stored 72h to make retries safe. Calls invalidateUser after commit so the per-user tx cache reflects the new rows.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "stagedImportId": {
+          "type": "string",
+          "description": "staged_imports.id"
+        },
+        "rowIds": {
+          "description": "Subset of staged_transactions.id to approve. Omit to approve all.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forceImportIndices": {
+          "description": "Row indices to import even if dedup flags them as duplicates (passes through to executeImport).",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        },
+        "idempotencyKey": {
+          "description": "UUID supplied by the caller. Same key within 72h returns the stored response without re-INSERTing.",
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "confirmation_token": {
+          "description": "Token returned by the preview call. Omit to get a preview; pass to commit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stagedImportId"
+      ]
+    }
+  },
+  {
+    "name": "bulk_add_subscriptions",
+    "description": "Commit a set of detected subscriptions. Pass the candidates returned by detect_subscriptions (payee + amount + cadence), plus the confirmationToken.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "candidates": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "payee": {
+                "type": "string"
+              },
+              "amount": {
+                "type": "number"
+              },
+              "cadence": {
+                "type": "string",
+                "enum": [
+                  "weekly",
+                  "monthly",
+                  "quarterly",
+                  "annual"
+                ]
+              },
+              "next_billing_date": {
+                "description": "YYYY-MM-DD. Defaults to today + cadence interval",
+                "type": "string",
+                "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+              },
+              "category_id": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "payee",
+              "amount",
+              "cadence"
+            ]
+          }
+        },
+        "confirmation_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidates",
+        "confirmation_token"
+      ]
+    }
+  },
+  {
+    "name": "bulk_record_transactions",
+    "description": "Record many cash transactions in one batch (partial-commit: a bad row fails without unwinding the rest). Prefer per-row `account_id` (or top-level fallback) over `account` name — weak substring name matches fail that row with a 'did you mean…' message. Category auto-detected when omitted. INVESTMENT ACCOUNTS ARE REJECTED — any is_investment row fails; use the portfolio_* tools instead. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result carries `resolvedAccount`. Pass `dryRun: true` to validate + resolve without writing. Pass top-level `idempotencyKey` (fresh UUID v4 per batch) to make retries safe — a same-(user,key) commit within 72h returns the original result verbatim. A successful batch returns a top-level `possibleDuplicates` array (hints only) flagging inserts resembling an existing row (same direction, amount within 5%, dates within 7 days).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "account_id": {
+          "description": "Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "dryRun": {
+          "description": "When true, run the full per-row validation/resolution pipeline but skip every INSERT. Use this to preview routing for a whole batch (account fuzzy-matches, FX rates, holding bindings) before committing. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`/`resolvedHolding`.",
+          "type": "boolean"
+        },
+        "idempotencyKey": {
+          "description": "Optional UUID v4 the caller mints once per batch. First call with `(user, key)` writes the rows AND stashes the response JSON; any retry within 72h returns the stored response verbatim with no INSERTs and no cache invalidation. Skipped on `dryRun: true` (preview must not block a future real submit) and skipped when zero rows commit (caller should retry, not replay). Stored response has plaintext payees/account names redacted to row indices — replay messages read 'row #i: <amt> <ccy>' instead of '<payee>: <amt> <ccy>'; `transactionId` and `resolvedAccount.id` are preserved.",
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+        },
+        "transactions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "number"
+              },
+              "payee": {
+                "type": "string"
+              },
+              "account": {
+                "description": "Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id`. Required if neither row-level `account_id` nor top-level `account_id` is set; rejected for low-confidence fuzzy matches.",
+                "type": "string"
+              },
+              "account_id": {
+                "description": "Per-row account FK (accounts.id). Skips fuzzy matching; routes to the exact account. Wins over both `account` and the top-level `account_id`.",
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "date": {
+                "type": "string"
+              },
+              "category": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              },
+              "tags": {
+                "type": "string"
+              },
+              "portfolioHoldingId": {
+                "description": "Optional FK to portfolio_holdings.id — bind this row to a position. Get the id from get_portfolio_analysis (each holding exposes `id`) or add_portfolio_holding.",
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "portfolioHolding": {
+                "description": "Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\"). Exact case-insensitive match against the user's existing holdings scoped to this row's account (no auto-create — error if no match). When both are passed and disagree, the row fails.",
+                "type": "string"
+              },
+              "quantity": {
+                "description": "Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Omit for cash-only rows. RSU vest → amount=0, quantity=+net_shares; ESPP/buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares. ALWAYS pair with portfolioHolding or portfolioHoldingId — quantity on an unbound row is invisible to the portfolio aggregator.",
+                "type": "number"
+              },
+              "enteredAmount": {
+                "description": "User-typed amount in enteredCurrency. Server converts to account currency.",
+                "type": "number"
+              },
+              "enteredCurrency": {
+                "description": "ISO code of enteredAmount; defaults to account currency.",
+                "type": "string"
+              },
+              "tradeGroupKey": {
+                "description": "Multi-currency trade pair grouping hint (issue #96). Two rows in this batch with the same `tradeGroupKey` get the same server-minted UUID stamped into `trade_link_id`. Used to link the cash-out leg + stock-in leg of a multi-currency trade so the four cost-basis aggregators can pull the cash leg's `entered_amount` (broker's actual settlement) as cost basis instead of the stock leg's amount (Finlynq's live FX). The key itself is a per-batch label (any string — \"BNO-buy-2025\", \"trade1\", etc.); the server discards it and only the minted UUID lands in the DB. Each group must have exactly two rows: one with `quantity > 0` (stock leg) and one with `quantity == 0` or omitted (cash leg). Rows with no `tradeGroupKey` are normal single-leg inserts (current behavior).",
+                "type": "string"
+              }
+            },
+            "required": [
+              "amount",
+              "payee"
+            ]
+          },
+          "description": "Array of transactions to record"
+        }
+      },
+      "required": [
+        "transactions"
+      ]
+    }
+  },
+  {
+    "name": "cancel_import",
+    "description": "Cancel a pending MCP upload — marks the row as cancelled and deletes the file from disk.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "upload_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "upload_id"
+      ]
+    }
+  },
+  {
+    "name": "convert_amount",
+    "description": "Convert an amount from one currency to another using triangulated FX rates. Cross-rates go through USD; user overrides win when they cover the requested date.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "number",
+          "description": "Amount to convert"
+        },
+        "from": {
+          "type": "string",
+          "description": "Source currency"
+        },
+        "to": {
+          "type": "string",
+          "description": "Target currency"
+        },
+        "date": {
+          "description": "YYYY-MM-DD — defaults to today",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        }
+      },
+      "required": [
+        "amount",
+        "from",
+        "to"
+      ]
+    }
+  },
+  {
+    "name": "create_category",
+    "description": "Create a new transaction category",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Category name (must be unique)"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "E",
+            "I",
+            "R"
+          ],
+          "description": "Type: 'E'=expense, 'I'=income, 'R'=transfer"
+        },
+        "group": {
+          "description": "Group label (e.g. 'Housing', 'Food')",
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ]
+    }
+  },
+  {
+    "name": "create_rule",
+    "description": "Create an auto-categorization rule for future imports. Legacy shorthand (match_payee + assign_category) is synthesized into a v2 rule (FINLYNQ-84).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "match_payee": {
+          "type": "string",
+          "description": "Payee pattern to match (substring, case-insensitive; legacy `%` wildcards are stripped)"
+        },
+        "assign_category": {
+          "type": "string",
+          "description": "Category name to assign (fuzzy matched)"
+        },
+        "rename_to": {
+          "description": "Optionally rename matched payee to this",
+          "type": "string"
+        },
+        "assign_tags": {
+          "description": "Tags to assign (comma-separated)",
+          "type": "string"
+        },
+        "priority": {
+          "description": "Rule priority (higher = checked first, default 0)",
+          "type": "number"
+        }
+      },
+      "required": [
+        "match_payee",
+        "assign_category"
+      ]
+    }
+  },
+  {
+    "name": "delete_account",
+    "description": "Delete an account. Pass exactly ONE of `accountId` (preferred, exact) or `account` (name/alias, fuzzy). A non-empty account (has transactions) or `force=true` is DESTRUCTIVE — it CASCADEs the account's transactions, holding_accounts, and goal_accounts — so it requires a two-step: the first call returns a preview (name + tx/holding/goal counts) + a confirmationToken (single-use, 5-min TTL) and deletes NOTHING; call again with the token to commit. A CLEAN, empty account deletes directly. Supplying both id + name is allowed only when they resolve to the same account.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "description": "Account FK (accounts.id). Exact match — preferred and the only way to delete an account when the user's DEK is not unlocked.",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "account": {
+          "description": "Account name or alias (fuzzy matched against name; exact match on alias). Requires an unlocked DEK because account names live in encrypted columns post Stream D Phase 4. Pass `accountId` instead when no DEK is available.",
+          "type": "string"
+        },
+        "force": {
+          "description": "Delete even if transactions exist. FK CASCADE removes the account's transactions, holding_accounts, and goal_accounts rows — irreversible. A non-empty delete ALWAYS requires the confirmation token regardless of this flag.",
+          "type": "boolean"
+        },
+        "confirmation_token": {
+          "description": "Omit to preview; pass the preview's token to commit a non-empty/force delete. Single-use, 5-min TTL. Not needed to delete a clean empty account.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "delete_bank_transaction",
+    "description": "Delete a single bank-ledger row (bank_transactions) by id. Use this to remove duplicate bank rows surfaced by find_duplicate_bank_rows. Cascades automatically: any transaction↔bank links are removed and transactions.bank_transaction_id is cleared on affected ledger transactions (the `transactions` rows themselves are NOT deleted). Pass dryRun:true to preview the impact (the unlinkedTransactionIds) without committing. Returns { deleted, unlinkedTransactionIds, dryRun }. Owner-scoped; a non-existent or cross-user id returns a not-found error and changes nothing. Destructive — confirm with dryRun first.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "bankTransactionId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "description": "bank_transactions.id to delete (UUID)."
+        },
+        "dryRun": {
+          "description": "true → return the unlinkedTransactionIds that WOULD be affected without writing anything. Default false (real delete).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "bankTransactionId"
+      ]
+    }
+  },
+  {
+    "name": "delete_budget",
+    "description": "Delete a budget entry for a category/month",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string",
+          "description": "Category name"
+        },
+        "month": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
+          "description": "Month (YYYY-MM)"
+        }
+      },
+      "required": [
+        "category",
+        "month"
+      ]
+    }
+  },
+  {
+    "name": "delete_category",
+    "description": "Delete a category. Refuses if any transactions / auto-categorize rules / subscriptions still reference it (use `preview_bulk_categorize` / `execute_bulk_categorize` to reassign first). MUST be preceded by `preview_delete_category` with a matching id — pass that call's `confirmationToken` here verbatim. The token is single-use and expires after 5 minutes.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Category FK (categories.id) — must match the id from the preview that issued the token."
+        },
+        "confirmation_token": {
+          "type": "string",
+          "description": "Token returned by `preview_delete_category` for this exact id. Single-use; 5-minute TTL."
+        }
+      },
+      "required": [
+        "id",
+        "confirmation_token"
+      ]
+    }
+  },
+  {
+    "name": "delete_fx_override",
+    "description": "Delete a manual FX rate override by id",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "fx_overrides row id"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "delete_goal",
+    "description": "Delete a financial goal by name",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "goal": {
+          "type": "string",
+          "description": "Goal name (fuzzy matched)"
+        }
+      },
+      "required": [
+        "goal"
+      ]
+    }
+  },
+  {
+    "name": "delete_loan",
+    "description": "Delete a loan by id",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Loan id to delete"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "delete_portfolio_holding",
+    "description": "Delete a portfolio holding. Transactions referencing it survive (the FK is set to NULL — they fall back to orphan aggregation), but its cost-basis LOTS cascade-delete. Two-step (destructive) when the holding has linked transactions OR lots: the first call returns a preview (name + tx/lot counts) + a confirmationToken (single-use, 5-min TTL) and deletes NOTHING; call again with the token to commit. A clean/empty holding deletes directly.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "holding": {
+          "type": "string",
+          "description": "Holding name OR symbol (fuzzy matched)"
+        },
+        "confirmation_token": {
+          "description": "Omit to preview; pass the preview's token to commit when the holding has transactions/lots. Single-use, 5-min TTL. Not needed for a clean/empty holding.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "holding"
+      ]
+    }
+  },
+  {
+    "name": "delete_rule",
+    "description": "Delete a transaction rule by id",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Rule id"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "delete_split",
+    "description": "Delete a split by id. RECOMMENDED: pass `expected.amount` (the amount you believe this split has) — a mismatch refuses the delete, guarding against a mis-copied id. Omitting `expected` still deletes (back-compat).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "split_id": {
+          "type": "number",
+          "description": "Split id"
+        },
+        "expected": {
+          "description": "Optional row-content echo. If present and it doesn't match the stored split, the delete is refused.",
+          "type": "object",
+          "properties": {
+            "amount": {
+              "description": "The amount you believe this split has (±0.01).",
+              "type": "number"
+            }
+          }
+        }
+      },
+      "required": [
+        "split_id"
+      ]
+    }
+  },
+  {
+    "name": "delete_subscription",
+    "description": "Permanently delete a subscription by id",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Subscription id"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "delete_transaction",
+    "description": "Permanently delete a transaction by ID. RECOMMENDED: pass `expected` (the payee and/or amount you believe #id has) — if it doesn't match the stored row the delete is refused, guarding against a hallucinated / mis-copied id. Omitting `expected` still deletes (back-compat).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Transaction ID to delete"
+        },
+        "expected": {
+          "description": "Optional row-content echo. If present and it doesn't match the stored row, the delete is refused.",
+          "type": "object",
+          "properties": {
+            "payee": {
+              "description": "The payee you believe this transaction has (case-insensitive).",
+              "type": "string"
+            },
+            "amount": {
+              "description": "The amount you believe this transaction has (±0.01).",
+              "type": "number"
+            }
+          }
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "delete_transfer",
+    "description": "Permanently delete BOTH legs of a transfer pair. Identify by linkId OR by either leg's id. Two-step (destructive): first call returns a preview of BOTH legs (payee/amount/account) + a confirmationToken (single-use, 5-min TTL) and deletes NOTHING; call again with the token to commit. Refuses if the rows don't form a clean transfer pair — use delete_transaction per-leg for non-symmetric multi-leg imports.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "linkId": {
+          "description": "UUID link_id shared by the pair. Either this OR transactionId is required.",
+          "type": "string"
+        },
+        "transactionId": {
+          "description": "Any one transaction id from the pair.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "confirmation_token": {
+          "description": "Omit to preview both legs; pass the preview's token to commit. Single-use, 5-min TTL.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "detect_subscriptions",
+    "description": "Scan recent transactions and return candidate subscriptions. Candidates are payees with 3+ regular-cadence occurrences and stable amounts (read from the decrypted tx cache). Returns a confirmationToken for bulk_add_subscriptions. `avgAmount` on each candidate is always positive (matches the `subscriptions.amount` storage convention).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "lookback_months": {
+          "description": "Months of history to scan (default 6)",
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "execute_bulk_categorize",
+    "description": "Commit a bulk-categorize. Must be preceded by preview_bulk_categorize with the same filter + category_id.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "description": "Explicit transaction ids",
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "start_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "end_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "category_id": {
+              "description": "Exact category id (null matches uncategorized)",
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_id": {
+              "description": "Exact account id",
+              "type": "number"
+            },
+            "payee_match": {
+              "description": "Substring match against plaintext payee (case-insensitive)",
+              "type": "string"
+            }
+          },
+          "description": "Filter — at least one field required"
+        },
+        "category_id": {
+          "type": "number"
+        },
+        "confirmation_token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "filter",
+        "category_id",
+        "confirmation_token"
+      ]
+    }
+  },
+  {
+    "name": "execute_bulk_delete",
+    "description": "Commit a bulk delete. Must be preceded by preview_bulk_delete; the same filter must be passed.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "description": "Explicit transaction ids",
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "start_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "end_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "category_id": {
+              "description": "Exact category id (null matches uncategorized)",
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_id": {
+              "description": "Exact account id",
+              "type": "number"
+            },
+            "payee_match": {
+              "description": "Substring match against plaintext payee (case-insensitive)",
+              "type": "string"
+            }
+          },
+          "description": "Filter — at least one field required"
+        },
+        "confirmation_token": {
+          "type": "string",
+          "description": "Token returned by preview_bulk_delete"
+        }
+      },
+      "required": [
+        "filter",
+        "confirmation_token"
+      ]
+    }
+  },
+  {
+    "name": "execute_bulk_update",
+    "description": "Commit a bulk update. Must be preceded by preview_bulk_update; the same filter+changes must be passed. Returns `{ updated, unappliedChanges }` where each `unappliedChanges` entry is `{ field, requestedValue, reason }`. Accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker), tags. Unknown keys fail. Aborts (no commit) when ALL requested changes failed to resolve.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "description": "Explicit transaction ids",
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "start_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "end_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "category_id": {
+              "description": "Exact category id (null matches uncategorized)",
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_id": {
+              "description": "Exact account id",
+              "type": "number"
+            },
+            "payee_match": {
+              "description": "Substring match against plaintext payee (case-insensitive)",
+              "type": "string"
+            }
+          },
+          "description": "Filter — at least one field required"
+        },
+        "changes": {
+          "type": "object",
+          "properties": {
+            "category_id": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "category": {
+              "description": "Category name (resolved server-side via the strict resolver — exact / startsWith / token-overlapping substring). Errors with 'did you mean …?' on ambiguous matches.",
+              "type": "string"
+            },
+            "account_id": {
+              "type": "number"
+            },
+            "date": {
+              "description": "YYYY-MM-DD calendar date. Invalid values are dropped and surfaced via `unappliedChanges`; never silently committed.",
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            },
+            "payee": {
+              "type": "string"
+            },
+            "is_business": {
+              "description": "0 or 1",
+              "type": "number"
+            },
+            "quantity": {
+              "description": "Share/unit count for portfolio rows. null clears the column.",
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "portfolioHoldingId": {
+              "description": "Portfolio holding FK (ownership-checked).",
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "portfolioHolding": {
+              "description": "Holding name OR ticker symbol — resolved via the same lookup-only helper used by record_transaction (no auto-create).",
+              "type": "string"
+            },
+            "tags": {
+              "description": "Tag edit. mode=replace overwrites, append adds if not present, remove strips exact matches",
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "append",
+                    "replace",
+                    "remove"
+                  ]
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "value"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "confirmation_token": {
+          "type": "string",
+          "description": "Token returned by preview_bulk_update"
+        }
+      },
+      "required": [
+        "filter",
+        "changes",
+        "confirmation_token"
+      ]
+    }
+  },
+  {
+    "name": "execute_import",
+    "description": "Commit an upload as transactions. Requires the token from preview_import with matching uploadId + templateId + columnMapping.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "upload_id": {
+          "type": "string"
+        },
+        "confirmation_token": {
+          "type": "string"
+        },
+        "template_id": {
+          "type": "number"
+        },
+        "column_mapping": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "upload_id",
+        "confirmation_token"
+      ]
+    }
+  },
+  {
+    "name": "find_duplicate_bank_rows",
+    "description": "Surface duplicate bank-ledger rows for one account. Finds DISTINCT rows that describe the same economic event (overlapping statement imports) and groups them so you can pick a canonical to keep. Returns an array of groups { canonicalId (oldest, keep this), duplicateIds[], date, amount, payee, seenCount, linkedTransactionId? }. Empty array when none. NOTE: seen_count is NOT the duplicate signal (re-importing the same row bumps it on the existing single row); grouping keys on (date, amount, payee) across DISTINCT ids. Read-only. Requires an unlocked DEK (payees are decrypted to group).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "accounts.id to scan for duplicate bank rows."
+        },
+        "lookbackDays": {
+          "description": "Only consider bank rows dated within the last N days (default 180).",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "accountId"
+      ]
+    }
+  },
+  {
+    "name": "finlynq_help",
+    "description": "Discover available Finlynq tools, schema, and usage examples. Finlynq is a personal-finance TRACKING app: every write tool records a bookkeeping entry in the user's own database and never connects to a bank or brokerage or moves real money. Full docs: https://finlynq.com/mcp-guide",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "topic": {
+          "description": "Help topic (default: tools). `modes` documents every multi-mode tool's modes with an example each; `safety` documents the destructive-tool two-step (confirmation tokens) + echo guards.",
+          "type": "string",
+          "enum": [
+            "tools",
+            "schema",
+            "examples",
+            "write",
+            "portfolio",
+            "reconcile",
+            "modes",
+            "safety"
+          ]
+        },
+        "tool_name": {
+          "description": "Get help for a specific tool",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_account_balances",
+    "description": "Get current balances for all accounts. Each account's balance is in its own (account) currency. INVESTMENT accounts are valued at MARKET (current `holdings.value`, cash sleeve included), matching the web dashboard — but only on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key (no key) investment accounts fall back to ledger (net contributions = SUM(transactions.amount)) and a top-level `note` explains the fallback. Each account row carries `isInvestment` and `balanceBasis` ('market'|'ledger'); market-valued rows also carry `costBasis` and `cashFlowBasis` (the underlying tx-sum). When reportingCurrency is set, also returns a unified total converted to that currency. Default reporting = user's display currency.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "currency": {
+          "description": "Filter rows by currency (ISO code, e.g. USD/CAD/EUR; omit or 'all' for every currency)",
+          "type": "string"
+        },
+        "reportingCurrency": {
+          "description": "ISO code (USD/CAD/EUR/...) — if set, response includes per-account converted balance + a grand total in this currency. Defaults to user's display currency.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_balance_anchors",
+    "description": "List the bank balance anchors for one account. An anchor is the bank's reported balance on a given date, which the reconcile engine validates the ledger against. Returns an array of { accountId, date, amount, currency, source, createdAt } ordered by date DESC. Anchors are keyed by (accountId, date) — there is no synthetic id. Pass dateMin/dateMax (inclusive ISO YYYY-MM-DD) to bound the window. Owner-scoped; a non-existent or cross-user accountId returns []. Read-only. Pair with upsert_balance_anchor to create/correct an anchor.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "accounts.id to list anchors for."
+        },
+        "dateMin": {
+          "description": "Inclusive ISO YYYY-MM-DD floor on the anchor date. Omit for no floor.",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "dateMax": {
+          "description": "Inclusive ISO YYYY-MM-DD ceiling on the anchor date. Omit for no ceiling.",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        }
+      },
+      "required": [
+        "accountId"
+      ]
+    }
+  },
+  {
+    "name": "get_budget_summary",
+    "description": "Get budget vs actual spending for a specific month. Amounts are in the user's display currency (default reporting); pass reportingCurrency to override.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "month": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
+          "description": "Month in YYYY-MM format"
+        },
+        "reportingCurrency": {
+          "description": "ISO code for unified totals; defaults to user's display currency.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "month"
+      ]
+    }
+  },
+  {
+    "name": "get_cash_flow_forecast",
+    "description": "Project cash flow for the next 30, 60, or 90 days based on recurring transactions. All balances and event amounts are converted to reportingCurrency (defaults to user's display currency). Issue #210: by default, `currentBalance` scopes to accounts in the 'Banks' or 'Cash Accounts' groups; the response surfaces `accountsIncluded` + `accountsExcluded` so callers see exactly which accounts are in scope. Pass `accountFilter` to override (include/exclude lists or set `includeInvestments: true` to fold investment-account cash sleeves into the projection). Issue #235: response now includes `recurringContributions[]` with one row per detected-or-dropped candidate (`{ name, monthly, daysSinceLast, included, dropReason? }`); empty list explains a near-zero forecast. Stale recurrences (`daysSinceLast > 1.5 × cadence`) are dropped with `dropReason: 'stale'` rather than projected forward.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "days": {
+          "description": "Forecast horizon in days (default 90)",
+          "type": "number"
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency.",
+          "type": "string"
+        },
+        "accountFilter": {
+          "description": "Override the default Banks+Cash scope (issue #210).",
+          "type": "object",
+          "properties": {
+            "include": {
+              "description": "Whitelist of account ids — only these contribute to currentBalance. Mutually exclusive with `exclude`.",
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "exclude": {
+              "description": "Blacklist of account ids removed from the default Banks+Cash set.",
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              }
+            },
+            "includeInvestments": {
+              "description": "If true, also include accounts where `is_investment=true` (uses their cash-sleeve balance).",
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "get_categories",
+    "description": "List all available transaction categories",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_debt_payoff_plan",
+    "description": "Compare debt payoff strategies (avalanche vs snowball) across all user loans with an optional extra monthly payment. Loan balances stay in each loan's own currency; the response includes the resolved reportingCurrency for cross-currency context.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "description": "'avalanche' (highest rate first), 'snowball' (smallest balance first), or 'both' (default)",
+          "type": "string",
+          "enum": [
+            "avalanche",
+            "snowball",
+            "both"
+          ]
+        },
+        "extra_payment": {
+          "description": "Extra monthly payment to apply on top of minimums (default 0)",
+          "type": "number"
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_dividend_income",
+    "description": "Dividend income from the transactions table, classified by the user's Dividends category (issue #84). Includes cash dividends (qty=0), reinvested dividends (qty>0), and withholding-tax entries (amount<0, surfaced as separate `withholdingCount` per group, not netted). Group by year / quarter / holding, or omit `groupBy` to return raw rows.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "Inclusive lower bound on transactions.date, YYYY-MM-DD",
+          "type": "string"
+        },
+        "to": {
+          "description": "Inclusive upper bound on transactions.date, YYYY-MM-DD",
+          "type": "string"
+        },
+        "taxYear": {
+          "description": "Convenience: sets from=YYYY-01-01, to=YYYY-12-31",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "holdingId": {
+          "description": "Scope to one portfolio_holdings.id",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "accountId": {
+          "description": "Scope to one accounts.id",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "groupBy": {
+          "description": "Aggregation mode; omit for raw rows",
+          "type": "string",
+          "enum": [
+            "quarter",
+            "year",
+            "holding"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "get_financial_health_score",
+    "description": "Calculate a financial health score 0-100 with a per-component breakdown. The 6 weighted components: Savings Rate 0.25 / Debt-to-Income 0.20 / Emergency Fund 0.15 / Net Worth Trend 0.15 / Budget Adherence 0.15 / Age of Money 0.10. Component scores are currency-independent ratios; the underlying totals (income, expenses, liabilities, liquid assets) are converted to reportingCurrency (defaults to user's display currency). The final score is summed from un-rounded sub-components and rounded once at the end. Liquid assets exclude illiquid asset accounts (via `accounts.is_investment` + a cash-group whitelist). Net Worth Trend is a real 3M delta with a `{ direction, magnitudePct, descriptor }` payload in `detailRich`. Components with insufficient data are EXCLUDED (not penalized) and remaining weights renormalize (`excludedComponents` lists drops). DTI uses trailing-12M debt payments / income.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency. Affects the underlying totals surfaced alongside the score.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_fx_rate",
+    "description": "Get the FX rate to convert 1 unit of `from` into `to` on `date`. Cross-rates are computed by triangulation through USD: rate(from,to) = rate_to_usd[from] / rate_to_usd[to]. The lookup checks user overrides first, then the global cache, then Yahoo/CoinGecko, then the most recent cached rate for each currency.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "Source currency (ISO 4217 code, e.g. USD)"
+        },
+        "to": {
+          "type": "string",
+          "description": "Target currency (ISO 4217 code, e.g. CAD)"
+        },
+        "date": {
+          "description": "YYYY-MM-DD — defaults to today",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ]
+    }
+  },
+  {
+    "name": "get_goals",
+    "description": "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking. Numeric progress fields (issue #233): `currentAmount` (in goal currency, summed across linked accounts using market value for investment accounts and SUM(amount) for cash accounts, FX-converted into goal currency), `progress` and `percentComplete` (0..100, 1dp), `remaining`, `monthlyNeeded` (when a deadline is set).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_income_statement",
+    "description": "Generate income statement for a period. Totals are in the user's display currency by default; pass reportingCurrency to override.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "start_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$",
+          "description": "Start date (YYYY-MM-DD)"
+        },
+        "end_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$",
+          "description": "End date (YYYY-MM-DD)"
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start_date",
+        "end_date"
+      ]
+    }
+  },
+  {
+    "name": "get_investment_insights",
+    "description": "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, largest positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`; each target's `holding` string is matched against a holding's NAME or SYMBOL (case-insensitive substring, same as get_portfolio_analysis), and positions sharing a symbol across accounts are aggregated into one current position. Targets matching no holding are listed in the response `warnings` array (rather than silently returning currentPct 0). `mode: 'benchmark'` compares book-value growth vs a reference index. All monetary aggregates are converted to reportingCurrency (defaults to user's display currency) so cross-currency portfolios aggregate sensibly.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "Analytics mode (default: patterns)",
+          "type": "string",
+          "enum": [
+            "patterns",
+            "rebalancing",
+            "benchmark"
+          ]
+        },
+        "targets": {
+          "description": "Required when mode='rebalancing'. Target allocations (should sum to ~100).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "holding": {
+                "type": "string",
+                "description": "Holding name or symbol (case-insensitive substring match against the position's name + symbol; ticker symbols like VTI or VUN.TO work). Unmatched entries surface in the response `warnings` array."
+              },
+              "target_pct": {
+                "type": "number",
+                "description": "Target allocation percentage (0-100)"
+              }
+            },
+            "required": [
+              "holding",
+              "target_pct"
+            ]
+          }
+        },
+        "benchmark": {
+          "description": "Benchmark for mode='benchmark' (default SP500)",
+          "type": "string",
+          "enum": [
+            "SP500",
+            "TSX",
+            "MSCI_WORLD",
+            "BONDS_CA"
+          ]
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_loan_amortization",
+    "description": "Full amortization schedule for a loan. Returns every payment period with principal/interest/balance. Amounts are in the loan's own currency; the response includes both the loan currency and the resolved reportingCurrency for context.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "loan_id": {
+          "type": "number",
+          "description": "Loan id"
+        },
+        "as_of_date": {
+          "description": "YYYY-MM-DD — summarises paid-to-date at this point (default: today)",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency. Surfaced in the response for cross-currency context.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "loan_id"
+      ]
+    }
+  },
+  {
+    "name": "get_loans",
+    "description": "[DEPRECATED — use list_loans] Get all loans with amortization summary. Returned in the unified `{ success: true, data: [...] }` envelope as of v3.1.0.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_net_worth",
+    "description": "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). INVESTMENT accounts are valued at MARKET (current holdings value, cash sleeve included) on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key they fall back to ledger (net contributions) with a top-level `note`. The current-totals response carries `basis` ('market'|'ledger'); `total.net.amount` equals `get_account_balances.totalReporting.amount` on identical state. Pass `priorMonths` > 0 for a month-by-month trend (current month plus N priors, `currentMonth` flagged) — the trend is ALWAYS contribution-basis (`basis: 'ledger'`), so its current-month row won't match a market-valued current-totals call. Omit `priorMonths` for current totals only. Legacy `months` param is a deprecated alias.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "currency": {
+          "description": "Filter by currency (per-row ISO code, e.g. USD/CAD/EUR; omit or 'all' for every currency)",
+          "type": "string"
+        },
+        "priorMonths": {
+          "description": "If set, return a trend covering the current (partial) month plus N prior months. Omit or set to 0 for current totals.",
+          "type": "number"
+        },
+        "months": {
+          "description": "DEPRECATED (issue #210) — alias for priorMonths. New callers should use priorMonths.",
+          "type": "number"
+        },
+        "reportingCurrency": {
+          "description": "ISO code — unified total currency. Defaults to user's display currency.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_portfolio_analysis",
+    "description": "List portfolio holdings with all investment metrics. Each row carries quantity, cost basis, avg cost, unrealized/realized gain, dividends, total return, and % of portfolio, one row per `holdingId` — two holdings sharing a display name across accounts (e.g. VUN.TO in TFSA + RRSP) appear as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates convert to reportingCurrency (defaults to user's display currency). Pass `symbols` to filter (case-insensitive substring against `name + symbol + account`; tokens within an entry AND, across entries OR). Pass `account_id` (FK fast-path) or `account` (fuzzy name/alias) to scope to one account — `account_id` wins. The response includes a `warnings` array listing any filter entries that matched zero rows.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "symbols": {
+          "description": "Filter to specific holding names/symbols/accounts (omit for all). Substring match against the row's `name + symbol + account` combination. Within a single entry, ALL whitespace/paren-separated tokens must match (AND) — so 'VCN.TO (TFSA)' matches only holdings whose combined name/symbol/account contains both 'vcn.to' and 'tfsa'. Across multiple entries the result is the union (OR). Unmatched entries surface in `warnings`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "account_id": {
+          "description": "Account FK (accounts.id). Skips fuzzy matching; scopes results to holdings in this account only. Wins over `account` if both are passed. Bad/foreign id returns empty `holdings` plus a warning entry.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "account": {
+          "description": "Account name or alias (fuzzy matched, low-confidence rejected — issue #123). PREFER `account_id` when known. Unmatched/low-confidence entries surface in `warnings` with empty holdings.",
+          "type": "string"
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency. Used for the summary block totals.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_portfolio_performance",
+    "description": "Portfolio performance with avg-cost method: realized P&L, dividends, total return, days held per holding. Returns one row per `holdingId` (two holdings sharing a display name come through as separate rows). Per-row amounts stay in each holding's own (account) currency; the response includes the resolved reportingCurrency for context.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "period": {
+          "description": "Lookback period (default: all)",
+          "type": "string",
+          "enum": [
+            "1m",
+            "3m",
+            "6m",
+            "1y",
+            "all"
+          ]
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency. Returned in the response as context for cross-currency holdings.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_portfolio_performance_v2",
+    "description": "Compute a portfolio time-series return series. Returns daily market_value + cost_basis, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR. Distinct capability from get_portfolio_performance (which is per-holding average-cost realized P&L), NOT a newer version of it. Reads `portfolio_snapshots` populated by the nightly cron + admin backfill script. `gapsFilledDays` count flags any range where price_cache or fx_rates fell back to last-known values.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "period": {
+          "description": "Lookback period; defaults to '1y'",
+          "type": "string",
+          "enum": [
+            "1m",
+            "3m",
+            "6m",
+            "ytd",
+            "1y",
+            "all"
+          ]
+        },
+        "accountId": {
+          "description": "Scope to one accounts.id; omit for whole-portfolio aggregate",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  },
+  {
+    "name": "get_realized_gains",
+    "description": "Lot-level realized gains for the user, sourced from the FIFO lot engine. One row per closure (a sell that consumed a buy lot). Filter by tax year, date range, holding/account, or term (short ≤365d / long >365d / all). Each row carries pre-computed `realizedGain` in the holding's own currency (post issue #96 paired-cash-leg substitution) AND a `realizedGainInBase` converted into the user's display currency at historical FX; `totalRealizedGainInBase` is the unified grand total. FINLYNQ-183: the unified view is ALWAYS the user's display currency — there is no base/reporting-currency override parameter. Pre-Phase-1 history requires running the lot-backfill admin script.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "from": {
+          "description": "Inclusive close_date lower bound, YYYY-MM-DD",
+          "type": "string"
+        },
+        "to": {
+          "description": "Inclusive close_date upper bound, YYYY-MM-DD",
+          "type": "string"
+        },
+        "taxYear": {
+          "description": "Convenience: sets from=YYYY-01-01, to=YYYY-12-31",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "holdingId": {
+          "description": "Scope to one portfolio_holdings.id",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "accountId": {
+          "description": "Scope to one accounts.id",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "term": {
+          "description": "Holding-period term (US tax convention; days_held threshold = 365)",
+          "type": "string",
+          "enum": [
+            "short",
+            "long",
+            "all"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "get_reconcile_suggestions",
+    "description": "Reconcile snapshot for one account's bank ledger vs. its transactions (the /import page's three-layer match engine). Returns { linked, suggestions, bankOnly, txOnly, transactions, bankTransactions }. Each bankTransactions[id] carries suggestedCategoryId / suggestedTransferAccountId (rule-engine defaults for materialize) and duplicateOfTransactionId (strict possible-duplicate flag). Read-only. Requires an unlocked DEK (payees are decrypted to score fuzzy matches). Intended split: use this for the DETAILED per-row match view of ONE account; use get_reconciliation_summary for portfolio-wide per-account COUNTS in one call (run summary first at session start, then drill into the off accounts here).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "accounts.id to reconcile."
+        },
+        "dateMin": {
+          "description": "ISO YYYY-MM-DD floor on both tx + bank dates. Omit for no floor.",
+          "type": "string"
+        },
+        "dateMax": {
+          "description": "ISO YYYY-MM-DD ceiling on both tx + bank dates. Omit for no ceiling.",
+          "type": "string"
+        },
+        "lookbackDays": {
+          "description": "Legacy alternative to dateMin: last N days from today. dateMin wins when both set.",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "accountId"
+      ]
+    }
+  },
+  {
+    "name": "get_reconciliation_summary",
+    "description": "Summarize reconcile health across all accounts in one call (instead of one get_reconcile_suggestions per account). Returns an array of { accountId, accountName, linked, suggestions, bankOnly, txOnly, balanceMismatch, balanceDelta?, lastAnchorDate?, currency } — one row per account. balanceDelta = system/ledger balance − bank statement balance (the same delta the /import reconcile header shows; positive ⇒ ledger says MORE than the statement; null when the account has no balance anchor yet). Omit accountIds to summarize ALL non-investment accounts (investment reconcile is out of scope); pass accountIds to scope it (owner-scoped). Counts only — drill into a specific account with get_reconcile_suggestions. Read-only. Requires an unlocked DEK (payees are decrypted to score fuzzy matches; account names are decrypted).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "accountIds": {
+          "description": "Restrict to these accounts.id (owner-scoped). Omit to summarize all non-investment accounts.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "lookbackDays": {
+          "description": "Date floor on tx + bank dates, in days back from today. Default 90 (same as get_reconcile_suggestions).",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  },
+  {
+    "name": "get_recurring_transactions",
+    "description": "Get detected recurring transactions (subscriptions, bills, salary) from transaction history. Average amounts are converted to reportingCurrency (defaults to user's display currency) so cross-currency payments aggregate sensibly. Sign convention: `avgAmount` is always POSITIVE and the `direction` field carries the inflow/outflow semantic (matches `subscriptions.amount` / `add_subscription` / `list_subscriptions`). Also surfaces `daysSinceLast`, `expectedCadenceDays`, and `flagged` per row (flagged when `daysSinceLast > expectedCadenceDays * 1.5`) so callers can spot stale recurrences. This DETECTS recurrence the user has NOT explicitly tracked; use list_subscriptions / get_subscription_summary for explicitly-tracked subscription records.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_spending_anomalies",
+    "description": "Find spending categories with >30% deviation from their 3-month average. Totals are converted to reportingCurrency (defaults to user's display currency) so cross-currency spending compares apples-to-apples.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_spending_trends",
+    "description": "Get spending trends over time grouped by category. Rollups-first (FINLYNQ-269): the default payload returns `totalsByPeriod` (per-bucket grand totals) + `totalsByCategory` (each category summed over the window) — a small bounded shape suited to a context window — and OMITS the verbose per-(period,category) cells. Pass `detail: true` to also get the full cell `rows`. Totals are in the user's display currency by default; pass reportingCurrency to override. Issue #210: `priorMonths: N` returns N+1 monthly buckets — the current (partial) month plus N priors. `months` is accepted as a deprecated alias.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "period": {
+          "type": "string",
+          "enum": [
+            "weekly",
+            "monthly",
+            "yearly"
+          ],
+          "description": "Aggregation period"
+        },
+        "priorMonths": {
+          "description": "Months to look back, in addition to the current (partial) month. Default 12 → returns 13 buckets (current + 12 priors).",
+          "type": "number"
+        },
+        "months": {
+          "description": "DEPRECATED (issue #210) — alias for priorMonths.",
+          "type": "number"
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency.",
+          "type": "string"
+        },
+        "detail": {
+          "description": "Include the full per-(period,category) cell rows. Default false — the rollup totals are returned without them.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "period"
+      ]
+    }
+  },
+  {
+    "name": "get_spotlight_items",
+    "description": "Get current attention items — overspent budgets, upcoming bills, uncategorized transactions",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "get_staged_import",
+    "description": "Fetch full detail for one staged import — top-level metadata + every row with decrypted display fields. Returns 404 (Not found) when the id doesn't belong to the caller; cross-tenant attacks never leak that the id exists for someone else.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "stagedImportId": {
+          "type": "string",
+          "description": "staged_imports.id (UUID)"
+        }
+      },
+      "required": [
+        "stagedImportId"
+      ]
+    }
+  },
+  {
+    "name": "get_subscription_summary",
+    "description": "Get all tracked subscriptions with total monthly cost and upcoming renewals. Each subscription's amount is in its own currency; totals are converted to reportingCurrency (defaults to user's display currency). Intended split: use this for AGGREGATE cost + upcoming-renewal roll-ups; use list_subscriptions for the raw editable row set, and get_recurring_transactions for transactions the engine DETECTED as recurring (not user-tracked subscriptions).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency. Used for the unified total monthly/annual cost.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_weekly_recap",
+    "description": "Get a weekly financial recap: spending summary, income, net cash flow, notable transactions. Totals are converted to reportingCurrency (defaults to user's display currency).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "date": {
+          "description": "End date for the week (YYYY-MM-DD). Defaults to current week.",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "reportingCurrency": {
+          "description": "ISO code; defaults to user's display currency.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "link_staged_transfer_pair",
+    "description": "Sugar over update_staged_transaction: pair two staged rows as a transfer. Sets txType='R' on both and cross-points peer_staged_id. Validates: same staged_import_id, opposite-sign amounts (additive inverse), and different account names. Either row id may be passed first.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "rowAId": {
+          "type": "string",
+          "description": "First staged_transactions.id"
+        },
+        "rowBId": {
+          "type": "string",
+          "description": "Second staged_transactions.id"
+        }
+      },
+      "required": [
+        "rowAId",
+        "rowBId"
+      ]
+    }
+  },
+  {
+    "name": "list_fx_overrides",
+    "description": "List the user's manual FX rate overrides. Each override pins rate_to_usd for a currency over a date range; lookup uses the most-specific match.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_loans",
+    "description": "List all loans with balance, rate, payment, payoff date, and linked account",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_pending_uploads",
+    "description": "List MCP uploads that are still pending or previewed (not yet executed, cancelled, or expired).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_rules",
+    "description": "List all auto-categorization rules. Returns JSONB conditions + actions (FINLYNQ-84 v2 shape) plus decrypted FK names for human-readable rendering.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_splits",
+    "description": "List all splits for a transaction. Decrypts note/description/tags in memory when a DEK is available.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "transaction_id": {
+          "type": "number",
+          "description": "Parent transaction id"
+        }
+      },
+      "required": [
+        "transaction_id"
+      ]
+    }
+  },
+  {
+    "name": "list_staged_imports",
+    "description": "List the user's staged imports (pending statements awaiting review). Each row carries the import-level metadata + a synthetic `reconciliation` block (statement balance vs current balance vs projected post-approval balance) when the import is bound to an account. Use this before `get_staged_import` to find imports needing review.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "status": {
+          "description": "Filter by staged_imports.status; defaults to 'pending'.",
+          "type": "string",
+          "enum": [
+            "pending",
+            "imported",
+            "rejected"
+          ]
+        },
+        "limit": {
+          "description": "Max imports to return (default 50).",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 200
+        }
+      }
+    }
+  },
+  {
+    "name": "list_staged_transactions",
+    "description": "Flat list of staged transaction rows across one or many imports. Useful for 'show me every uncategorized pending row across all my pending statements.' Filter by stagedImportId, dedupStatus, rowStatus, or txType. Always user-scoped.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "stagedImportId": {
+          "description": "Restrict to one staged_imports.id",
+          "type": "string"
+        },
+        "dedupStatus": {
+          "description": "Filter by dedup_status.",
+          "type": "string",
+          "enum": [
+            "new",
+            "existing",
+            "probable_duplicate"
+          ]
+        },
+        "rowStatus": {
+          "description": "Filter by row_status.",
+          "type": "string",
+          "enum": [
+            "pending",
+            "approved",
+            "rejected"
+          ]
+        },
+        "txType": {
+          "description": "Filter by tx_type.",
+          "type": "string",
+          "enum": [
+            "E",
+            "I",
+            "R"
+          ]
+        },
+        "limit": {
+          "description": "Max rows (default 100).",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 500
+        }
+      }
+    }
+  },
+  {
+    "name": "list_subscriptions",
+    "description": "List all subscriptions with full detail (status, next billing, category, account, notes). Issue #210 — `amount` is always positive (the storage convention); a subscription is by definition an outflow. Intended split: use this for the raw editable row set; use get_subscription_summary for aggregate monthly/annual cost + upcoming renewals, and get_recurring_transactions for engine-DETECTED recurrences that are not tracked subscriptions.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "status": {
+          "description": "Filter by status (default: all)",
+          "type": "string",
+          "enum": [
+            "active",
+            "paused",
+            "cancelled",
+            "all"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "materialize_bank_row",
+    "description": "Create a real transaction from a bank-only ledger row. Category mode (set categoryId, or leave both unset for an uncategorized row) → {mode:'category', transactionId}. Transfer mode (set destAccountId; OUTFLOW rows only) → {mode:'transfer', fromTransactionId, toTransactionId, linkId}. Pass at most ONE of categoryId / destAccountId. Refuses investment accounts + sign-vs-category mismatch. Requires an unlocked DEK.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "bankTransactionId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "description": "bank_transactions.id to materialize."
+        },
+        "categoryId": {
+          "description": "Category mode: stamp this category on the new tx (sign-vs-category enforced).",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "accountId": {
+          "description": "Category mode: target-account override (defaults to the bank row's account; never investment).",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "destAccountId": {
+          "description": "Transfer mode: destination account. Writes a transfer pair with the bank row as the source (outflow) leg.",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "bankTransactionId"
+      ]
+    }
+  },
+  {
+    "name": "portfolio_buy",
+    "description": "Buy shares/units of a holding in a brokerage account. Writes the canonical buy + buy_cash_leg pair (stock leg positive, cash leg negative, sum 0), opens a cost-basis lot, and debits the cash sleeve for the holding's currency — that sleeve must already exist (add_portfolio_holding a 'Cash' holding for the currency first if missing). Resolve the account by `account` name (strict fuzzy) or exact `account_id`, and the position by `holding` name/ticker or exact `holdingId`. CREATE-ONLY (edit on the web). Replaces the removed record_trade buy path.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "account": {
+          "description": "Brokerage account name or alias (strict fuzzy). Pass this or account_id.",
+          "type": "string"
+        },
+        "account_id": {
+          "description": "Brokerage account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "holding": {
+          "description": "Holding name or ticker to buy (must already exist in the account). Pass this or holdingId.",
+          "type": "string"
+        },
+        "holdingId": {
+          "description": "portfolio_holdings.id of the position (exact).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "qty": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Units acquired (> 0)."
+        },
+        "totalCost": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Total cost in the holding's currency (> 0)."
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today).",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "payee": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "tags": {
+          "description": "Comma-separated tags.",
+          "type": "string"
+        },
+        "cashSleeveHoldingId": {
+          "description": "Explicit cash sleeve to debit; defaults to the (account, holding-currency) sleeve.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "qty",
+        "totalCost"
+      ]
+    }
+  },
+  {
+    "name": "portfolio_deposit",
+    "description": "Fund a brokerage cash sleeve from a non-investment (bank/chequing) account. Writes a brokerage_deposit_out / brokerage_deposit_in pair linked by link_id. The destination cash sleeve must already exist (or pass destCashSleeveHoldingId). CREATE-ONLY.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "sourceAccount": {
+          "description": "Source (non-investment) account name or alias. Pass this or sourceAccount_id.",
+          "type": "string"
+        },
+        "sourceAccount_id": {
+          "description": "Source account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "destAccount": {
+          "description": "Destination brokerage account name or alias. Pass this or destAccount_id.",
+          "type": "string"
+        },
+        "destAccount_id": {
+          "description": "Destination brokerage account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "destCashSleeveHoldingId": {
+          "description": "Explicit destination cash sleeve; defaults to the brokerage's cash sleeve for the amount currency.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "amount": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Amount transferred (> 0)."
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today).",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "payee": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount"
+      ]
+    }
+  },
+  {
+    "name": "portfolio_fx_conversion",
+    "description": "Convert cash from one currency to another inside a SINGLE brokerage account (e.g. USD sleeve → CAD sleeve). Writes fx_from + fx_to (+ optional fx_fee). Both currency sleeves (and the fee sleeve, if any) must already exist. CREATE-ONLY.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "account": {
+          "description": "Brokerage account name or alias. Pass this or account_id.",
+          "type": "string"
+        },
+        "account_id": {
+          "description": "Brokerage account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "fromCurrency": {
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ],
+          "description": "Currency debited (source sleeve)."
+        },
+        "fromAmount": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Amount debited from the source sleeve (> 0)."
+        },
+        "toCurrency": {
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ],
+          "description": "Currency credited (destination sleeve)."
+        },
+        "toAmount": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Amount credited to the destination sleeve (> 0)."
+        },
+        "feeAmount": {
+          "description": "Optional conversion fee (> 0).",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "feeCurrency": {
+          "description": "Currency of the fee.",
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ]
+        },
+        "feeOnSleeveCurrency": {
+          "description": "Which sleeve currency absorbs the fee (defaults to feeCurrency).",
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ]
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today).",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "payee": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fromCurrency",
+        "fromAmount",
+        "toCurrency",
+        "toAmount"
+      ]
+    }
+  },
+  {
+    "name": "portfolio_income_expense",
+    "description": "Record portfolio income (dividend/interest, amount > 0) or an expense (fee, amount < 0) on a brokerage cash sleeve. The cash sleeve for `currency` must already exist. `incomeType` resolves the canonical category (Dividends/Interest/Fees) when no explicit categoryId is given and the sign matches. Optionally tie the row to the holding that earned it via relatedHolding/relatedHoldingId. CREATE-ONLY.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "account": {
+          "description": "Brokerage account name or alias. Pass this or account_id.",
+          "type": "string"
+        },
+        "account_id": {
+          "description": "Brokerage account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "currency": {
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ],
+          "description": "Currency of the cash sleeve to credit/debit (ISO code)."
+        },
+        "amount": {
+          "type": "number",
+          "description": "Positive = income (dividend/interest), negative = expense (fee)."
+        },
+        "incomeType": {
+          "description": "Category hint. dividend/interest apply to income (amount>0); fee to expense (amount<0); other leaves the category unset. Ignored when categoryId is given.",
+          "type": "string",
+          "enum": [
+            "dividend",
+            "interest",
+            "fee",
+            "other"
+          ]
+        },
+        "relatedHolding": {
+          "description": "Holding (name/ticker) this income/expense relates to, for reporting. Pass this or relatedHoldingId.",
+          "type": "string"
+        },
+        "relatedHoldingId": {
+          "description": "portfolio_holdings.id this relates to.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "categoryId": {
+          "description": "Explicit category id (overrides incomeType).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today).",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "payee": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currency",
+        "amount"
+      ]
+    }
+  },
+  {
+    "name": "portfolio_sell",
+    "description": "Sell shares/units of a holding in a brokerage account. Writes sell + sell_cash_leg (stock leg negative, cash leg positive, sum 0), closes cost-basis lots, and credits the cash sleeve. `lotSelection.method` is FIFO (default), HIFO, or SPECIFIC (SPECIFIC needs lotIds or per-lot lots[]). CREATE-ONLY. Replaces the removed record_trade sell path.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "account": {
+          "description": "Brokerage account name or alias. Pass this or account_id.",
+          "type": "string"
+        },
+        "account_id": {
+          "description": "Brokerage account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "holding": {
+          "description": "Holding name or ticker to sell (must already exist). Pass this or holdingId.",
+          "type": "string"
+        },
+        "holdingId": {
+          "description": "portfolio_holdings.id of the position (exact).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "qty": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Units sold (> 0)."
+        },
+        "totalProceeds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Total proceeds in the holding's currency (> 0)."
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today).",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "lotSelection": {
+          "description": "Lot disposal strategy (default FIFO). SPECIFIC requires lotIds or per-lot lots.",
+          "type": "object",
+          "properties": {
+            "method": {
+              "type": "string",
+              "enum": [
+                "FIFO",
+                "HIFO",
+                "SPECIFIC"
+              ]
+            },
+            "lotIds": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "lots": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "lotId": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "qty": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "required": [
+                  "lotId",
+                  "qty"
+                ]
+              }
+            }
+          },
+          "required": [
+            "method"
+          ]
+        },
+        "payee": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "string"
+        },
+        "cashSleeveHoldingId": {
+          "description": "Explicit cash sleeve to credit; defaults to the (account, holding-currency) sleeve.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "qty",
+        "totalProceeds"
+      ]
+    }
+  },
+  {
+    "name": "portfolio_swap",
+    "description": "Swap one holding for another inside a SINGLE brokerage account in one atomic operation. Runs an internal sell of the source + buy of the destination, sharing a swap_link_id. Both holdings must already exist in the account. CREATE-ONLY.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "account": {
+          "description": "Brokerage account name or alias. Pass this or account_id.",
+          "type": "string"
+        },
+        "account_id": {
+          "description": "Brokerage account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "sourceHolding": {
+          "description": "Holding being sold (name/ticker). Pass this or sourceHoldingId.",
+          "type": "string"
+        },
+        "sourceHoldingId": {
+          "description": "portfolio_holdings.id of the holding being sold.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "sourceQty": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Units of the source holding disposed (> 0)."
+        },
+        "sourceProceeds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Proceeds realised from the source (> 0), in account/holding currency."
+        },
+        "destHolding": {
+          "description": "Holding being acquired (name/ticker). Pass this or destHoldingId.",
+          "type": "string"
+        },
+        "destHoldingId": {
+          "description": "portfolio_holdings.id of the holding being acquired.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "destQty": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Units of the destination holding acquired (> 0)."
+        },
+        "destCost": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Cost allocated to the destination (> 0)."
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today).",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "payee": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceQty",
+        "sourceProceeds",
+        "destQty",
+        "destCost"
+      ]
+    }
+  },
+  {
+    "name": "portfolio_transfer",
+    "description": "Move shares/units of the SAME holding between two different brokerage accounts (in-kind, no cash). Cascades cost basis from source to destination. The holding is resolved in the SOURCE account; source and destination accounts must differ. CREATE-ONLY.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "sourceAccount": {
+          "description": "Source brokerage account name or alias. Pass this or sourceAccount_id.",
+          "type": "string"
+        },
+        "sourceAccount_id": {
+          "description": "Source account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "destAccount": {
+          "description": "Destination brokerage account name or alias. Pass this or destAccount_id.",
+          "type": "string"
+        },
+        "destAccount_id": {
+          "description": "Destination account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "holding": {
+          "description": "Holding to move (name/ticker), resolved in the source account. Pass this or holdingId.",
+          "type": "string"
+        },
+        "holdingId": {
+          "description": "portfolio_holdings.id of the holding (in the source account).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "qty": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Units leaving source / arriving at destination (> 0)."
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today).",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "payee": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "qty"
+      ]
+    }
+  },
+  {
+    "name": "portfolio_withdrawal",
+    "description": "Withdraw cash from a brokerage cash sleeve to a non-investment (bank/chequing) account. Writes a brokerage_withdrawal_out / brokerage_withdrawal_in pair linked by link_id. The source cash sleeve must already exist (or pass sourceCashSleeveHoldingId). CREATE-ONLY.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "sourceAccount": {
+          "description": "Source brokerage account name or alias. Pass this or sourceAccount_id.",
+          "type": "string"
+        },
+        "sourceAccount_id": {
+          "description": "Source brokerage account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "sourceCashSleeveHoldingId": {
+          "description": "Explicit source cash sleeve; defaults to the brokerage's cash sleeve for the amount currency.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "destAccount": {
+          "description": "Destination (non-investment) account name or alias. Pass this or destAccount_id.",
+          "type": "string"
+        },
+        "destAccount_id": {
+          "description": "Destination account id (exact; wins over name).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "amount": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Amount withdrawn (> 0)."
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today).",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "payee": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount"
+      ]
+    }
+  },
+  {
+    "name": "preview_bulk_categorize",
+    "description": "Preview a bulk-categorize (shortcut for preview_bulk_update with only category_id set). Returns affected count + sample + confirmationToken.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "description": "Explicit transaction ids",
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "start_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "end_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "category_id": {
+              "description": "Exact category id (null matches uncategorized)",
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_id": {
+              "description": "Exact account id",
+              "type": "number"
+            },
+            "payee_match": {
+              "description": "Substring match against plaintext payee (case-insensitive)",
+              "type": "string"
+            }
+          },
+          "description": "Filter — at least one field required"
+        },
+        "category_id": {
+          "type": "number",
+          "description": "Target category id"
+        }
+      },
+      "required": [
+        "filter",
+        "category_id"
+      ]
+    }
+  },
+  {
+    "name": "preview_bulk_delete",
+    "description": "Preview a bulk delete. Returns affected count, sample rows, and a confirmationToken (5-min TTL) for execute_bulk_delete.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "description": "Explicit transaction ids",
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "start_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "end_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "category_id": {
+              "description": "Exact category id (null matches uncategorized)",
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_id": {
+              "description": "Exact account id",
+              "type": "number"
+            },
+            "payee_match": {
+              "description": "Substring match against plaintext payee (case-insensitive)",
+              "type": "string"
+            }
+          },
+          "description": "Filter — at least one field required"
+        }
+      },
+      "required": [
+        "filter"
+      ]
+    }
+  },
+  {
+    "name": "preview_bulk_update",
+    "description": "Preview a bulk update over transactions matching `filter`. Returns affected count, before/after samples, an `unappliedChanges` array, and a confirmationToken (5-min TTL) for execute_bulk_update. Each `unappliedChanges` entry is `{ field, requestedValue, reason }` — `field` is the change key (e.g. \"category\"), `requestedValue` is the value you sent, `reason` explains the failure. `sampleAfter.category` reflects the resolved category display name when `category` (name) resolved. Accepted `changes` keys: category_id, category (name), account_id, date, note, payee, is_business (0/1), quantity (null clears), portfolioHoldingId, portfolioHolding (name/ticker), tags ({ mode: append|replace|remove, value }). Unknown keys fail with a 400.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "filter": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "description": "Explicit transaction ids",
+              "type": "array",
+              "items": {
+                "type": "number"
+              }
+            },
+            "start_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "end_date": {
+              "description": "YYYY-MM-DD inclusive",
+              "type": "string",
+              "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+            },
+            "category_id": {
+              "description": "Exact category id (null matches uncategorized)",
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "account_id": {
+              "description": "Exact account id",
+              "type": "number"
+            },
+            "payee_match": {
+              "description": "Substring match against plaintext payee (case-insensitive)",
+              "type": "string"
+            }
+          },
+          "description": "Filter — at least one field required"
+        },
+        "changes": {
+          "type": "object",
+          "properties": {
+            "category_id": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "category": {
+              "description": "Category name (resolved server-side via the strict resolver — exact / startsWith / token-overlapping substring). Errors with 'did you mean …?' on ambiguous matches.",
+              "type": "string"
+            },
+            "account_id": {
+              "type": "number"
+            },
+            "date": {
+              "description": "YYYY-MM-DD calendar date. Invalid values are dropped and surfaced via `unappliedChanges`; never silently committed.",
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            },
+            "payee": {
+              "type": "string"
+            },
+            "is_business": {
+              "description": "0 or 1",
+              "type": "number"
+            },
+            "quantity": {
+              "description": "Share/unit count for portfolio rows. null clears the column.",
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "portfolioHoldingId": {
+              "description": "Portfolio holding FK (ownership-checked).",
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            "portfolioHolding": {
+              "description": "Holding name OR ticker symbol — resolved via the same lookup-only helper used by record_transaction (no auto-create).",
+              "type": "string"
+            },
+            "tags": {
+              "description": "Tag edit. mode=replace overwrites, append adds if not present, remove strips exact matches",
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": [
+                    "append",
+                    "replace",
+                    "remove"
+                  ]
+                },
+                "value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "mode",
+                "value"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "filter",
+        "changes"
+      ]
+    }
+  },
+  {
+    "name": "preview_delete_category",
+    "description": "Preview deletion of a category. Returns the resolved category id/name plus FK row counts (transactions / rules / subscriptions still referencing it) and a confirmationToken for `delete_category`. The execute step refuses if any FK count is non-zero — reassign or delete dependents first via `preview_bulk_categorize` / `execute_bulk_categorize` (transactions), `update_rule` / `delete_rule` (auto-categorize rules), and `update_subscription` (subscriptions).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Category FK (categories.id). Exact match — preferred. Pass exactly one of id or name.",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "name": {
+          "description": "Category name (fuzzy matched against decrypted name). Requires an unlocked DEK because category names live in encrypted columns post Stream D Phase 4. Pass `id` instead when no DEK is available.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "preview_import",
+    "description": "Preview an uploaded CSV/OFX/QFX file. Returns first 20 parsed rows, dedup hit count, category auto-match coverage, unresolved accounts, probable cross-source duplicates (FX-spread + ±7 day fuzzy match — heuristic, not exact), and a confirmationToken for execute_import.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "upload_id": {
+          "type": "string",
+          "description": "The id returned by POST /api/mcp/upload"
+        },
+        "template_id": {
+          "description": "Apply a saved import template's column mapping",
+          "type": "number"
+        },
+        "column_mapping": {
+          "description": "Ad-hoc column mapping {date, amount, payee?, account?, category?, note?, tags?}",
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "upload_id"
+      ]
+    }
+  },
+  {
+    "name": "record_transaction",
+    "description": "Record a single transaction in a cash (non-investment) account. Prefer `account_id` (exact) over `account` name; pass at least one — weak substring name matches are REJECTED with a 'did you mean…' error rather than writing to the wrong account. Category is auto-detected from payee rules/history when omitted. INVESTMENT ACCOUNTS ARE REJECTED — route all investment activity through the portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) instead. For cross-currency entries pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. Pass `dryRun: true` to validate + resolve without writing (response includes dryRun:true, wouldBeId:null, and the same resolved* fields a real write returns).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "number",
+          "description": "Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."
+        },
+        "payee": {
+          "type": "string",
+          "description": "Payee or merchant name"
+        },
+        "account": {
+          "description": "Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided.",
+          "type": "string"
+        },
+        "account_id": {
+          "description": "Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known — e.g. resolved from a prior `get_account_balances` or `search_transactions` call. If both this and `account` are passed, this wins.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today)",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "category": {
+          "description": "Category name (auto-detected from payee if omitted)",
+          "type": "string"
+        },
+        "note": {
+          "description": "Optional note",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Comma-separated tags",
+          "type": "string"
+        },
+        "portfolioHoldingId": {
+          "description": "Optional FK to portfolio_holdings.id — bind this transaction to a position. Get the id from get_portfolio_analysis (each holding now exposes `id`) or from add_portfolio_holding. Must belong to the user; rejected otherwise.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "portfolioHolding": {
+          "description": "Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\" — both resolve to the same holding). Exact case-insensitive match; no fuzzy/substring fallback. Errors with a candidate list on miss. Scoped to the resolved account, so the same name/ticker in two brokerages disambiguates. When both portfolioHolding and portfolioHoldingId are passed and they disagree, returns an error. Use add_portfolio_holding to create new positions before binding.",
+          "type": "string"
+        },
+        "quantity": {
+          "description": "Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Conventions: RSU vest net of tax → amount=0, quantity=+net_shares; ESPP/plain buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares; dividend/interest/cash-only → omit. Without `quantity`, the holding's share count won't move. ALWAYS pair with portfolioHolding or portfolioHoldingId — a quantity on an unbound row is invisible to the portfolio aggregator.",
+          "type": "number"
+        },
+        "enteredAmount": {
+          "description": "User-typed amount in enteredCurrency (the trade side). When set, the server converts to account currency at the date's FX rate; `amount` is ignored if both are provided.",
+          "type": "number"
+        },
+        "enteredCurrency": {
+          "description": "ISO code (USD/CAD/EUR/...) of enteredAmount. Defaults to account currency when omitted.",
+          "type": "string"
+        },
+        "tradeLinkId": {
+          "description": "Multi-currency trade pair linker (issue #96). Pass the UUID returned in the response of a *previous* record_transaction call when binding a second leg to that trade. Server validates the UUID exists, belongs to you, and references at most one existing row before accepting it. New trades typically use bulk_record_transactions with `tradeGroupKey` per row instead — this single-row path is only for incremental binding when the cash leg was already recorded. The server stamps `trade_link_id` on the new row; the four cost-basis aggregators then prefer the cash leg's `entered_amount` over the stock leg's amount as cost basis. Distinct from `linkId` (transfer-pair rule reserves that column).",
+          "type": "string"
+        },
+        "dryRun": {
+          "description": "When true, run the full validation/resolution pipeline (account, holding, FX, category) and return a preview WITHOUT writing to the DB. Response carries `dryRun: true`, `wouldBeId: null`, plus the resolved* fields. Use this to confirm routing before committing — especially when fuzzy account/category matching might surprise you.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "amount",
+        "payee"
+      ]
+    }
+  },
+  {
+    "name": "record_transfer",
+    "description": "Record a transfer between two of the user's accounts. Creates BOTH legs (debit source, credit destination) atomically with a shared link_id so they show as a paired transfer. PREFER `from_account_id` / `to_account_id` (exact) over name; weak substring name matches are REJECTED with a 'did you mean…' error rather than routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency (pass `receivedAmount` to lock the landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares; `amount` may be 0). Both holdings must already exist in their accounts. Same-account forex (two cash sleeves with divergent ISO-4217 name suffixes, e.g. 'Cash - USD' → 'Cash - CAD') honors `receivedAmount` for the destination leg. For brokerage moves use the portfolio_* tools.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "fromAccount": {
+          "description": "Source account name or alias — fuzzy matched against name, exact on alias. PREFER `from_account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `from_account_id` is not provided.",
+          "type": "string"
+        },
+        "toAccount": {
+          "description": "Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected. PREFER `to_account_id` when known. Required if `to_account_id` is not provided.",
+          "type": "string"
+        },
+        "from_account_id": {
+          "description": "Source account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `fromAccount` are passed, this wins.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "to_account_id": {
+          "description": "Destination account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `toAccount` are passed, this wins.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "amount": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Cash amount the user sent, in the SOURCE account's currency. > 0 for cash transfers; 0 is allowed only when `holding` + `quantity` are also set (pure in-kind transfer)."
+        },
+        "date": {
+          "description": "YYYY-MM-DD (default: today)",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "receivedAmount": {
+          "description": "Cross-currency override: actual amount that landed in the destination account, in DESTINATION's currency. When set, FX rate is locked to receivedAmount/amount. Ignored for same-currency transfers.",
+          "type": "number",
+          "minimum": 0
+        },
+        "holding": {
+          "description": "Source-side holding name for an in-kind (share) transfer. MUST already exist in fromAccount. Pair with `quantity`.",
+          "type": "string"
+        },
+        "destHolding": {
+          "description": "Destination-side holding name. Defaults to `holding` (auto-created in toAccount if missing). Set this only when the destination uses a different label for the same instrument (e.g. source 'Gold Ounce' → dest 'Au Bullion').",
+          "type": "string"
+        },
+        "quantity": {
+          "description": "Positive share count LEAVING source (the source row gets the negative). Required when `holding` is set.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "destQuantity": {
+          "description": "Positive share count ARRIVING at destination. Defaults to `quantity`. Set when source/dest counts differ — stock split (10 → 30), reverse split (30 → 10), merger or share-class conversion (100 of X → 60 of Y).",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "note": {
+          "description": "Optional note applied to BOTH legs",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional comma-separated tags applied to BOTH legs",
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount"
+      ]
+    }
+  },
+  {
+    "name": "reject_staged_import",
+    "description": "Reject (hard-delete) a staged import. Two-step: first call returns a summary + confirmationToken (5-min TTL); second call with the token commits. Cascades the staged_transactions delete via FK.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "stagedImportId": {
+          "type": "string",
+          "description": "staged_imports.id"
+        },
+        "confirmation_token": {
+          "description": "Token returned by the preview call. Omit to get a preview; pass to commit.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stagedImportId"
+      ]
+    }
+  },
+  {
+    "name": "reorder_rules",
+    "description": "Reorder rules by assigning new priorities. The first id in `ordered_ids` gets the highest priority.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "ordered_ids": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "description": "Rule ids in desired execution order (first = highest priority)"
+        }
+      },
+      "required": [
+        "ordered_ids"
+      ]
+    }
+  },
+  {
+    "name": "replace_splits",
+    "description": "Atomically replace all splits on a transaction. Validates the splits sum equals the parent transaction amount (±$0.01).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "transaction_id": {
+          "type": "number",
+          "description": "Parent transaction id"
+        },
+        "splits": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "category_id": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "account_id": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "amount": {
+                "type": "number"
+              },
+              "note": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "tags": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "amount"
+            ]
+          },
+          "description": "New set of splits (replaces all existing)"
+        }
+      },
+      "required": [
+        "transaction_id",
+        "splits"
+      ]
+    }
+  },
+  {
+    "name": "search_transactions",
+    "description": "Flexible transaction search with partial payee match, amount range, date range, category, and tags. Each row carries both entered (user-typed) and account (settlement) amounts; pass reportingCurrency to also include a converted reporting amount per row. For dedup workflows on blank-payee imports, pass `account_id` (FK fast-path) — a year of activity in one account easily exceeds the default 50-row limit, so raise `limit` accordingly. Each row includes `quantity` (nullable; positive for buys, negative for sells; null for cash-proxy and non-investment transactions).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "payee": {
+          "description": "Partial payee/merchant name match",
+          "type": "string"
+        },
+        "min_amount": {
+          "description": "Minimum amount",
+          "type": "number"
+        },
+        "max_amount": {
+          "description": "Maximum amount",
+          "type": "number"
+        },
+        "start_date": {
+          "description": "Start date (YYYY-MM-DD)",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "end_date": {
+          "description": "End date (YYYY-MM-DD)",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "category": {
+          "description": "Category name (exact)",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Tag to search for (partial match)",
+          "type": "string"
+        },
+        "account_id": {
+          "description": "Filter to transactions in this accounts.id (FK fast-path; useful for dedup against blank-payee bank-imported transfers where text search misses).",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "portfolio_holding_id": {
+          "description": "Filter to transactions bound to this portfolio_holdings.id (FK fast-path; cheaper than substring search)",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "description": "Max results (default 50)",
+          "type": "number"
+        },
+        "reportingCurrency": {
+          "description": "ISO code; if set, each row gets a reportingAmount converted to this currency. Defaults to user's display currency.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "send_to_bank_ledger",
+    "description": "Promote staged import rows into the bank ledger only (bank_transactions) for reconciliation. It does NOT create any ledger transactions. Use this when the account already has manual/imported transactions covering the statement period (the normal case), so you load the bank side for reconciliation without duplicating existing ledger entries. Loads the statement balance anchor too. skipExistingMatches (default true) skips rows already in the bank ledger (dedup_status='existing'). Returns {loaded, skipped, skippedExisting, anchorLoaded, anchorDate, anchorAmount, batchId, rowErrors}. For a first-time import of a brand-new account with no transactions, use approve_staged_rows instead. Requires an unlocked DEK.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "stagedImportId": {
+          "type": "string",
+          "description": "staged_imports.id"
+        },
+        "rowIds": {
+          "description": "Subset of staged_transactions.id to promote. Omit to promote all eligible rows.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "skipExistingMatches": {
+          "description": "Default true: skip staged rows already present in the bank ledger (dedup_status='existing'). Set false to load every selected row.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stagedImportId"
+      ]
+    }
+  },
+  {
+    "name": "set_account_mode",
+    "description": "Set an account's import pipeline mode. 'auto' fires rules at upload, 'approve' reviews each row, 'manual' fires rules at materialize. Returns {id, mode}. Cross-tenant / missing id → Not found.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "accounts.id."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "approve",
+            "manual"
+          ],
+          "description": "New pipeline mode for this account."
+        }
+      },
+      "required": [
+        "accountId",
+        "mode"
+      ]
+    }
+  },
+  {
+    "name": "set_budget",
+    "description": "Set or update a budget for a category in a specific month",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string",
+          "description": "Category name"
+        },
+        "month": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])$",
+          "description": "Month (YYYY-MM)"
+        },
+        "amount": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Budget amount (must be > 0)"
+        }
+      },
+      "required": [
+        "category",
+        "month",
+        "amount"
+      ]
+    }
+  },
+  {
+    "name": "set_fx_override",
+    "description": "Pin a manual FX rate. Accepts the user-friendly pair shape (1 `from` = `rate` `to` on `date`) and stores it as a rate_to_usd entry under fx_overrides. One side of the pair MUST be USD; cross-pair overrides should be entered as two USD-anchored rows.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "description": "Source currency (e.g. USD)"
+        },
+        "to": {
+          "type": "string",
+          "description": "Target currency (e.g. CAD)"
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$",
+          "description": "YYYY-MM-DD"
+        },
+        "rate": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Exchange rate — 1 {from} = rate {to}"
+        },
+        "dateTo": {
+          "description": "Optional end date YYYY-MM-DD; defaults to a single-day override",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "note": {
+          "description": "Optional note (e.g. 'bank rate at Wise on this day')",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "date",
+        "rate"
+      ]
+    }
+  },
+  {
+    "name": "suggest_transaction_details",
+    "description": "Suggest category + tags for a transaction based on rule matches and historical frequency. Decrypts payees in memory when matching history.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "payee": {
+          "type": "string",
+          "description": "Payee/merchant name"
+        },
+        "amount": {
+          "description": "Transaction amount (for amount-based rules)",
+          "type": "number"
+        },
+        "account_id": {
+          "description": "Reserved for future use — account-scoped suggestions",
+          "type": "number"
+        },
+        "top_n": {
+          "description": "Max category suggestions (default 3)",
+          "type": "number"
+        }
+      },
+      "required": [
+        "payee"
+      ]
+    }
+  },
+  {
+    "name": "test_rule",
+    "description": "Dry-run a rule pattern against the user's existing transactions. Decrypts payee/tags in memory when matching. Returns matched rows without writing.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "match_payee": {
+          "description": "Payee pattern (required if match_field='payee' or match_type omitted)",
+          "type": "string"
+        },
+        "match_field": {
+          "description": "Default 'payee'",
+          "type": "string",
+          "enum": [
+            "payee",
+            "amount",
+            "tags"
+          ]
+        },
+        "match_type": {
+          "description": "Default 'contains'",
+          "type": "string",
+          "enum": [
+            "contains",
+            "exact",
+            "regex",
+            "greater_than",
+            "less_than"
+          ]
+        },
+        "match_value": {
+          "description": "Overrides match_payee when match_field != 'payee'",
+          "type": "string"
+        },
+        "match_amount": {
+          "description": "Alias — set as match_value when match_field='amount'",
+          "type": "number"
+        },
+        "sample_size": {
+          "description": "Max transactions to scan (default 5000)",
+          "type": "number"
+        }
+      }
+    }
+  },
+  {
+    "name": "trace_holding_quantity",
+    "description": "Per-transaction quantity contributions for a single holding, with running sum. Diagnostic tool for investigating quantity discrepancies (e.g. brokerage statement says 79 shares but the aggregator reports 86 — list every contributing leg to find the extra rows). Read-only. JOINs through `holding_accounts` (issue #25) so the rows match what the four portfolio aggregators see; rows whose `(holding_id, account_id)` pair is missing from `holding_accounts` are OMITTED (they're invisible to the aggregators too — surface the gap via the `unjoinedTransactionCount` field). Matches the `analyze_holding` resolution semantics: `holdingId` is preferred when present (bypasses fuzzy matching); when only `symbol` is given and it spans multiple holdings the response surfaces an `ambiguous` candidate list.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "description": "Holding name or symbol (fuzzy matched). Required when `holdingId` is omitted.",
+          "type": "string"
+        },
+        "holdingId": {
+          "description": "Filter to this exact portfolio_holdings.id — bypasses fuzzy matching.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      }
+    }
+  },
+  {
+    "name": "unlink_reconcile",
+    "description": "Remove a transaction ↔ bank-ledger link. If the removed link was 'primary' and the FK still pointed at this bank row, also clears transactions.bank_transaction_id. Idempotent (unlinking a never-linked pair returns {unlinked:false, clearedFk:false}). Returns {unlinked, clearedFk}.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "transactionId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "transactions.id."
+        },
+        "bankTransactionId": {
+          "type": "string",
+          "format": "uuid",
+          "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+          "description": "bank_transactions.id."
+        }
+      },
+      "required": [
+        "transactionId",
+        "bankTransactionId"
+      ]
+    }
+  },
+  {
+    "name": "update_account",
+    "description": "Update name, group, currency, note, or alias of an account. Pass exactly ONE of `accountId` (preferred, exact) or `account` (name/alias, fuzzy). Supplying both is allowed only when they resolve to the same account — a mismatch fails loud and does NOT update.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "description": "Account FK (accounts.id). Exact match — preferred. The only path that works without an unlocked DEK.",
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "account": {
+          "description": "Current account name or alias (fuzzy matched against name; exact match on alias). Requires an unlocked DEK because account names live in encrypted columns post Stream D Phase 4. Pass `accountId` instead when no DEK is available.",
+          "type": "string"
+        },
+        "name": {
+          "description": "New name",
+          "type": "string"
+        },
+        "group": {
+          "description": "New group",
+          "type": "string"
+        },
+        "currency": {
+          "description": "New ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list).",
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ]
+        },
+        "note": {
+          "description": "New note",
+          "type": "string"
+        },
+        "alias": {
+          "description": "New alias — short shorthand used to match receipts/imports (e.g. last 4 digits of a card). Pass an empty string to clear.",
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    }
+  },
+  {
+    "name": "update_goal",
+    "description": "Update a financial goal's target, deadline, status, or linked accounts. `account_ids` (issue #130) replaces the existing account-link set atomically — pass `[]` to unlink all, or omit to leave links unchanged.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "goal": {
+          "type": "string",
+          "description": "Goal name (fuzzy matched)"
+        },
+        "target_amount": {
+          "description": "Target amount (must be > 0)",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "deadline": {
+          "description": "YYYY-MM-DD",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "completed",
+            "paused"
+          ]
+        },
+        "name": {
+          "description": "Rename the goal",
+          "type": "string"
+        },
+        "account_ids": {
+          "description": "Replace the goal's linked accounts (issue #130). When supplied, the existing goal_accounts rows are deleted and replaced with the new set in a single transaction. Pass `[]` to unlink all. Omit to leave links unchanged.",
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "required": [
+        "goal"
+      ]
+    }
+  },
+  {
+    "name": "update_loan",
+    "description": "Update any field of an existing loan by id",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Loan id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "principal": {
+          "description": "Original loan principal (must be > 0)",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "annual_rate": {
+          "description": "Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0)",
+          "type": "number",
+          "minimum": 0
+        },
+        "term_months": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "start_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "payment_amount": {
+          "description": "Payment per period (must be > 0; must exceed the period interest)",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "payment_frequency": {
+          "description": "weekly | biweekly | semi_monthly | monthly | quarterly | annual",
+          "type": "string",
+          "enum": [
+            "weekly",
+            "biweekly",
+            "semi_monthly",
+            "monthly",
+            "quarterly",
+            "annual"
+          ]
+        },
+        "extra_payment": {
+          "description": "Extra principal per payment (must be >= 0)",
+          "type": "number",
+          "minimum": 0
+        },
+        "residual_value": {
+          "description": "Lease residual/buyout — balance remaining at term end (must be < principal)",
+          "type": "number",
+          "minimum": 0
+        },
+        "account": {
+          "description": "Linked account — name or alias (fuzzy matched against name; exact match on alias). Pass empty string to clear.",
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "update_portfolio_holding",
+    "description": "Update a portfolio holding's name, symbol, currency, isCrypto, or note. Renames cascade to all transactions automatically because the portfolio aggregators (issue #86) group by FK holdingId, not by display name — two holdings sharing a name across accounts stay distinct rows in get_portfolio_analysis output. NOTE: the legacy `account` parameter is REFUSED (issue #99) — moving a holding to a different account would leave stale `holding_accounts` rows and orphaned account attribution on every historical transaction. To actually move shares between accounts, use record_transfer (in-kind); to re-attribute existing transactions, update them individually.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "holding": {
+          "type": "string",
+          "description": "Current holding name OR symbol (fuzzy matched against decrypted name and symbol)"
+        },
+        "name": {
+          "description": "New name",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "symbol": {
+          "description": "New symbol (pass empty string to clear)",
+          "type": "string",
+          "maxLength": 50
+        },
+        "account": {
+          "description": "REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) to move shares between accounts; update individual transactions to re-attribute history.",
+          "type": "string"
+        },
+        "currency": {
+          "description": "ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list).",
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ]
+        },
+        "isCrypto": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 500
+        }
+      },
+      "required": [
+        "holding"
+      ]
+    }
+  },
+  {
+    "name": "update_rule",
+    "description": "Update an existing transaction rule. Accepts legacy shorthand (match_payee + assign_category) OR the v2 shape (conditions + actions, FINLYNQ-84).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Rule id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "match_payee": {
+          "description": "Legacy alias: sets a single payee/contains condition + set_category action",
+          "type": "string"
+        },
+        "assign_category": {
+          "description": "Legacy: category name (fuzzy matched)",
+          "type": "string"
+        },
+        "assign_tags": {
+          "description": "Legacy: tags assigned by the rule",
+          "type": "string"
+        },
+        "rename_to": {
+          "description": "Legacy: payee rename target",
+          "type": "string"
+        },
+        "conditions": {
+          "description": "v2: full ConditionGroup JSON. Replaces conditions entirely."
+        },
+        "actions": {
+          "description": "v2: full Action[] JSON. Replaces actions entirely."
+        },
+        "is_active": {
+          "type": "boolean"
+        },
+        "priority": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "update_split",
+    "description": "Update fields of an existing split",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "split_id": {
+          "type": "number",
+          "description": "Split id"
+        },
+        "category_id": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "account_id": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "amount": {
+          "type": "number"
+        },
+        "note": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "split_id"
+      ]
+    }
+  },
+  {
+    "name": "update_staged_transaction",
+    "description": "Edit a single staged transaction row in place. Same shape and validations as the PATCH /api/import/staged/[id]/rows/[rowId] endpoint. Re-encrypts text fields under the row's existing tier (service/user); never flips the tier mid-edit. import_hash is NEVER recomputed (load-bearing for cross-source dedup). peerStagedId and targetAccountId are mutually exclusive.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "stagedTransactionId": {
+          "type": "string",
+          "description": "staged_transactions.id (UUID)"
+        },
+        "txType": {
+          "type": "string",
+          "enum": [
+            "E",
+            "I",
+            "R"
+          ]
+        },
+        "payee": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "category": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "tags": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "quantity": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "portfolioHoldingId": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enteredAmount": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enteredCurrency": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 8
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "peerStagedId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "targetAccountId": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "forceCommit": {
+          "description": "Reserved for the partial-approve flow. Accepted but currently a no-op here — approve_staged_rows is the gate for dedup overrides.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stagedTransactionId"
+      ]
+    }
+  },
+  {
+    "name": "update_subscription",
+    "description": "Update any field of an existing subscription",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Subscription id"
+        },
+        "name": {
+          "type": "string"
+        },
+        "amount": {
+          "description": "Amount per billing cycle (must be > 0)",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "cadence": {
+          "type": "string",
+          "enum": [
+            "weekly",
+            "monthly",
+            "quarterly",
+            "annual",
+            "yearly"
+          ]
+        },
+        "next_billing_date": {
+          "description": "YYYY-MM-DD",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "currency": {
+          "description": "ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list).",
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ]
+        },
+        "category": {
+          "description": "Category name (fuzzy). Empty string clears.",
+          "type": "string"
+        },
+        "account": {
+          "description": "Account name or alias (fuzzy matched against name; exact match on alias). Empty string clears.",
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "paused",
+            "cancelled"
+          ]
+        },
+        "cancel_reminder_date": {
+          "description": "YYYY-MM-DD",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "update_transaction",
+    "description": "Update fields of an existing transaction by ID. Pass enteredAmount + enteredCurrency to re-lock a cross-currency rate (rare); passing just `amount` keeps the entered side unchanged. To backfill a share count on an existing portfolio row, pass `quantity` (positive=buy/long, negative=sell, or null to clear).",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "number",
+          "description": "Transaction ID"
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "amount": {
+          "description": "New amount in account currency. Doesn't touch the entered_* side.",
+          "type": "number"
+        },
+        "payee": {
+          "type": "string"
+        },
+        "category": {
+          "description": "Category name (fuzzy matched)",
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "tags": {
+          "type": "string"
+        },
+        "portfolioHoldingId": {
+          "description": "FK to portfolio_holdings.id (or null to clear). Get the id from get_portfolio_analysis (each holding exposes `id`) or analyze_holding (`holdingId`). Holding must belong to the user.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": -9007199254740991,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "portfolioHolding": {
+          "description": "Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\"). Exact case-insensitive match against the user's existing holdings scoped to this transaction's account (no auto-create — error if no match). When both are passed and disagree, returns an error. Pass portfolioHoldingId=null to clear; passing an empty portfolioHolding is rejected.",
+          "type": "string"
+        },
+        "quantity": {
+          "description": "Share count for stock/ETF/crypto rows. Positive=shares acquired, negative=shares sold, null=clear. Useful for backfilling rows that were previously booked cash-only. Pair with portfolioHolding/portfolioHoldingId so the row joins the position aggregator.",
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "enteredAmount": {
+          "description": "Update the user-typed amount; server re-derives account-side amount via FX at the row's date.",
+          "type": "number"
+        },
+        "enteredCurrency": {
+          "description": "Update the entered currency. Requires enteredAmount.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    }
+  },
+  {
+    "name": "update_transfer",
+    "description": "Update both legs of an existing transfer pair atomically. Identify the pair by linkId OR by either leg's transaction id. Refuses if the targeted rows don't form a clean transfer pair. To (re)bind the in-kind side, pass `holding` + `quantity` together; to clear it (turn the row back into a pure cash transfer), pass `holdingClear: true`. Omit all three to leave the in-kind side untouched.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "linkId": {
+          "description": "UUID link_id shared by the pair. Either this OR transactionId is required.",
+          "type": "string"
+        },
+        "transactionId": {
+          "description": "Any one transaction id from the pair; helper resolves the other side.",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        },
+        "fromAccount": {
+          "description": "New source account name or alias. Re-runs FX if currency changes.",
+          "type": "string"
+        },
+        "toAccount": {
+          "description": "New destination account name or alias.",
+          "type": "string"
+        },
+        "amount": {
+          "description": "New amount sent (source currency); 0 only allowed when in-kind side is set.",
+          "type": "number",
+          "minimum": 0
+        },
+        "date": {
+          "description": "New date (YYYY-MM-DD); applied to both legs.",
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$"
+        },
+        "receivedAmount": {
+          "description": "Cross-currency override; rebuilds the destination leg's amount + locked FX rate.",
+          "type": "number",
+          "minimum": 0
+        },
+        "holding": {
+          "description": "(Re)bind the in-kind source-side to this holding name. Pair with `quantity`.",
+          "type": "string"
+        },
+        "destHolding": {
+          "description": "Destination-side holding name. Defaults to `holding`. Use when destination uses a different label.",
+          "type": "string"
+        },
+        "quantity": {
+          "description": "Positive share count LEAVING source when (re)binding the in-kind side.",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "destQuantity": {
+          "description": "Positive share count ARRIVING at destination. Defaults to `quantity`. Set when source/dest counts differ (split, merger).",
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "holdingClear": {
+          "description": "Set true to clear the in-kind side and turn the row back into a pure cash transfer.",
+          "type": "boolean"
+        },
+        "note": {
+          "description": "New note applied to both legs.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "New tags applied to both legs.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "upload_statement",
+    "description": "Stage a bank/brokerage statement file (CSV, OFX, or QFX) over this MCP connection (no browser session needed). Pass the file bytes base64-encoded in fileContent; the format is detected from fileName's extension. Runs the STAGING pipeline and returns { stagedImportId, rowCount, duplicateCount, newCount, dateStart, dateEnd, statementBalance, statementBalanceDate, statementCurrency, detectedFormat } — feed the stagedImportId to get_staged_import (inspect) then send_to_bank_ledger (load the bank side) or approve_staged_rows (first import). Max file size 5 MB decoded (~6.7 MB base64). accountId must be one of your accounts (required for OFX/QFX). An unsupported/unparseable file returns an error with detectedFormat:'unrecognised' and NO staged import. Re-uploading the same file creates a NEW staged import (row-level dedup flags known rows). Requires an unlocked DEK.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "fileContent": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The statement file bytes, base64-encoded. Max 5 MB decoded."
+        },
+        "fileName": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Original filename — its extension selects the parser (.csv / .ofx / .qfx)."
+        },
+        "accountId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "Finlynq account id to bind the import to (must belong to you; required for OFX/QFX)."
+        },
+        "mimeType": {
+          "description": "Optional MIME type hint (advisory only; format is detected from fileName).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "fileContent",
+        "fileName",
+        "accountId"
+      ]
+    }
+  },
+  {
+    "name": "upsert_balance_anchor",
+    "description": "Create or correct a single bank balance anchor. An anchor is the bank's reported balance for an account on a date — the reference point the reconcile engine validates the ledger against. Anchors are keyed by (accountId, date) with no synthetic id, so re-calling with the same (accountId, date) UPDATES the existing anchor (newer balance wins). `amount` is the balance the bank reported on `date`. Returns { accountId, date, amount, currency, created } where created=true means a new anchor was inserted, false means an existing one was updated. The anchor immediately affects the balance check reported by get_reconcile_suggestions / get_reconciliation_summary. Owner-scoped; a non-existent or cross-user accountId returns a not-found error. Stamps source='mcp_manual'.",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "accountId": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "description": "accounts.id the anchor belongs to."
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\\d|3[01])$",
+          "description": "ISO YYYY-MM-DD date the bank reported this balance."
+        },
+        "amount": {
+          "type": "number",
+          "description": "The bank's reported balance on `date` (maps to the bank_daily_balances.balance column)."
+        },
+        "currency": {
+          "type": "string",
+          "enum": [
+            "USD",
+            "CAD",
+            "EUR",
+            "GBP",
+            "JPY",
+            "AUD",
+            "CHF",
+            "NZD",
+            "CNY",
+            "HKD",
+            "SGD",
+            "SEK",
+            "NOK",
+            "DKK",
+            "PLN",
+            "CZK",
+            "HUF",
+            "RON",
+            "TRY",
+            "ILS",
+            "ZAR",
+            "INR",
+            "KRW",
+            "THB",
+            "IDR",
+            "MYR",
+            "PHP",
+            "MXN",
+            "BRL",
+            "ARS",
+            "COP",
+            "CLP",
+            "BTC",
+            "ETH",
+            "USDC",
+            "USDT",
+            "XAU",
+            "XAG",
+            "XPT",
+            "XPD"
+          ],
+          "description": "ISO 4217 currency of the anchor (issue #206: full SUPPORTED_CURRENCIES list)."
+        }
+      },
+      "required": [
+        "accountId",
+        "date",
+        "amount",
+        "currency"
+      ]
+    }
+  }
+]
