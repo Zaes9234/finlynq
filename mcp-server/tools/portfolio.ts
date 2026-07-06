@@ -1405,7 +1405,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       // override param — the unified figures are always the display ccy.
       const displayCurrency = await resolveReportingCurrency(db, userId, null);
       const augmented = await augmentWithBaseCurrency(result, userId, displayCurrency);
-      return text({ success: true, data: augmented });
+      // FINLYNQ-268 (phase 4, flow axis): realized gains are a FLOW figure, not
+      // a point-in-time position valuation, so they carry the flow-axis basis
+      // `realized` (lot-level FIFO closures, historical-FX converted via
+      // augmentWithBaseCurrency). Labelling only — the math is byte-identical.
+      return text({ success: true, data: { ...augmented, basis: "realized" as const } });
     },
   );
 
@@ -1434,7 +1438,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         accountId,
         groupBy,
       });
-      return text({ success: true, data: result });
+      // FINLYNQ-268 (phase 4, flow axis): dividend income is a cash FLOW
+      // (SUM(transactions.amount) classified by the Dividends category), so it
+      // carries the flow-axis basis `cash_flow`. Labelling only — math intact.
+      return text({ success: true, data: { ...result, basis: "cash_flow" as const } });
     },
   );
 

@@ -333,7 +333,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
-      return dataResponse({ rows, reportingCurrency: reporting });
+      // FINLYNQ-268 (phase 4, flow axis): budget figures are cash-flow totals
+      // (SUM(transactions.amount) vs budget), not portfolio valuation.
+      return dataResponse({ rows, reportingCurrency: reporting, basis: "cash_flow" });
     }
   );
 
@@ -436,6 +438,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         reportingCurrency: reporting,
         priorMonths: lookback,
         currentMonth: currentMonthStr,
+        // FINLYNQ-268 (phase 4, flow axis): spending trends are cash-flow
+        // aggregates (SUM(transactions.amount)), not portfolio valuation.
+        basis: "cash_flow",
       });
     }
   );
@@ -489,6 +494,11 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       return dataResponse({
         rows,
         reportingCurrency: reporting,
+        // FINLYNQ-268 (phase 4, flow axis): the statement's primary money
+        // figures are cash-flow income/expense totals (SUM(transactions.amount)
+        // over the period). The nested `unrealized` block self-labels each
+        // account's `valuationGLBasis`; the top-level basis scopes the flows.
+        basis: "cash_flow",
         unrealized: {
           // Issue #208 — round all totals and per-account fields at the
           // response shape; the helpers themselves keep full precision so
@@ -989,7 +999,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       }
 
       anomalies.sort((a, b) => Math.abs(b.percentDeviation) - Math.abs(a.percentDeviation));
-      return dataResponse({ month: currentMonth, reportingCurrency: reporting, anomalies, count: anomalies.length });
+      // FINLYNQ-268 (phase 4, flow axis): anomalies compare cash-flow spending
+      // vs history (SUM(transactions.amount)), not portfolio valuation.
+      return dataResponse({ month: currentMonth, reportingCurrency: reporting, anomalies, count: anomalies.length, basis: "cash_flow" });
     }
   );
 
@@ -1060,7 +1072,11 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
 
       const order: Record<string, number> = { critical: 0, warning: 1, info: 2 };
       items.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
-      return dataResponse(items);
+      // FINLYNQ-268 (phase 4, flow axis): spotlight amounts are cash-flow
+      // figures (overspent budgets / upcoming bills — SUM(transactions.amount)),
+      // not portfolio valuation. Wrapped in an object so the money-bearing
+      // response can carry the uniform top-level `basis` (was a bare array).
+      return dataResponse({ items, count: items.length, basis: "cash_flow" });
     }
   );
 
@@ -1191,6 +1207,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         income: tagAmount(income, reporting, "reporting"),
         netCashFlow: tagAmount(income - totalSpent, reporting, "reporting"),
         notableTransactions: notable,
+        // FINLYNQ-268 (phase 4, flow axis): the recap sums cash flows
+        // (spending/income/net over the week), not portfolio valuation.
+        basis: "cash_flow",
       });
     }
   );
@@ -1441,6 +1460,10 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         recurringItems: { included: recurring.length, dropped: dropped.length },
         recurringContributions,
         stalenessThresholdMultiplier: STALENESS_THRESHOLD_MULTIPLIER,
+        // FINLYNQ-268 (phase 4, flow axis): the forecast projects cash flows
+        // (recurring in/out over the horizon) off a ledger starting balance —
+        // a cash-flow report, not a portfolio market valuation.
+        basis: "cash_flow",
       });
     }
   );

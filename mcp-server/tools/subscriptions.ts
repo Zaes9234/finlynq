@@ -323,6 +323,9 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
         totalCount: subs.length,
         upcomingRenewals: upcoming,
         subscriptions: taggedSubs,
+        // FINLYNQ-268 (phase 4, flow axis): subscription costs are recurring
+        // cash-flow figures (monthly/annual spend), not portfolio valuation.
+        basis: "cash_flow",
       });
   }
 
