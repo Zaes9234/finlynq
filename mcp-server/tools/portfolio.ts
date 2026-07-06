@@ -2804,6 +2804,9 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           // a deprecated alias through v4.1 (dual-emit, decision 2); FINLYNQ-251
           // normalized 'active-cost' → 'active_cost'.
           basis,
+          // FINLYNQ-268 tc-1 criterion (c): asOf present IFF basis === 'market'.
+          // The layer already computed it (valuation.asOf); forward it here.
+          ...(basis === "market" ? { asOf: valuation.asOf } : {}),
           valuationBasis: basis,
           ...(valuation.warnings?.length ? { valuationWarnings: valuation.warnings } : {}),
           // Issue #209 — `totalPortfolioValue` is the whole-portfolio value
@@ -3082,6 +3085,8 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           // `diversificationValuationBasis` kept as a deprecated alias through
           // v4.1 (dual-emit, decision 2; 'active-cost' → 'active_cost').
           basis: activeBasis,
+          // FINLYNQ-268 tc-1 criterion (c): asOf present IFF basis === 'market'.
+          ...(activeBasis === "market" ? { asOf: diversificationValuation.asOf } : {}),
           diversificationValuationBasis: activeBasis,
           ...(diversificationValuation.warnings?.length ? { valuationWarnings: diversificationValuation.warnings } : {}),
         },

@@ -61,6 +61,10 @@ type Entry = {
   placement: Placement;
   /** For "rows": pull the row array out of the data envelope. */
   rows?: (data: unknown) => unknown[];
+  /** For "top": pull the basis-bearing object out of `data` when it's nested
+   * (e.g. get_investment_insights patterns nests it under `data.summary`).
+   * Defaults to `data` itself. */
+  pick?: (data: unknown) => unknown;
   args?: (w: SeededWorld) => Record<string, unknown>;
 };
 
@@ -99,10 +103,13 @@ const MONEY_BEARING: Record<string, Entry> = {
     args: (w) => ({ symbol: w.holdingSymbol }),
   },
   get_investment_insights: {
-    // default mode 'patterns' emits a top-level `basis` (market-else-active_cost).
+    // Rebalancing mode emits `basis` (market-else-active_cost) at the TOP level
+    // of `data` (patterns nests it under `data.summary`). Rebalancing is the
+    // primary asOf-forwarding fix path (FINLYNQ-268 cycle 2), so exercise it:
+    // a target matching the seeded holding drives a non-empty valuation.
     axis: "position",
     placement: "top",
-    args: () => ({ mode: "patterns" }),
+    args: (w) => ({ mode: "rebalancing", targets: [{ holding: w.holdingSymbol, target_pct: 100 }] }),
   },
 
   // ── §2.1 flow axis (realized / dividends) ──
@@ -236,7 +243,7 @@ describeDb("FINLYNQ-268 tc-1 — basis on every money-bearing response (seeded D
       const data = payload.data;
 
       if (entry.placement === "top") {
-        assertBasisObject(data, entry, name);
+        assertBasisObject(entry.pick ? entry.pick(data) : data, entry, name);
       } else {
         const rows = entry.rows!(data);
         // Per-row placement: EVERY row must carry a legal basis. An empty row
