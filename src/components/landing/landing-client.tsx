@@ -908,6 +908,7 @@ export function LandingClient() {
               <h5>Compare</h5>
               <ul>
                 <li><Link href="/vs">All comparisons</Link></li>
+                <li><Link href="/vs/mint">Finlynq vs Mint</Link></li>
                 <li><Link href="/vs/monarch">Finlynq vs Monarch Money</Link></li>
                 <li><Link href="/vs/ynab">Finlynq vs YNAB</Link></li>
                 <li><Link href="/vs/era">Finlynq vs Era</Link></li>

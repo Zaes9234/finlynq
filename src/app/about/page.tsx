@@ -245,6 +245,11 @@ export default function AboutPage() {
           </h2>
           <ul className="list-disc pl-6 space-y-1.5">
             <li>
+              <Link href="/vs/mint" className="underline underline-offset-2 hover:text-primary">
+                Finlynq vs Mint (open-source Mint alternative)
+              </Link>
+            </li>
+            <li>
               <Link href="/vs/monarch" className="underline underline-offset-2 hover:text-primary">
                 Finlynq vs Monarch Money
               </Link>

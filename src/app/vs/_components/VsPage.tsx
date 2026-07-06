@@ -42,7 +42,19 @@ export type VsPageContent = {
   slug: string;
   /** One-paragraph framing intro shown under the H1. */
   tagline: ReactNode;
-  /** Bullets shown under "When to choose <competitor>". */
+  /**
+   * Heading for the competitor section. Defaults to
+   * "When to choose <competitor>". Override for a discontinued product
+   * (e.g. "What happened to Mint") where "choose" makes no sense.
+   */
+  whenCompetitorHeading?: ReactNode;
+  /**
+   * Intro paragraph above the competitor bullets. Defaults to the
+   * "<competitor> is probably the better pick if..." framing. Override it
+   * when the competitor no longer exists.
+   */
+  whenCompetitorIntro?: ReactNode;
+  /** Bullets shown under the competitor section. */
   whenCompetitor: ReactNode[];
   /** Bullets shown under "When to choose Finlynq". */
   whenFinlynq: ReactNode[];
@@ -63,6 +75,8 @@ export function VsPage({ content }: { content: VsPageContent }) {
     competitorName,
     slug,
     tagline,
+    whenCompetitorHeading,
+    whenCompetitorIntro,
     whenCompetitor,
     whenFinlynq,
     comparisonRows,
@@ -108,11 +122,15 @@ export function VsPage({ content }: { content: VsPageContent }) {
         <section className="prose prose-invert max-w-none space-y-8 text-[15px] leading-relaxed">
           {/* When to choose competitor */}
           <h2 className="text-xl font-semibold mt-12 mb-3">
-            When to choose {competitorName}
+            {whenCompetitorHeading ?? <>When to choose {competitorName}</>}
           </h2>
           <p>
-            {competitorName} is probably the better pick if any of these matter
-            to you more than owning your data:
+            {whenCompetitorIntro ?? (
+              <>
+                {competitorName} is probably the better pick if any of these
+                matter to you more than owning your data:
+              </>
+            )}
           </p>
           <ul className="list-disc pl-6 space-y-2">
             {whenCompetitor.map((bullet, i) => (

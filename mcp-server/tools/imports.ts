@@ -47,9 +47,11 @@ import {
   defaultHoldingForInvestmentAccount,
 } from "../../src/lib/investment-account";
 import {
-  signConfirmationToken,
-  verifyConfirmationToken,
-} from "../../src/lib/mcp/confirmation-token";
+  signPreviewToken,
+  verifyPreviewToken,
+  withConfirmation,
+  PreviewAbortError,
+} from "./_confirm";
 import fs from "fs/promises";
 import {
   randomUUID,
@@ -383,7 +385,7 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
           WHERE id = ${upload_id} AND user_id = ${userId}
         `);
 
-        const token = signConfirmationToken(userId, "execute_import", {
+        const token = signPreviewToken(userId, "execute_import", {
           uploadId: upload_id,
           templateId: template_id ?? null,
           columnMapping: mapping ?? null,
@@ -428,7 +430,7 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
     async ({ upload_id, confirmation_token, template_id, column_mapping }) => {
       if (!dek) return err("Import requires an unlocked session (DEK unavailable).");
 
-      const check = verifyConfirmationToken(confirmation_token, userId, "execute_import", {
+      const check = verifyPreviewToken(confirmation_token, userId, "execute_import", {
         uploadId: upload_id,
         templateId: template_id ?? null,
         columnMapping: column_mapping ?? null,
@@ -1342,7 +1344,7 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
             txType: r.tx_type,
           };
         });
-        const token = signConfirmationToken(userId, "approve_staged_rows", tokenPayload);
+        const token = signPreviewToken(userId, "approve_staged_rows", tokenPayload);
         return dataResponse({
           preview: true,
           summary: {
@@ -1358,7 +1360,7 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
       }
 
       // ── Execute branch ────────────────────────────────────────────────
-      const check = verifyConfirmationToken(
+      const check = verifyPreviewToken(
         confirmation_token,
         userId,
         "approve_staged_rows",
@@ -1844,59 +1846,56 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
           "Token returned by the preview call. Omit to get a preview; pass to commit.",
         ),
     },
-    async ({ stagedImportId, confirmation_token }) => {
-      const stagedRows = await q(
-        db,
-        sql`
-          SELECT id, source, file_format, original_filename, subject,
-                 total_row_count, status, encryption_tier
-          FROM staged_imports
-          WHERE id = ${stagedImportId} AND user_id = ${userId}
-        `,
-      );
-      if (!stagedRows.length) return err("Not found");
-      const staged = stagedRows[0];
-      // FINLYNQ-120 — decode the encrypted metadata for the preview summary.
-      const rejectTier = String(staged.encryption_tier ?? "service");
-
-      const tokenPayload = { stagedImportId };
-
-      if (!confirmation_token) {
-        const token = signConfirmationToken(userId, "reject_staged_import", tokenPayload);
-        return dataResponse({
-          preview: true,
-          summary: {
-            stagedImportId,
-            source: staged.source,
-            fileFormat: staged.file_format,
-            originalFilename: decodeStagedField(staged.original_filename as string | null, rejectTier),
-            subject: decodeStagedField(staged.subject as string | null, rejectTier),
-            rowCount: Number(staged.total_row_count ?? 0),
-            status: staged.status,
-          },
-          confirmationToken: token,
-        });
-      }
-
-      const check = verifyConfirmationToken(
-        confirmation_token,
-        userId,
-        "reject_staged_import",
-        tokenPayload,
-      );
-      if (!check.valid) {
-        return err(
-          `Confirmation token invalid: ${check.reason}. Re-call without confirmation_token to refresh.`,
+    // FINLYNQ-264 Phase 0 — refactored onto the shared `withConfirmation`
+    // middleware (convention S). Behaviour is byte-identical to the prior
+    // hand-rolled two-step: bare call → preview + token (no writes); token →
+    // cascade-delete. The token payload still binds `{ stagedImportId }`.
+    withConfirmation<{ stagedImportId: string; confirmation_token?: string }>(userId, {
+      operation: "reject_staged_import",
+      tokenPayload: ({ stagedImportId }) => ({ stagedImportId }),
+      preview: async ({ stagedImportId }) => {
+        const stagedRows = await q(
+          db,
+          sql`
+            SELECT id, source, file_format, original_filename, subject,
+                   total_row_count, status, encryption_tier
+            FROM staged_imports
+            WHERE id = ${stagedImportId} AND user_id = ${userId}
+          `,
         );
-      }
-
-      // Cascade-delete via FK. user_id filter keeps cross-tenant attacks at
-      // 0 rows.
-      await db.execute(
-        sql`DELETE FROM staged_imports WHERE id = ${stagedImportId} AND user_id = ${userId}`,
-      );
-
-      return dataResponse({ stagedImportId });
-    },
+        if (!stagedRows.length) {
+          // Preserve the legacy "Not found" surface — abort so the middleware
+          // returns err("Not found") and never mints a token for a missing row.
+          throw new PreviewAbortError("Not found");
+        }
+        const staged = stagedRows[0];
+        // FINLYNQ-120 — decode the encrypted metadata for the preview summary.
+        const rejectTier = String(staged.encryption_tier ?? "service");
+        return {
+          stagedImportId,
+          source: staged.source,
+          fileFormat: staged.file_format,
+          originalFilename: decodeStagedField(staged.original_filename as string | null, rejectTier),
+          subject: decodeStagedField(staged.subject as string | null, rejectTier),
+          rowCount: Number(staged.total_row_count ?? 0),
+          status: staged.status,
+        };
+      },
+      commit: async ({ stagedImportId }) => {
+        // Re-check existence at commit — mirrors the pre-B path (the token is
+        // bound to the id, but the row could have been consumed since preview).
+        const stagedRows = await q(
+          db,
+          sql`SELECT id FROM staged_imports WHERE id = ${stagedImportId} AND user_id = ${userId}`,
+        );
+        if (!stagedRows.length) return err("Not found");
+        // Cascade-delete via FK. user_id filter keeps cross-tenant attacks at
+        // 0 rows.
+        await db.execute(
+          sql`DELETE FROM staged_imports WHERE id = ${stagedImportId} AND user_id = ${userId}`,
+        );
+        return dataResponse({ stagedImportId });
+      },
+    }),
   );
 }

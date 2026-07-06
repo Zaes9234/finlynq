@@ -118,32 +118,11 @@ async function resolveReportingCurrencyStdio(
 }
 
 /**
- * Fuzzy match against a row list: exact-name → exact-alias → startsWith-name →
- * contains-name → reverse-contains-name.
- *
- * Alias match is exact-only (case-insensitive, trimmed). Only account rows
- * carry `alias`; for other shapes the alias branch is a no-op.
- */
-function fuzzyFind(input: string, options: SqliteRow[]): SqliteRow | null {
-  if (!input || !options.length) return null;
-  const lo = input.toLowerCase().trim();
-  return (
-    options.find(o => String(o.name  ?? "").toLowerCase() === lo) ??
-    options.find(o => String(o.alias ?? "").toLowerCase() === lo) ??
-    options.find(o => String(o.name  ?? "").toLowerCase().startsWith(lo)) ??
-    options.find(o => String(o.name  ?? "").toLowerCase().includes(lo)) ??
-    options.find(o => lo.includes(String(o.name ?? "").toLowerCase())) ??
-    null
-  );
-}
-
-/**
- * Strict resolver for write operations: same waterfall as `fuzzyFind`, but
- * substring/reverse-substring hits are only accepted when the input and the
- * candidate share a whitespace-separated token of length ≥3. Otherwise the
- * substring fallback would silently route writes to a vaguely-similar account.
- * Reads still use plain `fuzzyFind` — wrong filters are recoverable, wrong
- * writes aren't.
+ * Strict resolver for write operations: an exact-name → exact-alias →
+ * startsWith-name → token-gated-substring waterfall. Substring/reverse-substring
+ * hits are only accepted when the input and the candidate share a
+ * whitespace-separated token of length ≥3. Otherwise the substring fallback
+ * would silently route writes to a vaguely-similar account.
  *
  * Mirrors `resolveAccountStrict` in register-tools-pg.ts; the two transports
  * keep the same behavior so a sloppy account name fails the same way on stdio

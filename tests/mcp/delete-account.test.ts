@@ -295,7 +295,11 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
     expect(queries.filter((q) => /DELETE FROM accounts/i.test(q.text))).toHaveLength(1);
   });
 
-  it("blocks delete with a tx-count error when transactions exist and `force` is false", async () => {
+  // FINLYNQ-264 Phase 1: a NON-EMPTY account (transactions exist) is now
+  // gated by the preview→confirmation-token two-step regardless of `force`.
+  // A bare call returns a preview + token and deletes NOTHING; the caller
+  // re-calls with the token to commit.
+  it("previews (no delete) when transactions exist and no confirmation_token is passed", async () => {
     const dek = randomBytes(32);
     const { db, queries } = makeFixtureDb((sqlText) => {
       if (/FROM accounts WHERE user_id/i.test(sqlText) && /AND id = /i.test(sqlText)) {
@@ -309,13 +313,14 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
     const tool = getDeleteAccountTool(db, dek);
     const result = await tool.handler({ accountId: 686 }, {});
     const text = envelopeText(result);
-    expect(text).toMatch(/Account #686/);
-    expect(text).toMatch(/_BUSY_/);
-    expect(text).toMatch(/has 5 transaction\(s\). Pass force=true/);
+    // Preview shape: no delete, a token is minted, the blast is echoed.
+    expect(text).toMatch(/"preview": true/);
+    expect(text).toMatch(/confirmationToken/);
+    expect(text).toMatch(/"transactionCount": 5/);
     expect(queries.filter((q) => /DELETE FROM accounts/i.test(q.text))).toHaveLength(0);
   });
 
-  it("proceeds with `force=true` when transactions exist (FK CASCADE handles children)", async () => {
+  it("commits a non-empty (force) delete only after a valid confirmation_token round-trip", async () => {
     const dek = randomBytes(32);
     const { db, queries } = makeFixtureDb((sqlText) => {
       if (/FROM accounts WHERE user_id/i.test(sqlText) && /AND id = /i.test(sqlText)) {
@@ -327,10 +332,18 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
       return [];
     });
     const tool = getDeleteAccountTool(db, dek);
-    const result = await tool.handler({ accountId: 686, force: true }, {});
-    const text = envelopeText(result);
-    expect(text).toMatch(/Account #686/);
-    expect(text).toMatch(/5 transactions also removed/);
+    // Step 1 — bare force call previews, deletes nothing, hands back a token.
+    const previewRes = await tool.handler({ accountId: 686, force: true }, {});
+    const previewText = envelopeText(previewRes);
+    expect(previewText).toMatch(/"preview": true/);
+    expect(queries.filter((q) => /DELETE FROM accounts/i.test(q.text))).toHaveLength(0);
+    const token = JSON.parse(previewText).data.confirmationToken as string;
+    expect(typeof token).toBe("string");
+    // Step 2 — same identity + the token → commits the delete.
+    const commitRes = await tool.handler({ accountId: 686, force: true, confirmation_token: token }, {});
+    const commitText = envelopeText(commitRes);
+    expect(commitText).toMatch(/Account #686/);
+    expect(commitText).toMatch(/5 transactions also removed/);
     expect(queries.filter((q) => /DELETE FROM accounts/i.test(q.text))).toHaveLength(1);
   });
 
@@ -346,11 +359,14 @@ describe("MCP HTTP delete_account (issue #230 hotfix)", () => {
     // register-tools-pg.ts monolith into the per-group accounts module.
     const file = path.join(__dirname, "../../mcp-server/tools/accounts.ts");
     const src = await fs.readFile(file, "utf8");
-    const idx = src.indexOf('"delete_account"');
+    // FINLYNQ-263: delete_account was folded into `manage_accounts{op:"delete"}`;
+    // the destructive commit lives in the reusable `deleteAccountHandler`
+    // (withConfirmation) built between the delete-op comment and the set_mode op.
+    const idx = src.indexOf("const deleteAccountHandler = withConfirmation");
     expect(idx).toBeGreaterThan(0);
-    // Slice from the tool definition to the next tool boundary; assert
-    // the cache-invalidation call is in there.
-    const sliceEnd = src.indexOf("// ── set_account_mode", idx);
+    // Slice from the handler build to the next op boundary; assert the
+    // cache-invalidation call is in there.
+    const sliceEnd = src.indexOf("// ── op: set_mode", idx);
     expect(sliceEnd).toBeGreaterThan(idx);
     const handler = src.slice(idx, sliceEnd);
     expect(handler).toMatch(/invalidateUserTxCache\(userId\)/);

@@ -12,9 +12,9 @@ import {
   err,
   dataResponse,
   suggestionList,
-  fuzzyFind,
   resolveAccountStrict,
-  resolvePortfolioHoldingStrict,
+  resolveEntity,
+  resolveOrReport,
   decryptNameish,
   resolvePortfolioHoldingByName,
   supportedCurrencyEnum,
@@ -24,7 +24,8 @@ import {
   type PgToolContext,
 } from "./_shared";
 import { aggregateHoldings } from "../../src/lib/portfolio/aggregate-holdings";
-import { getHoldingsValueByHolding } from "../../src/lib/holdings-value";
+import { valuePortfolio, weightBasis } from "../../src/lib/portfolio/valuation";
+import { withConfirmation, PreviewAbortError } from "./_confirm";
 import {
   sql,
 } from "drizzle-orm";
@@ -85,6 +86,7 @@ import {
 import {
   ymdDate,
 } from "../lib/date-validators";
+import { registerManageTool, registerAlias } from "./_consolidate";
 
 export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek, encNote } = ctx;
@@ -172,23 +174,28 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   };
   const today = () => new Date().toISOString().split("T")[0];
 
-  server.tool(
-    "portfolio_buy",
-    "Buy shares/units of a holding in a brokerage account. Writes the canonical buy + buy_cash_leg pair (stock leg positive, cash leg negative, sum 0), opens a cost-basis lot, and debits the cash sleeve for the holding's currency — that sleeve must already exist (add_portfolio_holding a 'Cash' holding for the currency first if missing). Resolve the account by `account` name (strict fuzzy) or exact `account_id`, and the position by `holding` name/ticker or exact `holdingId`. CREATE-ONLY (edit on the web). Replaces the removed record_trade buy path.",
-    {
-      account: z.string().optional().describe("Brokerage account name or alias (strict fuzzy). Pass this or account_id."),
-      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
-      holding: z.string().optional().describe("Holding name or ticker to buy (must already exist in the account). Pass this or holdingId."),
-      holdingId: z.number().int().optional().describe("portfolio_holdings.id of the position (exact)."),
-      qty: z.number().positive().describe("Units acquired (> 0)."),
-      totalCost: z.number().positive().describe("Total cost in the holding's currency (> 0)."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
-      payee: z.string().optional(),
-      note: z.string().optional(),
-      tags: z.string().optional().describe("Comma-separated tags."),
-      cashSleeveHoldingId: z.number().int().optional().describe("Explicit cash sleeve to debit; defaults to the (account, holding-currency) sleeve."),
-    },
-    async ({ account, account_id, holding, holdingId, qty, totalCost, date, payee, note, tags, cashSleeveHoldingId }) => {
+  // ── portfolio_record_entry op handlers (lifted VERBATIM) ───────────────────
+  // FINLYNQ-263 phase 4 — the 8 portfolio_* write tools fold into
+  // portfolio_record_entry (entry_type discriminator). AUDIT INVARIANT #8
+  // preserved: each op still calls the sanctioned operations.ts helper
+  // (recordBuy/recordSell/…) — NEVER a raw INSERT. Cash-leg sign convention,
+  // DEK-gating, lot hooks, invalidateUser + markSnapshotsDirty all VERBATIM.
+  // add_snapshot stays STANDALONE (it writes portfolio_snapshots, not a ledger
+  // entry — owner decision #5).
+  async function opEntryBuy(argsObj: {
+    account?: string;
+    account_id?: number;
+    holding?: string;
+    holdingId?: number;
+    qty: number;
+    totalCost: number;
+    date?: string;
+    payee?: string;
+    note?: string;
+    tags?: string;
+    cashSleeveHoldingId?: number;
+  }): Promise<ToolResult> {
+      const { account, account_id, holding, holdingId, qty, totalCost, date, payee, note, tags, cashSleeveHoldingId } = argsObj;
       if (!dek) return err("portfolio_buy requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
@@ -206,35 +213,27 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         if (m) return err(m);
         throw e;
       }
-    }
-  );
+  }
 
-
-  server.tool(
-    "portfolio_sell",
-    "Sell shares/units of a holding in a brokerage account. Writes sell + sell_cash_leg (stock leg negative, cash leg positive, sum 0), closes cost-basis lots, and credits the cash sleeve. `lotSelection.method` is FIFO (default), HIFO, or SPECIFIC (SPECIFIC needs lotIds or per-lot lots[]). CREATE-ONLY. Replaces the removed record_trade sell path.",
-    {
-      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
-      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
-      holding: z.string().optional().describe("Holding name or ticker to sell (must already exist). Pass this or holdingId."),
-      holdingId: z.number().int().optional().describe("portfolio_holdings.id of the position (exact)."),
-      qty: z.number().positive().describe("Units sold (> 0)."),
-      totalProceeds: z.number().positive().describe("Total proceeds in the holding's currency (> 0)."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
-      lotSelection: z
-        .object({
-          method: z.enum(["FIFO", "HIFO", "SPECIFIC"]),
-          lotIds: z.array(z.number().int().positive()).optional(),
-          lots: z.array(z.object({ lotId: z.number().int().positive(), qty: z.number().positive() })).optional(),
-        })
-        .optional()
-        .describe("Lot disposal strategy (default FIFO). SPECIFIC requires lotIds or per-lot lots."),
-      payee: z.string().optional(),
-      note: z.string().optional(),
-      tags: z.string().optional(),
-      cashSleeveHoldingId: z.number().int().optional().describe("Explicit cash sleeve to credit; defaults to the (account, holding-currency) sleeve."),
-    },
-    async ({ account, account_id, holding, holdingId, qty, totalProceeds, date, lotSelection, payee, note, tags, cashSleeveHoldingId }) => {
+  async function opEntrySell(argsObj: {
+    account?: string;
+    account_id?: number;
+    holding?: string;
+    holdingId?: number;
+    qty: number;
+    totalProceeds: number;
+    date?: string;
+    lotSelection?: {
+      method: "FIFO" | "HIFO" | "SPECIFIC";
+      lotIds?: number[];
+      lots?: Array<{ lotId: number; qty: number }>;
+    };
+    payee?: string;
+    note?: string;
+    tags?: string;
+    cashSleeveHoldingId?: number;
+  }): Promise<ToolResult> {
+      const { account, account_id, holding, holdingId, qty, totalProceeds, date, lotSelection, payee, note, tags, cashSleeveHoldingId } = argsObj;
       if (!dek) return err("portfolio_sell requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
@@ -252,29 +251,24 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         if (m) return err(m);
         throw e;
       }
-    }
-  );
+  }
 
-
-  server.tool(
-    "portfolio_swap",
-    "Swap one holding for another inside a SINGLE brokerage account in one atomic operation. Runs an internal sell of the source + buy of the destination, sharing a swap_link_id. Both holdings must already exist in the account. CREATE-ONLY.",
-    {
-      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
-      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
-      sourceHolding: z.string().optional().describe("Holding being sold (name/ticker). Pass this or sourceHoldingId."),
-      sourceHoldingId: z.number().int().optional().describe("portfolio_holdings.id of the holding being sold."),
-      sourceQty: z.number().positive().describe("Units of the source holding disposed (> 0)."),
-      sourceProceeds: z.number().positive().describe("Proceeds realised from the source (> 0), in account/holding currency."),
-      destHolding: z.string().optional().describe("Holding being acquired (name/ticker). Pass this or destHoldingId."),
-      destHoldingId: z.number().int().optional().describe("portfolio_holdings.id of the holding being acquired."),
-      destQty: z.number().positive().describe("Units of the destination holding acquired (> 0)."),
-      destCost: z.number().positive().describe("Cost allocated to the destination (> 0)."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
-      payee: z.string().optional(),
-      note: z.string().optional(),
-    },
-    async ({ account, account_id, sourceHolding, sourceHoldingId, sourceQty, sourceProceeds, destHolding, destHoldingId, destQty, destCost, date, payee, note }) => {
+  async function opEntrySwap(argsObj: {
+    account?: string;
+    account_id?: number;
+    sourceHolding?: string;
+    sourceHoldingId?: number;
+    sourceQty: number;
+    sourceProceeds: number;
+    destHolding?: string;
+    destHoldingId?: number;
+    destQty: number;
+    destCost: number;
+    date?: string;
+    payee?: string;
+    note?: string;
+  }): Promise<ToolResult> {
+      const { account, account_id, sourceHolding, sourceHoldingId, sourceQty, sourceProceeds, destHolding, destHoldingId, destQty, destCost, date, payee, note } = argsObj;
       if (!dek) return err("portfolio_swap requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
@@ -294,26 +288,21 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         if (m) return err(m);
         throw e;
       }
-    }
-  );
+  }
 
-
-  server.tool(
-    "portfolio_transfer",
-    "Move shares/units of the SAME holding between two different brokerage accounts (in-kind, no cash). Cascades cost basis from source to destination. The holding is resolved in the SOURCE account; source and destination accounts must differ. CREATE-ONLY.",
-    {
-      sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
-      sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
-      destAccount: z.string().optional().describe("Destination brokerage account name or alias. Pass this or destAccount_id."),
-      destAccount_id: z.number().int().optional().describe("Destination account id (exact; wins over name)."),
-      holding: z.string().optional().describe("Holding to move (name/ticker), resolved in the source account. Pass this or holdingId."),
-      holdingId: z.number().int().optional().describe("portfolio_holdings.id of the holding (in the source account)."),
-      qty: z.number().positive().describe("Units leaving source / arriving at destination (> 0)."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
-      payee: z.string().optional(),
-      note: z.string().optional(),
-    },
-    async ({ sourceAccount, sourceAccount_id, destAccount, destAccount_id, holding, holdingId, qty, date, payee, note }) => {
+  async function opEntryTransfer(argsObj: {
+    sourceAccount?: string;
+    sourceAccount_id?: number;
+    destAccount?: string;
+    destAccount_id?: number;
+    holding?: string;
+    holdingId?: number;
+    qty: number;
+    date?: string;
+    payee?: string;
+    note?: string;
+  }): Promise<ToolResult> {
+      const { sourceAccount, sourceAccount_id, destAccount, destAccount_id, holding, holdingId, qty, date, payee, note } = argsObj;
       if (!dek) return err("portfolio_transfer requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const src = resolveOpAccount("sourceAccount", sourceAccount, sourceAccount_id, accounts);
@@ -333,28 +322,23 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         if (m) return err(m);
         throw e;
       }
-    }
-  );
+  }
 
-
-  server.tool(
-    "portfolio_income_expense",
-    "Record portfolio income (dividend/interest, amount > 0) or an expense (fee, amount < 0) on a brokerage cash sleeve. The cash sleeve for `currency` must already exist. `incomeType` resolves the canonical category (Dividends/Interest/Fees) when no explicit categoryId is given and the sign matches. Optionally tie the row to the holding that earned it via relatedHolding/relatedHoldingId. CREATE-ONLY.",
-    {
-      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
-      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
-      currency: supportedCurrencyEnum.describe("Currency of the cash sleeve to credit/debit (ISO code)."),
-      amount: z.number().refine((v) => v !== 0, { message: "amount cannot be 0" }).describe("Positive = income (dividend/interest), negative = expense (fee)."),
-      incomeType: z.enum(["dividend", "interest", "fee", "other"]).optional().describe("Category hint. dividend/interest apply to income (amount>0); fee to expense (amount<0); other leaves the category unset. Ignored when categoryId is given."),
-      relatedHolding: z.string().optional().describe("Holding (name/ticker) this income/expense relates to, for reporting. Pass this or relatedHoldingId."),
-      relatedHoldingId: z.number().int().optional().describe("portfolio_holdings.id this relates to."),
-      categoryId: z.number().int().optional().describe("Explicit category id (overrides incomeType)."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
-      payee: z.string().optional(),
-      note: z.string().optional(),
-      tags: z.string().optional(),
-    },
-    async ({ account, account_id, currency, amount, incomeType, relatedHolding, relatedHoldingId, categoryId, date, payee, note, tags }) => {
+  async function opEntryIncomeExpense(argsObj: {
+    account?: string;
+    account_id?: number;
+    currency: string;
+    amount: number;
+    incomeType?: "dividend" | "interest" | "fee" | "other";
+    relatedHolding?: string;
+    relatedHoldingId?: number;
+    categoryId?: number;
+    date?: string;
+    payee?: string;
+    note?: string;
+    tags?: string;
+  }): Promise<ToolResult> {
+      const { account, account_id, currency, amount, incomeType, relatedHolding, relatedHoldingId, categoryId, date, payee, note, tags } = argsObj;
       if (!dek) return err("portfolio_income_expense requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
@@ -385,28 +369,23 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         if (m) return err(m);
         throw e;
       }
-    }
-  );
+  }
 
-
-  server.tool(
-    "portfolio_fx_conversion",
-    "Convert cash from one currency to another inside a SINGLE brokerage account (e.g. USD sleeve → CAD sleeve). Writes fx_from + fx_to (+ optional fx_fee). Both currency sleeves (and the fee sleeve, if any) must already exist. CREATE-ONLY.",
-    {
-      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
-      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
-      fromCurrency: supportedCurrencyEnum.describe("Currency debited (source sleeve)."),
-      fromAmount: z.number().positive().describe("Amount debited from the source sleeve (> 0)."),
-      toCurrency: supportedCurrencyEnum.describe("Currency credited (destination sleeve)."),
-      toAmount: z.number().positive().describe("Amount credited to the destination sleeve (> 0)."),
-      feeAmount: z.number().positive().optional().describe("Optional conversion fee (> 0)."),
-      feeCurrency: supportedCurrencyEnum.optional().describe("Currency of the fee."),
-      feeOnSleeveCurrency: supportedCurrencyEnum.optional().describe("Which sleeve currency absorbs the fee (defaults to feeCurrency)."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
-      payee: z.string().optional(),
-      note: z.string().optional(),
-    },
-    async ({ account, account_id, fromCurrency, fromAmount, toCurrency, toAmount, feeAmount, feeCurrency, feeOnSleeveCurrency, date, payee, note }) => {
+  async function opEntryFxConversion(argsObj: {
+    account?: string;
+    account_id?: number;
+    fromCurrency: string;
+    fromAmount: number;
+    toCurrency: string;
+    toAmount: number;
+    feeAmount?: number;
+    feeCurrency?: string;
+    feeOnSleeveCurrency?: string;
+    date?: string;
+    payee?: string;
+    note?: string;
+  }): Promise<ToolResult> {
+      const { account, account_id, fromCurrency, fromAmount, toCurrency, toAmount, feeAmount, feeCurrency, feeOnSleeveCurrency, date, payee, note } = argsObj;
       if (!dek) return err("portfolio_fx_conversion requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const a = resolveOpAccount("account", account, account_id, accounts);
@@ -422,26 +401,21 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         if (m) return err(m);
         throw e;
       }
-    }
-  );
+  }
 
-
-  server.tool(
-    "portfolio_deposit",
-    "Fund a brokerage cash sleeve from a non-investment (bank/chequing) account. Writes a brokerage_deposit_out / brokerage_deposit_in pair linked by link_id. The destination cash sleeve must already exist (or pass destCashSleeveHoldingId). CREATE-ONLY.",
-    {
-      sourceAccount: z.string().optional().describe("Source (non-investment) account name or alias. Pass this or sourceAccount_id."),
-      sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
-      destAccount: z.string().optional().describe("Destination brokerage account name or alias. Pass this or destAccount_id."),
-      destAccount_id: z.number().int().optional().describe("Destination brokerage account id (exact; wins over name)."),
-      destCashSleeveHoldingId: z.number().int().optional().describe("Explicit destination cash sleeve; defaults to the brokerage's cash sleeve for the amount currency."),
-      amount: z.number().positive().describe("Amount transferred (> 0)."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
-      payee: z.string().optional(),
-      note: z.string().optional(),
-      tags: z.string().optional(),
-    },
-    async ({ sourceAccount, sourceAccount_id, destAccount, destAccount_id, destCashSleeveHoldingId, amount, date, payee, note, tags }) => {
+  async function opEntryDeposit(argsObj: {
+    sourceAccount?: string;
+    sourceAccount_id?: number;
+    destAccount?: string;
+    destAccount_id?: number;
+    destCashSleeveHoldingId?: number;
+    amount: number;
+    date?: string;
+    payee?: string;
+    note?: string;
+    tags?: string;
+  }): Promise<ToolResult> {
+      const { sourceAccount, sourceAccount_id, destAccount, destAccount_id, destCashSleeveHoldingId, amount, date, payee, note, tags } = argsObj;
       if (!dek) return err("portfolio_deposit requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const src = resolveOpAccount("sourceAccount", sourceAccount, sourceAccount_id, accounts);
@@ -459,26 +433,21 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         if (m) return err(m);
         throw e;
       }
-    }
-  );
+  }
 
-
-  server.tool(
-    "portfolio_withdrawal",
-    "Withdraw cash from a brokerage cash sleeve to a non-investment (bank/chequing) account. Writes a brokerage_withdrawal_out / brokerage_withdrawal_in pair linked by link_id. The source cash sleeve must already exist (or pass sourceCashSleeveHoldingId). CREATE-ONLY.",
-    {
-      sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
-      sourceAccount_id: z.number().int().optional().describe("Source brokerage account id (exact; wins over name)."),
-      sourceCashSleeveHoldingId: z.number().int().optional().describe("Explicit source cash sleeve; defaults to the brokerage's cash sleeve for the amount currency."),
-      destAccount: z.string().optional().describe("Destination (non-investment) account name or alias. Pass this or destAccount_id."),
-      destAccount_id: z.number().int().optional().describe("Destination account id (exact; wins over name)."),
-      amount: z.number().positive().describe("Amount withdrawn (> 0)."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
-      payee: z.string().optional(),
-      note: z.string().optional(),
-      tags: z.string().optional(),
-    },
-    async ({ sourceAccount, sourceAccount_id, sourceCashSleeveHoldingId, destAccount, destAccount_id, amount, date, payee, note, tags }) => {
+  async function opEntryWithdrawal(argsObj: {
+    sourceAccount?: string;
+    sourceAccount_id?: number;
+    sourceCashSleeveHoldingId?: number;
+    destAccount?: string;
+    destAccount_id?: number;
+    amount: number;
+    date?: string;
+    payee?: string;
+    note?: string;
+    tags?: string;
+  }): Promise<ToolResult> {
+      const { sourceAccount, sourceAccount_id, sourceCashSleeveHoldingId, destAccount, destAccount_id, amount, date, payee, note, tags } = argsObj;
       if (!dek) return err("portfolio_withdrawal requires an active session DEK — log in again to encrypt the rows.");
       const accounts = await loadOpAccounts();
       const src = resolveOpAccount("sourceAccount", sourceAccount, sourceAccount_id, accounts);
@@ -496,7 +465,315 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         if (m) return err(m);
         throw e;
       }
-    }
+  }
+
+  // ── consolidated tool: portfolio_record_entry + hidden aliases ─────────────
+  // `entry_type` discriminator (owner decision #5 — the domain-appropriate
+  // exception to the `op` standard). Each variant carries its op's exact
+  // schema; the dispatcher routes to the verbatim handler (which still calls
+  // the sanctioned operations.ts helper — audit #8).
+  const accountRef = {
+    account: z.string().optional().describe("Brokerage account name or alias (strict fuzzy). Pass this or account_id."),
+    account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+  };
+  registerManageTool(
+    server,
+    "portfolio_record_entry",
+    "Record a lot-aware portfolio ledger entry; `entry_type` selects the operation. Values: buy, sell, swap, transfer, income_expense, fx_conversion, deposit, withdrawal. Writes the canonical, sign-correct legs (stock +, cash −, sum 0) via the operations engine — cash sleeves must already exist. CREATE-ONLY (edit on the web). For a net-worth snapshot use add_snapshot.",
+    z.discriminatedUnion("entry_type", [
+      z.object({
+        entry_type: z.literal("buy"),
+        ...accountRef,
+        holding: z.string().optional().describe("Holding name or ticker to buy (must already exist in the account). Pass this or holdingId."),
+        holdingId: z.number().int().optional().describe("portfolio_holdings.id of the position (exact)."),
+        qty: z.number().positive().describe("Units acquired (> 0)."),
+        totalCost: z.number().positive().describe("Total cost in the holding's currency (> 0)."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+        payee: z.string().optional(),
+        note: z.string().optional(),
+        tags: z.string().optional().describe("Comma-separated tags."),
+        cashSleeveHoldingId: z.number().int().optional().describe("Explicit cash sleeve to debit; defaults to the (account, holding-currency) sleeve."),
+      }),
+      z.object({
+        entry_type: z.literal("sell"),
+        ...accountRef,
+        holding: z.string().optional().describe("Holding name or ticker to sell (must already exist). Pass this or holdingId."),
+        holdingId: z.number().int().optional().describe("portfolio_holdings.id of the position (exact)."),
+        qty: z.number().positive().describe("Units sold (> 0)."),
+        totalProceeds: z.number().positive().describe("Total proceeds in the holding's currency (> 0)."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+        lotSelection: z.object({
+          method: z.enum(["FIFO", "HIFO", "SPECIFIC"]),
+          lotIds: z.array(z.number().int().positive()).optional(),
+          lots: z.array(z.object({ lotId: z.number().int().positive(), qty: z.number().positive() })).optional(),
+        }).optional().describe("Lot disposal strategy (default FIFO). SPECIFIC requires lotIds or per-lot lots."),
+        payee: z.string().optional(),
+        note: z.string().optional(),
+        tags: z.string().optional(),
+        cashSleeveHoldingId: z.number().int().optional().describe("Explicit cash sleeve to credit; defaults to the (account, holding-currency) sleeve."),
+      }),
+      z.object({
+        entry_type: z.literal("swap"),
+        ...accountRef,
+        sourceHolding: z.string().optional().describe("Holding being sold (name/ticker). Pass this or sourceHoldingId."),
+        sourceHoldingId: z.number().int().optional().describe("portfolio_holdings.id of the holding being sold."),
+        sourceQty: z.number().positive().describe("Units of the source holding disposed (> 0)."),
+        sourceProceeds: z.number().positive().describe("Proceeds realised from the source (> 0), in account/holding currency."),
+        destHolding: z.string().optional().describe("Holding being acquired (name/ticker). Pass this or destHoldingId."),
+        destHoldingId: z.number().int().optional().describe("portfolio_holdings.id of the holding being acquired."),
+        destQty: z.number().positive().describe("Units of the destination holding acquired (> 0)."),
+        destCost: z.number().positive().describe("Cost allocated to the destination (> 0)."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+        payee: z.string().optional(),
+        note: z.string().optional(),
+      }),
+      z.object({
+        entry_type: z.literal("transfer"),
+        sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
+        sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
+        destAccount: z.string().optional().describe("Destination brokerage account name or alias. Pass this or destAccount_id."),
+        destAccount_id: z.number().int().optional().describe("Destination account id (exact; wins over name)."),
+        holding: z.string().optional().describe("Holding to move (name/ticker), resolved in the source account. Pass this or holdingId."),
+        holdingId: z.number().int().optional().describe("portfolio_holdings.id of the holding (in the source account)."),
+        qty: z.number().positive().describe("Units leaving source / arriving at destination (> 0)."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+        payee: z.string().optional(),
+        note: z.string().optional(),
+      }),
+      z.object({
+        entry_type: z.literal("income_expense"),
+        ...accountRef,
+        currency: supportedCurrencyEnum.describe("Currency of the cash sleeve to credit/debit (ISO code)."),
+        amount: z.number().refine((v) => v !== 0, { message: "amount cannot be 0" }).describe("Positive = income (dividend/interest), negative = expense (fee)."),
+        incomeType: z.enum(["dividend", "interest", "fee", "other"]).optional().describe("Category hint. dividend/interest apply to income (amount>0); fee to expense (amount<0); other leaves the category unset. Ignored when categoryId is given."),
+        relatedHolding: z.string().optional().describe("Holding (name/ticker) this income/expense relates to, for reporting. Pass this or relatedHoldingId."),
+        relatedHoldingId: z.number().int().optional().describe("portfolio_holdings.id this relates to."),
+        categoryId: z.number().int().optional().describe("Explicit category id (overrides incomeType)."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+        payee: z.string().optional(),
+        note: z.string().optional(),
+        tags: z.string().optional(),
+      }),
+      z.object({
+        entry_type: z.literal("fx_conversion"),
+        ...accountRef,
+        fromCurrency: supportedCurrencyEnum.describe("Currency debited (source sleeve)."),
+        fromAmount: z.number().positive().describe("Amount debited from the source sleeve (> 0)."),
+        toCurrency: supportedCurrencyEnum.describe("Currency credited (destination sleeve)."),
+        toAmount: z.number().positive().describe("Amount credited to the destination sleeve (> 0)."),
+        feeAmount: z.number().positive().optional().describe("Optional conversion fee (> 0)."),
+        feeCurrency: supportedCurrencyEnum.optional().describe("Currency of the fee."),
+        feeOnSleeveCurrency: supportedCurrencyEnum.optional().describe("Which sleeve currency absorbs the fee (defaults to feeCurrency)."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+        payee: z.string().optional(),
+        note: z.string().optional(),
+      }),
+      z.object({
+        entry_type: z.literal("deposit"),
+        sourceAccount: z.string().optional().describe("Source (non-investment) account name or alias. Pass this or sourceAccount_id."),
+        sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
+        destAccount: z.string().optional().describe("Destination brokerage account name or alias. Pass this or destAccount_id."),
+        destAccount_id: z.number().int().optional().describe("Destination brokerage account id (exact; wins over name)."),
+        destCashSleeveHoldingId: z.number().int().optional().describe("Explicit destination cash sleeve; defaults to the brokerage's cash sleeve for the amount currency."),
+        amount: z.number().positive().describe("Amount transferred (> 0)."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+        payee: z.string().optional(),
+        note: z.string().optional(),
+        tags: z.string().optional(),
+      }),
+      z.object({
+        entry_type: z.literal("withdrawal"),
+        sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
+        sourceAccount_id: z.number().int().optional().describe("Source brokerage account id (exact; wins over name)."),
+        sourceCashSleeveHoldingId: z.number().int().optional().describe("Explicit source cash sleeve; defaults to the brokerage's cash sleeve for the amount currency."),
+        destAccount: z.string().optional().describe("Destination (non-investment) account name or alias. Pass this or destAccount_id."),
+        destAccount_id: z.number().int().optional().describe("Destination account id (exact; wins over name)."),
+        amount: z.number().positive().describe("Amount withdrawn (> 0)."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+        payee: z.string().optional(),
+        note: z.string().optional(),
+        tags: z.string().optional(),
+      }),
+    ]),
+    async (input) => {
+      switch (input.entry_type) {
+        case "buy":
+          return opEntryBuy(input);
+        case "sell":
+          return opEntrySell(input);
+        case "swap":
+          return opEntrySwap(input);
+        case "transfer":
+          return opEntryTransfer(input);
+        case "income_expense":
+          return opEntryIncomeExpense(input);
+        case "fx_conversion":
+          return opEntryFxConversion(input);
+        case "deposit":
+          return opEntryDeposit(input);
+        case "withdrawal":
+          return opEntryWithdrawal(input);
+      }
+    },
+  );
+
+  registerAlias(
+    server,
+    "portfolio_buy",
+    "Buy shares/units of a holding in a brokerage account. Writes the canonical buy + buy_cash_leg pair (stock leg positive, cash leg negative, sum 0), opens a cost-basis lot, and debits the cash sleeve for the holding's currency — that sleeve must already exist (add_portfolio_holding a 'Cash' holding for the currency first if missing). Resolve the account by `account` name (strict fuzzy) or exact `account_id`, and the position by `holding` name/ticker or exact `holdingId`. CREATE-ONLY (edit on the web). Replaces the removed record_trade buy path.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias (strict fuzzy). Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      holding: z.string().optional().describe("Holding name or ticker to buy (must already exist in the account). Pass this or holdingId."),
+      holdingId: z.number().int().optional().describe("portfolio_holdings.id of the position (exact)."),
+      qty: z.number().positive().describe("Units acquired (> 0)."),
+      totalCost: z.number().positive().describe("Total cost in the holding's currency (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional().describe("Comma-separated tags."),
+      cashSleeveHoldingId: z.number().int().optional().describe("Explicit cash sleeve to debit; defaults to the (account, holding-currency) sleeve."),
+    },
+    async (args) => opEntryBuy(args),
+  );
+  registerAlias(
+    server,
+    "portfolio_sell",
+    "Sell shares/units of a holding in a brokerage account. Writes sell + sell_cash_leg (stock leg negative, cash leg positive, sum 0), closes cost-basis lots, and credits the cash sleeve. `lotSelection.method` is FIFO (default), HIFO, or SPECIFIC (SPECIFIC needs lotIds or per-lot lots[]). CREATE-ONLY. Replaces the removed record_trade sell path.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      holding: z.string().optional().describe("Holding name or ticker to sell (must already exist). Pass this or holdingId."),
+      holdingId: z.number().int().optional().describe("portfolio_holdings.id of the position (exact)."),
+      qty: z.number().positive().describe("Units sold (> 0)."),
+      totalProceeds: z.number().positive().describe("Total proceeds in the holding's currency (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      lotSelection: z.object({
+        method: z.enum(["FIFO", "HIFO", "SPECIFIC"]),
+        lotIds: z.array(z.number().int().positive()).optional(),
+        lots: z.array(z.object({ lotId: z.number().int().positive(), qty: z.number().positive() })).optional(),
+      }).optional().describe("Lot disposal strategy (default FIFO). SPECIFIC requires lotIds or per-lot lots."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+      cashSleeveHoldingId: z.number().int().optional().describe("Explicit cash sleeve to credit; defaults to the (account, holding-currency) sleeve."),
+    },
+    async (args) => opEntrySell(args),
+  );
+  registerAlias(
+    server,
+    "portfolio_swap",
+    "Swap one holding for another inside a SINGLE brokerage account in one atomic operation. Runs an internal sell of the source + buy of the destination, sharing a swap_link_id. Both holdings must already exist in the account. CREATE-ONLY.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      sourceHolding: z.string().optional().describe("Holding being sold (name/ticker). Pass this or sourceHoldingId."),
+      sourceHoldingId: z.number().int().optional().describe("portfolio_holdings.id of the holding being sold."),
+      sourceQty: z.number().positive().describe("Units of the source holding disposed (> 0)."),
+      sourceProceeds: z.number().positive().describe("Proceeds realised from the source (> 0), in account/holding currency."),
+      destHolding: z.string().optional().describe("Holding being acquired (name/ticker). Pass this or destHoldingId."),
+      destHoldingId: z.number().int().optional().describe("portfolio_holdings.id of the holding being acquired."),
+      destQty: z.number().positive().describe("Units of the destination holding acquired (> 0)."),
+      destCost: z.number().positive().describe("Cost allocated to the destination (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+    },
+    async (args) => opEntrySwap(args),
+  );
+  registerAlias(
+    server,
+    "portfolio_transfer",
+    "Move shares/units of the SAME holding between two different brokerage accounts (in-kind, no cash). Cascades cost basis from source to destination. The holding is resolved in the SOURCE account; source and destination accounts must differ. CREATE-ONLY.",
+    {
+      sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
+      sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
+      destAccount: z.string().optional().describe("Destination brokerage account name or alias. Pass this or destAccount_id."),
+      destAccount_id: z.number().int().optional().describe("Destination account id (exact; wins over name)."),
+      holding: z.string().optional().describe("Holding to move (name/ticker), resolved in the source account. Pass this or holdingId."),
+      holdingId: z.number().int().optional().describe("portfolio_holdings.id of the holding (in the source account)."),
+      qty: z.number().positive().describe("Units leaving source / arriving at destination (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+    },
+    async (args) => opEntryTransfer(args),
+  );
+  registerAlias(
+    server,
+    "portfolio_income_expense",
+    "Record portfolio income (dividend/interest, amount > 0) or an expense (fee, amount < 0) on a brokerage cash sleeve. The cash sleeve for `currency` must already exist. `incomeType` resolves the canonical category (Dividends/Interest/Fees) when no explicit categoryId is given and the sign matches. Optionally tie the row to the holding that earned it via relatedHolding/relatedHoldingId. CREATE-ONLY.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      currency: supportedCurrencyEnum.describe("Currency of the cash sleeve to credit/debit (ISO code)."),
+      amount: z.number().refine((v) => v !== 0, { message: "amount cannot be 0" }).describe("Positive = income (dividend/interest), negative = expense (fee)."),
+      incomeType: z.enum(["dividend", "interest", "fee", "other"]).optional().describe("Category hint. dividend/interest apply to income (amount>0); fee to expense (amount<0); other leaves the category unset. Ignored when categoryId is given."),
+      relatedHolding: z.string().optional().describe("Holding (name/ticker) this income/expense relates to, for reporting. Pass this or relatedHoldingId."),
+      relatedHoldingId: z.number().int().optional().describe("portfolio_holdings.id this relates to."),
+      categoryId: z.number().int().optional().describe("Explicit category id (overrides incomeType)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async (args) => opEntryIncomeExpense(args),
+  );
+  registerAlias(
+    server,
+    "portfolio_fx_conversion",
+    "Convert cash from one currency to another inside a SINGLE brokerage account (e.g. USD sleeve → CAD sleeve). Writes fx_from + fx_to (+ optional fx_fee). Both currency sleeves (and the fee sleeve, if any) must already exist. CREATE-ONLY.",
+    {
+      account: z.string().optional().describe("Brokerage account name or alias. Pass this or account_id."),
+      account_id: z.number().int().optional().describe("Brokerage account id (exact; wins over name)."),
+      fromCurrency: supportedCurrencyEnum.describe("Currency debited (source sleeve)."),
+      fromAmount: z.number().positive().describe("Amount debited from the source sleeve (> 0)."),
+      toCurrency: supportedCurrencyEnum.describe("Currency credited (destination sleeve)."),
+      toAmount: z.number().positive().describe("Amount credited to the destination sleeve (> 0)."),
+      feeAmount: z.number().positive().optional().describe("Optional conversion fee (> 0)."),
+      feeCurrency: supportedCurrencyEnum.optional().describe("Currency of the fee."),
+      feeOnSleeveCurrency: supportedCurrencyEnum.optional().describe("Which sleeve currency absorbs the fee (defaults to feeCurrency)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+    },
+    async (args) => opEntryFxConversion(args),
+  );
+  registerAlias(
+    server,
+    "portfolio_deposit",
+    "Fund a brokerage cash sleeve from a non-investment (bank/chequing) account. Writes a brokerage_deposit_out / brokerage_deposit_in pair linked by link_id. The destination cash sleeve must already exist (or pass destCashSleeveHoldingId). CREATE-ONLY.",
+    {
+      sourceAccount: z.string().optional().describe("Source (non-investment) account name or alias. Pass this or sourceAccount_id."),
+      sourceAccount_id: z.number().int().optional().describe("Source account id (exact; wins over name)."),
+      destAccount: z.string().optional().describe("Destination brokerage account name or alias. Pass this or destAccount_id."),
+      destAccount_id: z.number().int().optional().describe("Destination brokerage account id (exact; wins over name)."),
+      destCashSleeveHoldingId: z.number().int().optional().describe("Explicit destination cash sleeve; defaults to the brokerage's cash sleeve for the amount currency."),
+      amount: z.number().positive().describe("Amount transferred (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async (args) => opEntryDeposit(args),
+  );
+  registerAlias(
+    server,
+    "portfolio_withdrawal",
+    "Withdraw cash from a brokerage cash sleeve to a non-investment (bank/chequing) account. Writes a brokerage_withdrawal_out / brokerage_withdrawal_in pair linked by link_id. The source cash sleeve must already exist (or pass sourceCashSleeveHoldingId). CREATE-ONLY.",
+    {
+      sourceAccount: z.string().optional().describe("Source brokerage account name or alias. Pass this or sourceAccount_id."),
+      sourceAccount_id: z.number().int().optional().describe("Source brokerage account id (exact; wins over name)."),
+      sourceCashSleeveHoldingId: z.number().int().optional().describe("Explicit source cash sleeve; defaults to the brokerage's cash sleeve for the amount currency."),
+      destAccount: z.string().optional().describe("Destination (non-investment) account name or alias. Pass this or destAccount_id."),
+      destAccount_id: z.number().int().optional().describe("Destination account id (exact; wins over name)."),
+      amount: z.number().positive().describe("Amount withdrawn (> 0)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)."),
+      payee: z.string().optional(),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async (args) => opEntryWithdrawal(args),
   );
 
 
@@ -530,26 +807,29 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   );
 
 
-  // ── add_portfolio_holding ──────────────────────────────────────────────────
-  server.tool(
-    "add_portfolio_holding",
-    "Create a portfolio holding (a single position like 'VEQT.TO' inside a brokerage account). The import pipeline auto-creates these from CSV/ZIP uploads; this tool is for manually adding a position the user wants to track without an import.",
-    {
-      name: z.string().min(1).max(200).describe("Display name of the holding (e.g. 'Vanguard All-Equity ETF')"),
-      account: z.string().describe("Brokerage account name or alias (fuzzy matched against name; exact match on alias). Required because uniqueness is scoped per (account, name)."),
-      symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list."),
-      isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
-      note: z.string().max(500).optional(),
-    },
-    async ({ name, account, symbol, currency, isCrypto, note }) => {
+  // ── op: add — lifted VERBATIM from add_portfolio_holding ───────────────────
+  type ToolResult = { content: Array<{ type: "text"; text: string }> };
+  async function opHoldingAdd(args: {
+    name: string;
+    account?: string;
+    account_id?: number;
+    symbol?: string;
+    currency?: string;
+    isCrypto?: boolean;
+    note?: string;
+  }): Promise<ToolResult> {
+      const { name, account, account_id, symbol, currency, isCrypto, note } = args;
       const rawAccounts = await q(db, sql`
         SELECT id, currency, name_ct, alias_ct FROM accounts
         WHERE user_id = ${userId} AND archived = false
       `);
       const allAccounts = decryptNameish(rawAccounts, dek);
-      const acct = fuzzyFind(account, allAccounts);
-      if (!acct) return err(`Account "${account}" not found`);
+      // FINLYNQ-267: resolve via the shared envelope — a mistyped/unmatched name
+      // is REFUSED and a 2+ match returns an ambiguous list (was `fuzzyFind`
+      // silent-first); `account_id` is the FK fast-path.
+      const aout = resolveOrReport("account", resolveEntity({ entity: "account", id: account_id, name: account, options: allAccounts }));
+      if ("report" in aout) return aout.report;
+      const acct = allAccounts.find((a) => Number(a.id) === aout.id) ?? { id: aout.id, currency: undefined };
 
       // Stream D Phase 4: portfolio_holdings.name plaintext column dropped —
       // uniqueness gate now relies on name_lookup HMAC. No DEK ⇒ no lookup ⇒
@@ -643,24 +923,20 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         }
         throw e;
       }
-    }
-  );
+  }
 
-
-  // ── update_portfolio_holding ───────────────────────────────────────────────
-  server.tool(
-    "update_portfolio_holding",
-    "Update a portfolio holding's name, symbol, currency, isCrypto, or note. Renames cascade to all transactions automatically because the portfolio aggregators (issue #86) group by FK holdingId, not by display name — two holdings sharing a name across accounts stay distinct rows in get_portfolio_analysis output. NOTE: the legacy `account` parameter is REFUSED (issue #99) — moving a holding to a different account would leave stale `holding_accounts` rows and orphaned account attribution on every historical transaction. To actually move shares between accounts, use record_transfer (in-kind); to re-attribute existing transactions, update them individually.",
-    {
-      holding: z.string().describe("Current holding name OR symbol (fuzzy matched against decrypted name and symbol)"),
-      name: z.string().min(1).max(200).optional().describe("New name"),
-      symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
-      account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) to move shares between accounts; update individual transactions to re-attribute history."),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
-      isCrypto: z.boolean().optional(),
-      note: z.string().max(500).optional(),
-    },
-    async ({ holding, name, symbol, account, currency, isCrypto, note }) => {
+  // ── op: update — lifted VERBATIM from update_portfolio_holding ─────────────
+  async function opHoldingUpdate(args: {
+    holding?: string;
+    holdingId?: number;
+    name?: string;
+    symbol?: string;
+    account?: string;
+    currency?: string;
+    isCrypto?: boolean;
+    note?: string;
+  }): Promise<ToolResult> {
+      const { holding, holdingId, name, symbol, account, currency, isCrypto, note } = args;
       // Issue #99: refuse account-move. Updating only portfolio_holdings.account_id
       // (the prior behavior) leaves a stale (holding, old_account) row in
       // holding_accounts (issue #25's JOIN grain) AND broken account
@@ -681,19 +957,14 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         WHERE user_id = ${userId}
       `);
       const allHoldings = decryptNameish(rawHoldings, dek);
-      // Match by name first (the existing fuzzyFind behavior), then by symbol
-      // exact-then-startsWith if name didn't hit. Symbol is a separate signal
-      // — matching it as if it were a name (substring on name) would surface
-      // a totally unrelated holding.
-      let h: Row | null = fuzzyFind(holding, allHoldings);
-      if (!h) {
-        const lo = holding.toLowerCase().trim();
-        h =
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase() === lo) ??
-          allHoldings.find((r) => String(r.symbol ?? "").toLowerCase().startsWith(lo)) ??
-          null;
-      }
-      if (!h) return err(`Holding "${holding}" not found`);
+      // FINLYNQ-267: resolve by name OR symbol via the shared envelope — a
+      // name/symbol matching 2 positions across accounts now returns an
+      // ambiguous list (was `fuzzyFind` silent-first); `holdingId` is the FK
+      // fast-path. DEFAULT_STRICT.holding matches exact/startsWith on both
+      // name and symbol, replacing the manual symbol fallback.
+      const hout = resolveOrReport("holding", resolveEntity({ entity: "holding", id: holdingId, name: holding, options: allHoldings }));
+      if ("report" in hout) return hout.report;
+      const h = allHoldings.find((r) => Number(r.id) === hout.id)!;
 
       // Stream D Phase 4 — plaintext name/symbol dropped.
       const updates: ReturnType<typeof sql>[] = [];
@@ -763,77 +1034,203 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         }
         throw e;
       }
-    }
-  );
+  }
 
 
   // ── delete_portfolio_holding ───────────────────────────────────────────────
-  server.tool(
-    "delete_portfolio_holding",
-    "Delete a portfolio holding. Transactions referencing it survive — the FK is set to NULL automatically (no data loss; they fall back to the orphan-aggregation path until reassigned).",
-    {
-      holding: z.string().describe("Holding name OR symbol (fuzzy matched)"),
-    },
-    async ({ holding }) => {
-      const rawHoldings = await q(db, sql`
-        SELECT id, name_ct, symbol_ct
-        FROM portfolio_holdings
-        WHERE user_id = ${userId}
-      `);
-      const allHoldings = decryptNameish(rawHoldings, dek);
-      // Issue #127: resolve via strict matcher gated on token overlap so a
-      // tiny-named holding (e.g. "S") cannot silently swallow a longer input
-      // (e.g. "TESTV") via fuzzyFind's reverse-includes branch and DELETE
-      // the wrong row. Reads still tolerate fuzziness; destructive paths do not.
-      const resolved = resolvePortfolioHoldingStrict(holding, allHoldings);
-      if (!resolved.ok) {
-        if (resolved.reason === "low_confidence") {
-          const sName = String(resolved.suggestion.name ?? "");
-          return err(`Holding "${holding}" did not match strongly — did you mean "${sName}" (id=${Number(resolved.suggestion.id)})? Re-call with the exact name to confirm.`);
-        }
-        return err(`Holding "${holding}" not found`);
-      }
-      const h = resolved.holding;
-      // Capture decrypted name BEFORE the DELETE so the response renders
-      // truthful state, not whatever the matcher landed on after a stale read.
-      const matchedName = String(h.name ?? "");
+  // FINLYNQ-264 Phase 1 (tier-1 when it has lots/tx): deleting a holding
+  // unlinks N transactions (FK SET NULL — they survive) AND cascade-deletes its
+  // holding_lots + closures (the lot IDENTITY is gone, not recoverable). So a
+  // holding with any linked transactions OR any lots now requires the
+  // preview→token two-step; a clean/empty holding (0 tx, 0 lots) deletes
+  // directly. Resolution (strict matcher, issue #127) is unchanged + memoized.
+  type DeleteHoldingArgs = {
+    holding?: string;
+    holdingId?: number;
+    confirmation_token?: string;
+    __h?: Row;
+    __txCount?: number;
+    __lotCount?: number;
+  };
 
-      const txnCount = await q(db, sql`
-        SELECT COUNT(*) AS cnt FROM transactions
-        WHERE user_id = ${userId} AND portfolio_holding_id = ${h.id}
-      `);
-      const count = Number(txnCount[0]?.cnt ?? 0);
-
-      await db.execute(sql`DELETE FROM portfolio_holdings WHERE id = ${h.id} AND user_id = ${userId}`);
-      // Per CLAUDE.md "Every MCP tx-mutating write must call invalidateUser":
-      // FK ON DELETE SET NULL mutates linked transactions' portfolio_holding_id,
-      // so the per-user tx cache must be invalidated.
-      invalidateUserTxCache(userId);
-      return text({
-        success: true,
-        data: {
-          message: count > 0
-            ? `Holding "${matchedName}" deleted; ${count} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
-            : `Holding "${matchedName}" deleted.`,
-        },
-      });
+  async function resolveDeleteHolding(a: DeleteHoldingArgs): Promise<{ h: Row; txCount: number; lotCount: number }> {
+    if (a.__h) return { h: a.__h, txCount: a.__txCount ?? 0, lotCount: a.__lotCount ?? 0 };
+    const rawHoldings = await q(db, sql`
+      SELECT id, name_ct, symbol_ct
+      FROM portfolio_holdings
+      WHERE user_id = ${userId}
+    `);
+    const allHoldings = decryptNameish(rawHoldings, dek);
+    // FINLYNQ-267: resolve via the shared envelope — a name/symbol matching 2
+    // positions across accounts now ABORTS with an ambiguous list (was
+    // `resolvePortfolioHoldingStrict` ambiguous:false silent-first, decision
+    // 5a); `holdingId` is the FK fast-path. Issue #127 token gate preserved via
+    // DEFAULT_STRICT.holding.
+    const env = resolveEntity({ entity: "holding", id: a.holdingId, name: a.holding, options: allHoldings });
+    if (env.status === "ambiguous") {
+      const list = env.candidates.map((c) => (c.symbol ? `"${c.name}" (${c.symbol}, id=${c.id})` : `"${c.name}" (id=${c.id})`)).join(", ");
+      throw new PreviewAbortError(`Holding is ambiguous — ${env.candidates.length} matches: ${list}. Pass holdingId to disambiguate.`);
     }
+    if (env.status === "not_found") {
+      const hint = env.suggestion ? ` Did you mean "${env.suggestion.name}" (id=${env.suggestion.id})?` : "";
+      throw new PreviewAbortError(`${env.warning}.${hint}`);
+    }
+    const h = allHoldings.find((r) => Number(r.id) === env.id)!;
+    const txCount = Number(
+      (await q(db, sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND portfolio_holding_id = ${h.id}`))[0]?.cnt ?? 0,
+    );
+    const lotCount = Number(
+      (await q(db, sql`SELECT COUNT(*) AS cnt FROM holding_lots WHERE user_id = ${userId} AND holding_id = ${h.id}`))[0]?.cnt ?? 0,
+    );
+    a.__h = h;
+    a.__txCount = txCount;
+    a.__lotCount = lotCount;
+    return { h, txCount, lotCount };
+  }
+
+  // Built ONCE (withConfirmation preview↔commit); reused by the manage_holdings
+  // op=delete dispatcher AND the delete_portfolio_holding alias.
+  const deleteHoldingHandler = withConfirmation<DeleteHoldingArgs>(userId, {
+      operation: "delete_portfolio_holding",
+      tokenPayload: (a) => ({ holdingId: a.__h ? Number(a.__h.id) : null }),
+      required: async (a) => {
+        const { txCount, lotCount } = await resolveDeleteHolding(a);
+        return txCount > 0 || lotCount > 0;
+      },
+      preview: async (a) => {
+        const { h, txCount, lotCount } = await resolveDeleteHolding(a);
+        return {
+          holdingId: Number(h.id),
+          name: String(h.name ?? ""),
+          symbol: h.symbol ? String(h.symbol) : null,
+          transactionCount: txCount,
+          lotCount,
+          note: "Transactions survive (unlinked); lots cascade-delete.",
+        };
+      },
+      commit: async (a) => {
+        const { h, txCount } = await resolveDeleteHolding(a);
+        // Capture decrypted name BEFORE the DELETE so the response renders
+        // truthful state.
+        const matchedName = String(h.name ?? "");
+        await db.execute(sql`DELETE FROM portfolio_holdings WHERE id = ${h.id} AND user_id = ${userId}`);
+        // Per CLAUDE.md "Every MCP tx-mutating write must call invalidateUser":
+        // FK ON DELETE SET NULL mutates linked transactions' portfolio_holding_id.
+        invalidateUserTxCache(userId);
+        return text({
+          success: true,
+          data: {
+            message: txCount > 0
+              ? `Holding "${matchedName}" deleted; ${txCount} transaction(s) unlinked (still queryable, no longer aggregated under this holding).`
+              : `Holding "${matchedName}" deleted.`,
+          },
+        });
+      },
+    });
+
+  // ── manage_holdings (consolidated) + hidden back-compat aliases ────────────
+  registerManageTool(
+    server,
+    "manage_holdings",
+    "Manage portfolio holdings (positions inside a brokerage account): `op` selects add / update / delete. add: create a position (name + account; optional symbol/currency/isCrypto). update: change name/symbol/currency/isCrypto/note (fuzzy `holding`; moving accounts is REFUSED — use portfolio_transfer). delete: TWO-STEP when the holding has transactions/lots (preview counts + token, then commit); a clean holding deletes directly. qty/cost come from transactions, NOT this tool.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("add"),
+        name: z.string().min(1).max(200).describe("Display name of the holding (e.g. 'Vanguard All-Equity ETF')"),
+        account: z.string().optional().describe("Brokerage account name or alias (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Pass this OR `account_id`. Uniqueness is scoped per (account, name)."),
+        account_id: z.number().int().positive().optional().describe("Brokerage-account FK fast-path — wins over the fuzzy `account` name."),
+        symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list."),
+        isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
+        note: z.string().max(500).optional(),
+      }),
+      z.object({
+        op: z.literal("update"),
+        holding: z.string().optional().describe("Current holding name OR symbol (fuzzy matched against decrypted name and symbol — a name/symbol matching 2 positions across accounts returns an ambiguous list). Pass this OR `holdingId`."),
+        holdingId: z.number().int().positive().optional().describe("Holding FK fast-path — wins over the fuzzy `holding` name."),
+        name: z.string().min(1).max(200).optional().describe("New name"),
+        symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
+        account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use portfolio_transfer (in-kind) to move shares between accounts."),
+        currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
+        isCrypto: z.boolean().optional(),
+        note: z.string().max(500).optional(),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        holding: z.string().optional().describe("Holding name OR symbol (fuzzy matched — a name/symbol matching 2 positions across accounts returns an ambiguous list). Pass this OR `holdingId`."),
+        holdingId: z.number().int().positive().optional().describe("Holding FK fast-path — wins over the fuzzy `holding` name."),
+        confirmation_token: z.string().optional().describe("Omit to preview; pass the preview's token to commit when the holding has transactions/lots. Single-use, 5-min TTL. Not needed for a clean/empty holding."),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "add":
+          return opHoldingAdd(input);
+        case "update":
+          return opHoldingUpdate(input);
+        case "delete":
+          return deleteHoldingHandler(input);
+      }
+    },
+  );
+
+  registerAlias(
+    server,
+    "add_portfolio_holding",
+    "Create a portfolio holding (a single position like 'VEQT.TO' inside a brokerage account). The import pipeline auto-creates these from CSV/ZIP uploads; this tool is for manually adding a position the user wants to track without an import.",
+    {
+      name: z.string().min(1).max(200).describe("Display name of the holding (e.g. 'Vanguard All-Equity ETF')"),
+      account: z.string().optional().describe("Brokerage account name or alias (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Pass this OR `account_id`. Uniqueness is scoped per (account, name)."),
+      account_id: z.number().int().positive().optional().describe("Brokerage-account FK fast-path — wins over the fuzzy `account` name."),
+      symbol: z.string().max(50).optional().describe("Ticker symbol (e.g. 'VEQT.TO', 'BTC')"),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency (default: parent account's currency). Issue #206: full SUPPORTED_CURRENCIES list."),
+      isCrypto: z.boolean().optional().describe("Flag this holding as crypto (default: false)"),
+      note: z.string().max(500).optional(),
+    },
+    async (args) => opHoldingAdd(args),
+  );
+  registerAlias(
+    server,
+    "update_portfolio_holding",
+    "Update a portfolio holding's name, symbol, currency, isCrypto, or note. Renames cascade to all transactions automatically because the portfolio aggregators (issue #86) group by FK holdingId, not by display name — two holdings sharing a name across accounts stay distinct rows in get_portfolio_analysis output. NOTE: the legacy `account` parameter is REFUSED (issue #99) — moving a holding to a different account would leave stale `holding_accounts` rows and orphaned account attribution on every historical transaction. To actually move shares between accounts, use record_transfer (in-kind); to re-attribute existing transactions, update them individually.",
+    {
+      holding: z.string().optional().describe("Current holding name OR symbol (fuzzy matched against decrypted name and symbol — a name/symbol matching 2 positions across accounts returns an ambiguous list). Pass this OR `holdingId`."),
+      holdingId: z.number().int().positive().optional().describe("Holding FK fast-path — wins over the fuzzy `holding` name."),
+      name: z.string().min(1).max(200).optional().describe("New name"),
+      symbol: z.string().max(50).optional().describe("New symbol (pass empty string to clear)"),
+      account: z.string().optional().describe("REFUSED (issue #99): account moves create stale state. Use record_transfer (in-kind) to move shares between accounts; update individual transactions to re-attribute history."),
+      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
+      isCrypto: z.boolean().optional(),
+      note: z.string().max(500).optional(),
+    },
+    async (args) => opHoldingUpdate(args),
+  );
+  registerAlias(
+    server,
+    "delete_portfolio_holding",
+    "Delete a portfolio holding. Transactions referencing it survive (the FK is set to NULL — they fall back to orphan aggregation), but its cost-basis LOTS cascade-delete. Two-step (destructive) when the holding has linked transactions OR lots: the first call returns a preview (name + tx/lot counts) + a confirmationToken (single-use, 5-min TTL) and deletes NOTHING; call again with the token to commit. A clean/empty holding deletes directly.",
+    {
+      holding: z.string().optional().describe("Holding name OR symbol (fuzzy matched — a name/symbol matching 2 positions across accounts returns an ambiguous list). Pass this OR `holdingId`."),
+      holdingId: z.number().int().positive().optional().describe("Holding FK fast-path — wins over the fuzzy `holding` name."),
+      confirmation_token: z.string().optional().describe("Omit to preview; pass the preview's token to commit when the holding has transactions/lots. Single-use, 5-min TTL. Not needed for a clean/empty holding."),
+    },
+    async (args) => deleteHoldingHandler(args),
   );
 
 
-  // ── get_portfolio_performance_v2 ───────────────────────────────────────────
-  // Phase 3 of plan/portfolio-lots-and-performance.md — TWRR + MWRR + daily
-  // value series from portfolio_snapshots. Distinct from get_portfolio_performance
-  // (which is the avg-cost legacy aggregate); v2 reads pre-built snapshots
-  // populated by the nightly cron + backfill script.
-  server.tool(
-    "get_portfolio_performance_v2",
-    "Compute a portfolio time-series return series. Returns daily market_value + cost_basis, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR. Distinct capability from get_portfolio_performance (which is per-holding average-cost realized P&L), NOT a newer version of it. Reads `portfolio_snapshots` populated by the nightly cron + admin backfill script. `gapsFilledDays` count flags any range where price_cache or fx_rates fell back to last-known values.",
-    {
-      period: z.enum(["1m", "3m", "6m", "ytd", "1y", "all"]).optional().describe("Lookback period; defaults to '1y'"),
-      accountId: z.number().int().optional().describe("Scope to one accounts.id; omit for whole-portfolio aggregate"),
-    },
-    async ({ period, accountId }) => {
+  // ── get_portfolio_returns (was get_portfolio_performance_v2) ────────────────
+  // FINLYNQ-265: renamed get_portfolio_performance_v2 → get_portfolio_returns
+  // (the tool computes TWRR/MWRR returns; the "_v2" suffix implied a newer
+  // version of get_portfolio_performance, which is a DISTINCT avg-cost tool).
+  // The old name stays a hidden back-compat alias (registered below) for one
+  // minor version. Phase 3 of plan/portfolio-lots-and-performance.md — TWRR +
+  // MWRR + daily value series from portfolio_snapshots populated by the nightly
+  // cron + backfill script.
+  const portfolioReturnsSchema = {
+    period: z.enum(["1m", "3m", "6m", "ytd", "1y", "all"]).optional().describe("Lookback period; defaults to '1y'"),
+    accountId: z.number().int().optional().describe("Scope to one accounts.id; omit for whole-portfolio aggregate"),
+  };
+  const portfolioReturnsHandler = async ({ period, accountId }: { period?: "1m" | "3m" | "6m" | "ytd" | "1y" | "all"; accountId?: number }) => {
       const PERIOD_DAYS: Record<string, number | null> = {
         "1m": 30, "3m": 90, "6m": 180, ytd: -1, "1y": 365, all: null,
       };
@@ -940,6 +1337,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           from,
           to: asOfDate,
           currency: (rowsRaw as Array<{ currency?: string }>)[0]?.currency ?? "USD",
+          // FINLYNQ-268: the TWRR/MWRR series is market-based (reads
+          // portfolio_snapshots.market_value). `asOf` = the latest snapshot
+          // date actually read (may lag today if the cron hasn't run).
+          basis: "market",
+          asOf: series.length > 0 ? series[series.length - 1].date : asOfDate,
           series,
           twrr: {
             period: twrr.periodReturn,
@@ -956,7 +1358,22 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
             : null,
         },
       });
-    },
+  };
+  server.tool(
+    "get_portfolio_returns",
+    "Compute a portfolio time-series return series. Returns daily market_value + cost_basis, period TWRR (Modified Dietz chained daily), annualized TWRR, and MWRR / XIRR. Distinct capability from get_portfolio_performance (which is per-holding average-cost realized P&L), NOT a newer version of it. Reads `portfolio_snapshots` populated by the nightly cron + admin backfill script. `gapsFilledDays` count flags any range where price_cache or fx_rates fell back to last-known values.",
+    portfolioReturnsSchema,
+    portfolioReturnsHandler,
+  );
+  // FINLYNQ-265: hidden back-compat alias for the pre-rename name. Callable but
+  // excluded from tools/list (via ALIAS_NAMES); forwards to the same handler +
+  // byte-identical response. Removed in a future minor version.
+  registerAlias(
+    server,
+    "get_portfolio_performance_v2",
+    "Deprecated alias of get_portfolio_returns (renamed FINLYNQ-265). Forwards verbatim to that tool's TWRR/MWRR time-series computation; prefer get_portfolio_returns in new calls.",
+    portfolioReturnsSchema,
+    portfolioReturnsHandler,
   );
 
 
@@ -988,7 +1405,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       // override param — the unified figures are always the display ccy.
       const displayCurrency = await resolveReportingCurrency(db, userId, null);
       const augmented = await augmentWithBaseCurrency(result, userId, displayCurrency);
-      return text({ success: true, data: augmented });
+      // FINLYNQ-268 (phase 4, flow axis): realized gains are a FLOW figure, not
+      // a point-in-time position valuation, so they carry the flow-axis basis
+      // `realized` (lot-level FIFO closures, historical-FX converted via
+      // augmentWithBaseCurrency). Labelling only — the math is byte-identical.
+      return text({ success: true, data: { ...augmented, basis: "realized" as const } });
     },
   );
 
@@ -1017,7 +1438,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         accountId,
         groupBy,
       });
-      return text({ success: true, data: result });
+      // FINLYNQ-268 (phase 4, flow axis): dividend income is a cash FLOW
+      // (SUM(transactions.amount) classified by the Dividends category), so it
+      // carries the flow-axis basis `cash_flow`. Labelling only — math intact.
+      return text({ success: true, data: { ...result, basis: "cash_flow" as const } });
     },
   );
 
@@ -1100,6 +1524,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           note: "Account scope did not resolve — no holdings returned. See `warnings` for details.",
           totalHoldings: 0,
           reportingCurrency: reporting,
+          // FINLYNQ-268: this tool's money summary is lifetime cost basis (Σ
+          // every buy) + realized/dividend flows — NOT market value (see the
+          // note; per-holding market value is not surfaced here).
+          basis: "lifetime_cost",
           warnings: accountWarnings,
           summary: {
             lifetimeCostBasisReporting: tagAmount(0, reporting, "reporting"),
@@ -1398,6 +1826,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         note: "Per-holding marketValue and unrealizedGain require live prices and are not surfaced here — use the portfolio page for full per-holding metrics. (Account-LEVEL market value IS available via get_account_balances / get_net_worth on OAuth/built-in-chat connections.) Results are per-holdingId — two holdings sharing a name across accounts return as separate rows. Per-row amounts stay in each holding's native currency; summary aggregates are converted to `reportingCurrency`. Cash-sleeve holdings (name='Cash', symbol=NULL) appear in `holdings[]` with `status: 'cash_only'` and `totalReturnPct: null`.",
         totalHoldings: results.length,
         reportingCurrency: reporting,
+        // FINLYNQ-268: the money summary is lifetime cost basis (Σ every buy) +
+        // realized/dividend flows — per-holding market value is intentionally
+        // NOT surfaced here (see `note`); label the basis truthfully.
+        basis: "lifetime_cost",
         warnings,
         rowWarnings,
         // Issue #209 — only `*Reporting` siblings remain. These are the
@@ -1419,7 +1851,7 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   // ── get_portfolio_performance ──────────────────────────────────────────────
   server.tool(
     "get_portfolio_performance",
-    "Portfolio performance with avg-cost method: realized P&L, dividends, total return, days held per holding. Returns one row per `holdingId` (two holdings sharing a display name come through as separate rows). Per-row amounts stay in each holding's own (account) currency; the response includes the resolved reportingCurrency for context.",
+    "Per-holding average-cost performance aggregates: realized P&L, dividends, total return, and days held. Returns one row per `holdingId` (two holdings sharing a display name come through as separate rows). For a TWRR/MWRR time-series over a period, use get_portfolio_returns instead. Per-row amounts stay in each holding's own (account) currency; the response includes the resolved reportingCurrency for context.",
     {
       period: z.enum(["1m", "3m", "6m", "1y", "all"]).optional().describe("Lookback period (default: all)"),
       reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Returned in the response as context for cross-currency holdings."),
@@ -1625,6 +2057,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         period: period ?? "all",
         since,
         reportingCurrency: reporting,
+        // FINLYNQ-268 (decision 3): per-holding avg-cost of ACTIVE positions —
+        // labelled active_cost. Lifetime totals belong only to insights'
+        // labelled `totalInvested`, not here.
+        basis: "active_cost",
         warnings: summaryWarnings,
         rowWarnings: perfRowWarnings,
         // Issue #209 — only `*Reporting` siblings remain. Cash-sleeve
@@ -1945,6 +2381,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         holding: holdingName,
         currency: holdingCurrency,
         reportingCurrency: reporting,
+        // FINLYNQ-268: the primary position figure is `currentCostBasis`
+        // (remaining qty × avg cost = ACTIVE cost basis); `lifetimeCostBasis`
+        // is surfaced separately. Per-holding market value is not computed
+        // here (see `note`), so the basis is active_cost, not market.
+        basis: "active_cost",
         // Position — Issue #208 round at the response boundary.
         currentShares: Math.round(remainingQty * 10000) / 10000,
         avgCostPerShare: avgCost ? roundMoney(avgCost, holdingCurrency) : null,
@@ -2159,11 +2600,11 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
   // ── get_investment_insights ────────────────────────────────────────────────
   server.tool(
     "get_investment_insights",
-    "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, largest positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`; each target's `holding` string is matched against a holding's NAME or SYMBOL (case-insensitive substring, same as get_portfolio_analysis), and positions sharing a symbol across accounts are aggregated into one current position. Targets matching no holding are listed in the response `warnings` array (rather than silently returning currentPct 0). `mode: 'benchmark'` compares book-value growth vs a reference index. All monetary aggregates are converted to reportingCurrency (defaults to user's display currency) so cross-currency portfolios aggregate sensibly.",
+    "Portfolio-level investment analytics. `mode: 'patterns'` (default) returns contribution frequency, largest positions, diversification score. `mode: 'rebalancing'` suggests BUY/SELL amounts vs `targets`; each target's `holding` string is matched against a holding's NAME or SYMBOL (case-insensitive substring, same as get_portfolio_analysis), and positions sharing a symbol across accounts are aggregated into one current position. Targets matching no holding — OR ambiguously matching 2+ holdings — are listed in the response `warnings` array (rather than silently returning currentPct 0 or picking one). `mode: 'benchmark'` compares book-value growth vs a reference index. All monetary aggregates are converted to reportingCurrency (defaults to user's display currency) so cross-currency portfolios aggregate sensibly.",
     {
       mode: z.enum(["patterns", "rebalancing", "benchmark"]).optional().describe("Analytics mode (default: patterns)"),
       targets: z.array(z.object({
-        holding: z.string().describe("Holding name or symbol (case-insensitive substring match against the position's name + symbol; ticker symbols like VTI or VUN.TO work). Unmatched entries surface in the response `warnings` array."),
+        holding: z.string().describe("Holding name or symbol (matched against the position's name + symbol via the shared resolver — exact/startsWith/token-substring; ticker symbols like VTI or VUN.TO work). Unmatched OR 2+-match (ambiguous) entries surface in the response `warnings` array."),
         target_pct: z.number().describe("Target allocation percentage (0-100)"),
       })).optional().describe("Required when mode='rebalancing'. Target allocations (should sum to ~100)."),
       benchmark: z.enum(["SP500", "TSX", "MSCI_WORLD", "BONDS_CA"]).optional().describe("Benchmark for mode='benchmark' (default SP500)"),
@@ -2213,12 +2654,15 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // fall back to active cost basis otherwise. FINLYNQ-151 DEK-gating: a
         // pf_ API key (no DEK) can't decrypt symbols to price them, so market
         // pricing needs the DEK — the fallback keeps it usable regardless.
-        const holdingValues = await getHoldingsValueByHolding(userId, dek);
-        // Detect whether ANY position carries a non-zero market value. When
-        // nothing priced (no DEK / all unpriced), fall back to the active cost
-        // basis so the rebalancer still produces meaningful percentages.
-        const anyMarketValue = holdingValues.some((h) => Number(h.value) !== 0);
-        const basis: "market" | "active-cost" = anyMarketValue ? "market" : "active-cost";
+        // FINLYNQ-268 phase 3: rebase onto the SHARED valuation layer.
+        // `valuePortfolio({ basis: 'market' })` returns per-holding rows on
+        // market value, or DOWNGRADES to active_cost (+ a warning) when nothing
+        // priced / no DEK — so the inline "anyMarketValue → market|active-cost"
+        // point-fix is gone. `weightBasis` is the tc-2 guard: it returns
+        // market-else-active_cost and can NEVER be lifetime_cost.
+        const valuation = await valuePortfolio(userId, dek, { basis: "market" });
+        const basis = weightBasis(valuation); // 'market' | 'active_cost'
+        const holdingValues = valuation.byHolding;
         // Issue #86: two holdings sharing a display name (TFSA + RRSP) come
         // through as separate rows. Sum across same-name rows when building the
         // rebalancing allocation map (rebalancing targets are user-supplied by
@@ -2228,7 +2672,9 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // produces nonsense percentages.
         const holdings: Array<{ name: string; symbol: string | null; book_value: number; book_value_native: number; currency: string }> = [];
         for (const h of holdingValues) {
-          const nativeValue = basis === "market" ? Number(h.value) : Number(h.costBasis);
+          // The layer already selected the right per-holding value (market or
+          // active cost) for the resolved basis — no per-row market/cost pick.
+          const nativeValue = Number(h.value);
           const ccy = String(h.currency || reporting).toUpperCase();
           const fx = await fxFor(ccy);
           holdings.push({
@@ -2281,26 +2727,40 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
         // "BUY $X / BUY $Y" advice with no signal that the other 58 holdings
         // exist and remain at their current weight.
         const matchedAllocKeys = new Set<string>();
-        // FINLYNQ-252: surface targets that match NO holding. A zero-match
-        // target was previously indistinguishable from a genuinely-new
-        // position (currentPct 0 => confident full-amount BUY). Mirrors the
-        // `warnings` array get_portfolio_analysis returns for unmatched filters.
+        // FINLYNQ-267 (rebases FINLYNQ-252): resolve each target against the
+        // symbol-aggregated buckets via the SHARED `resolveEntity` (entity
+        // "holding" → name-OR-symbol match, ambiguous-aware) + `collectWarnings`
+        // — replacing the inline substring `find` + `warnings.push` point-fix.
+        // A zero-match target still surfaces in `warnings` (byte-compatible
+        // wording), a target matching 2+ buckets now surfaces `ambiguous`
+        // per-entry (the case 252 couldn't express), and the resolver's
+        // length-≥3 token gate (#123) applies. `untargetedHoldings` (issue #209)
+        // is UNCHANGED — it's driven by `matchedAllocKeys` below.
+        //
+        // Build an options list from the buckets: the map key is the stable
+        // synthetic id (a string, but `resolveEntity` compares ids loosely via
+        // Number()). We track the key on each option so a resolved id maps back.
+        const bucketList = [...currentAlloc.entries()];
+        // resolveEntity works on numeric ids; index the buckets so each has one.
+        const bucketOptions: Row[] = bucketList.map(([, v], i) => ({
+          id: i,
+          name: v.name,
+          symbol: v.symbol,
+        }));
         const warnings: string[] = [];
         const suggestions = targets.map(t => {
-          const lo = t.holding.trim().toLowerCase();
-          // Match a target against a `name + symbol` haystack per bucket, the
-          // same name-OR-symbol semantic as get_portfolio_analysis: a
-          // case-insensitive substring of the combined name + symbol (so "VTI"
-          // matches symbol "VTI", "VUN.TO" matches symbol "VUN.TO", and "Gold"
-          // matches name "Gold"). The aggregation already keyed on symbol, so
-          // a ticker held across accounts is a single bucket here.
-          const matched = lo.length === 0 ? undefined : [...currentAlloc.entries()].find(([, v]) => {
-            const haystack = `${String(v.name ?? "").toLowerCase()} ${String(v.symbol ?? "").toLowerCase()}`;
-            return haystack.includes(lo);
-          });
-          if (matched) matchedAllocKeys.add(matched[0]);
-          else warnings.push(`Target '${t.holding}' matched no holding; treated as a new position (currentPct 0).`);
-          const current = matched?.[1];
+          const env = resolveEntity({ entity: "holding", name: t.holding, options: bucketOptions });
+          let current: { name: string; symbol: string | null; value: number; pct: number; currency: string; valueNative: number } | undefined;
+          if (env.status === "resolved") {
+            const [key, bucket] = bucketList[env.id];
+            matchedAllocKeys.add(key);
+            current = bucket;
+          } else if (env.status === "ambiguous") {
+            const list = env.candidates.map(c => (c.symbol ? `"${c.name}" (${c.symbol})` : `"${c.name}"`)).join(", ");
+            warnings.push(`Target '${t.holding}' is ambiguous — matches ${env.candidates.length} holdings: ${list}. Refine the target to a single holding.`);
+          } else {
+            warnings.push(`Target '${t.holding}' matched no holding; treated as a new position (currentPct 0).`);
+          }
           const currentPct = current?.pct ?? 0;
           const currentValue = current?.value ?? 0;
           const targetValue = (t.target_pct / 100) * totalBV;
@@ -2338,10 +2798,17 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "rebalancing",
           reportingCurrency: reporting,
-          // FINLYNQ-251: 'market' when live prices were available, else
-          // 'active-cost' (remaining cost basis of active positions). NEVER
-          // lifetime book cost — cash sleeves are valued at current quantity.
+          // FINLYNQ-268 phase 3: uniform `basis` ('market' | 'active_cost')
+          // from the shared `weightBasis` guard — NEVER lifetime_cost (cash
+          // sleeves are valued at current quantity). `valuationBasis` is kept as
+          // a deprecated alias through v4.1 (dual-emit, decision 2); FINLYNQ-251
+          // normalized 'active-cost' → 'active_cost'.
+          basis,
+          // FINLYNQ-268 tc-1 criterion (c): asOf present IFF basis === 'market'.
+          // The layer already computed it (valuation.asOf); forward it here.
+          ...(basis === "market" ? { asOf: valuation.asOf } : {}),
           valuationBasis: basis,
+          ...(valuation.warnings?.length ? { valuationWarnings: valuation.warnings } : {}),
           // Issue #209 — `totalPortfolioValue` is the whole-portfolio value
           // sum across ALL active holdings, never a top-N slice.
           totalPortfolioValue: Math.round(totalBV * 100) / 100,
@@ -2414,6 +2881,9 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           disclaimer: PORTFOLIO_DISCLAIMER,
           mode: "benchmark",
           reportingCurrency: reporting,
+          // FINLYNQ-268: the benchmark compares INVESTED dollars (lifetime book
+          // cost), not market value — labelled lifetime_cost.
+          basis: "lifetime_cost",
           note: "Comparison uses book cost (not market value) and historical average returns. This is illustrative only.",
           yourPortfolio: {
             totalInvested: Math.round(totalInvested * 100) / 100,
@@ -2529,23 +2999,23 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
       // investor should read "concentrated in cash" off flow-through). Cash is
       // held wealth but not an investment position, so it's dropped from the
       // diversification-of-investments weighting.
-      const cashSleeveIdRows = await q(db, sql`
-        SELECT id FROM portfolio_holdings
-        WHERE user_id = ${userId} AND is_cash = TRUE
-      `);
-      const cashSleeveIds = new Set(cashSleeveIdRows.map((r) => Number(r.id)));
-      const holdingValues = await getHoldingsValueByHolding(userId, dek);
-      // Prefer market value; fall back to active cost basis when nothing priced
-      // (no DEK / all unpriced) so the score stays meaningful either way.
-      const anyMarketValue = holdingValues.some((h) => !cashSleeveIds.has(Number(h.holdingId)) && Number(h.value) !== 0);
-      const activeBasis: "market" | "active-cost" = anyMarketValue ? "market" : "active-cost";
+      // FINLYNQ-268 phase 3: rebase onto the SHARED valuation layer. The
+      // cash-sleeve exclusion now rides the layer's per-holding `isCash` flag
+      // (single source — was an inline `SELECT id ... WHERE is_cash=TRUE`), and
+      // `weightBasis` is the tc-2 guard (market-else-active_cost, NEVER
+      // lifetime_cost). `valuePortfolio` already downgrades market → active_cost
+      // (+ a warning) when nothing priced / no DEK, so the inline
+      // "anyMarketValue → market|active-cost" pick is gone.
+      const diversificationValuation = await valuePortfolio(userId, dek, { basis: "market" });
+      const activeBasis = weightBasis(diversificationValuation); // 'market' | 'active_cost'
+      const holdingValues = diversificationValuation.byHolding;
       // Sum active value across same-name rows (VUN.TO across TFSA + RRSP is one
       // line), FX-converting each holding's ACCOUNT currency to the reporting
-      // currency first. Cash sleeves are excluded from this set.
+      // currency first. Cash sleeves are excluded from this set (via isCash).
       const activeByName = new Map<string, { name: string; value: number; value_native: number; currency: string }>();
       for (const h of holdingValues) {
-        if (cashSleeveIds.has(Number(h.holdingId))) continue;
-        const nativeValue = activeBasis === "market" ? Number(h.value) : Number(h.costBasis);
+        if (h.isCash) continue;
+        const nativeValue = Number(h.value); // layer already picked market/active
         if (!(nativeValue > 0)) continue; // sold-out / zero-value positions don't weigh
         const ccy = String(h.currency || reporting).toUpperCase();
         const fx = await fxFor(ccy);
@@ -2589,6 +3059,10 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           totalPositions: positions.length,
           totalInvested: Math.round(totalInvested * 100) / 100,
           totalInvestedReporting: tagAmount(totalInvested, reporting, "reporting"),
+          // FINLYNQ-268: `totalInvested` is deliberately LIFETIME book cost
+          // (Σ every buy ever) — a "how much did I put in" figure — distinct
+          // from the market/active_cost weighting basis below.
+          totalInvestedBasis: "lifetime_cost",
           avgMonthlyContribution: Math.round(avgMonthlyContrib * 100) / 100,
           avgMonthlyContributionReporting: tagAmount(avgMonthlyContrib, reporting, "reporting"),
           // Issue #209 — explicit population window so callers can reconcile
@@ -2605,10 +3079,16 @@ export function registerPortfolioTools(server: McpServer, ctx: PgToolContext) {
           // ACTIVE, cash-excluded positions (see topPositions). `totalInvested`
           // above stays LIFETIME contributions.
           concentration: `Top 3 active positions = ${Math.round(top3Pct * 1000) / 10}% of active holdings`,
-          // 'market' when live prices were available for the active set, else
-          // 'active-cost' (remaining cost basis of active positions). NEVER
-          // lifetime book cost, and cash sleeves are excluded.
+          // FINLYNQ-268 phase 3: uniform `basis` ('market' | 'active_cost')
+          // from the shared `weightBasis` guard — NEVER lifetime book cost, cash
+          // sleeves excluded (via the layer's isCash flag).
+          // `diversificationValuationBasis` kept as a deprecated alias through
+          // v4.1 (dual-emit, decision 2; 'active-cost' → 'active_cost').
+          basis: activeBasis,
+          // FINLYNQ-268 tc-1 criterion (c): asOf present IFF basis === 'market'.
+          ...(activeBasis === "market" ? { asOf: diversificationValuation.asOf } : {}),
           diversificationValuationBasis: activeBasis,
+          ...(diversificationValuation.warnings?.length ? { valuationWarnings: diversificationValuation.warnings } : {}),
         },
         // FINLYNQ-253: topPositions are the top-5 ACTIVE positions (cash
         // sleeves excluded), valued at market (or active cost basis when no

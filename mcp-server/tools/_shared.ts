@@ -218,7 +218,7 @@ export type ResolveResult =
   | { ok: true; row: Row; tier: ResolveTier }
   | { ok: false; reason: "missing" }
   | { ok: false; reason: "low_confidence"; suggestion: Row }
-  | { ok: false; reason: "ambiguous"; tier: "startsWith" | "substring"; candidates: Row[] };
+  | { ok: false; reason: "ambiguous"; tier: ResolveTier; candidates: Row[] };
 
 interface ResolveOpts {
   /** Exact-match fields, in priority order. e.g. [{field:"name",tier:"exact"}, {field:"alias",tier:"alias"}]. */
@@ -242,9 +242,19 @@ export function resolveStrict(input: string, options: Row[], opts: ResolveOpts):
   if (!input || !options.length) return { ok: false, reason: "missing" };
   const lo = input.toLowerCase().trim();
   // 1. Exact tiers, in order.
+  // With `ambiguous:true` an exact match on ≥2 rows FAILS LOUD (holdings can
+  // share an exact display name across accounts — FINLYNQ-267). Accounts/
+  // categories have UNIQUE names so this stays a byte-identical first-hit for
+  // them. With `ambiguous:false` (legacy) it keeps the first-hit `.find`.
   for (const { field, tier } of opts.exactFields) {
-    const hit = options.find(o => String(o[field] ?? "").toLowerCase() === lo);
-    if (hit) return { ok: true, row: hit, tier };
+    if (opts.ambiguous) {
+      const hits = options.filter(o => String(o[field] ?? "").toLowerCase() === lo);
+      if (hits.length === 1) return { ok: true, row: hits[0], tier };
+      if (hits.length >= 2) return { ok: false, reason: "ambiguous", tier, candidates: hits.slice(0, 5) };
+    } else {
+      const hit = options.find(o => String(o[field] ?? "").toLowerCase() === lo);
+      if (hit) return { ok: true, row: hit, tier };
+    }
   }
   // 2. startsWith tiers.
   if (opts.ambiguous) {
@@ -312,7 +322,7 @@ export type AccountResolveResult =
   | { ok: true; account: Row; tier: AccountResolveTier }
   | { ok: false; reason: "missing" }
   | { ok: false; reason: "low_confidence"; suggestion: Row }
-  | { ok: false; reason: "ambiguous"; tier: "startsWith" | "substring"; candidates: Row[] };
+  | { ok: false; reason: "ambiguous"; tier: ResolveTier; candidates: Row[] };
 export function resolveAccountStrict(input: string, options: Row[]): AccountResolveResult {
   const r = resolveStrict(input, options, {
     exactFields: [{ field: "name", tier: "exact" }, { field: "alias", tier: "alias" }],
@@ -330,7 +340,7 @@ export type CategoryResolveResult =
   | { ok: true; category: Row; tier: CategoryResolveTier }
   | { ok: false; reason: "missing" }
   | { ok: false; reason: "low_confidence"; suggestion: Row }
-  | { ok: false; reason: "ambiguous"; tier: "startsWith" | "substring"; candidates: Row[] };
+  | { ok: false; reason: "ambiguous"; tier: ResolveTier; candidates: Row[] };
 export function resolveCategoryStrict(input: string, options: Row[]): CategoryResolveResult {
   const r = resolveStrict(input, options, {
     exactFields: [{ field: "name", tier: "exact" }],
@@ -360,6 +370,197 @@ export function resolvePortfolioHoldingStrict(input: string, options: Row[]): Ho
   // The generic can return "ambiguous" only when ambiguous:true; holdings pass
   // false, so the only failure shapes here are missing / low_confidence.
   return r as HoldingResolveResult;
+}
+
+// ─── shared name-resolution envelope (FINLYNQ-267) ──────────────────────────────
+//
+// ONE resolution path for every name-accepting MCP write tool: `resolveEntity`
+// folds `id fast-path → strict match → envelope` and returns exactly one of
+// three outcomes — never a silent zero:
+//   • resolved   → an owned id to proceed with;
+//   • ambiguous  → 2+ matches; the caller MUST disambiguate (never picks first);
+//   • not_found  → zero matches; surfaced explicitly (never indistinguishable
+//                  from an empty/"no link" result).
+//
+// The util is DEK-free and pure: the caller runs `decryptNameish` FIRST and
+// passes already-decrypted `options` (invariant "decryptNameish before
+// fuzzyFind"; issue #230). It builds ON `resolveStrict` (the length-≥3 token
+// gate is the #123 low-confidence guard — reused verbatim, no new threshold).
+
+export interface EntityCandidate {
+  id: number;
+  name: string | null; // decrypted (safeName-defended; a decrypted name can be null)
+  symbol?: string | null;
+  alias?: string | null;
+  account?: string | null; // for holdings spanning accounts
+}
+
+export type ResolveEnvelope =
+  | { status: "resolved"; id: number; via: "id" | ResolveTier }
+  | { status: "ambiguous"; candidates: EntityCandidate[] } // 2+ matches — caller MUST disambiguate
+  | { status: "not_found"; warning: string; suggestion?: EntityCandidate }; // zero match — never silent
+
+export type ResolveEntityType =
+  | "account"
+  | "category"
+  | "holding"
+  | "goal"
+  | "loan"
+  | "subscription";
+
+export interface ResolveEntityArgs {
+  entity: ResolveEntityType;
+  /** FK fast-path — WINS over `name` when a positive int (id is not even
+   *  consulted against `name`; when both are passed, `name` is ignored). */
+  id?: number | null;
+  /** Human-readable name/alias/symbol to fuzzy-match when `id` is absent. */
+  name?: string | null;
+  /** Already-decrypted candidate rows. Caller runs `decryptNameish` first. */
+  options: Row[];
+  /** Per-entity strict config; defaults from DEFAULT_STRICT keyed on `entity`. */
+  strict?: ResolveOpts;
+}
+
+/**
+ * Per-entity `resolveStrict` config registry. Accounts/categories/goals/loans/
+ * subscriptions all match on `name` (+ alias for accounts) with `ambiguous:true`
+ * (fail loud on ties). Holdings match on name OR symbol and — the FINLYNQ-267
+ * flip — now ALSO pass `ambiguous:true` so a name/symbol matching 2 positions
+ * across accounts returns `ambiguous` instead of silently taking the first
+ * (closing the legacy `ambiguous:false` first-hit-wins gap, row #27).
+ */
+export const DEFAULT_STRICT: Record<ResolveEntityType, ResolveOpts> = {
+  account: {
+    exactFields: [{ field: "name", tier: "exact" }, { field: "alias", tier: "alias" }],
+    startsFields: [{ field: "name", tier: "startsWith" }],
+    substringField: "name",
+    substringTier: "substring",
+    ambiguous: true,
+  },
+  category: {
+    exactFields: [{ field: "name", tier: "exact" }],
+    startsFields: [{ field: "name", tier: "startsWith" }],
+    substringField: "name",
+    substringTier: "substring",
+    ambiguous: true,
+  },
+  holding: {
+    exactFields: [{ field: "name", tier: "exact-name" }, { field: "symbol", tier: "exact-symbol" }],
+    startsFields: [{ field: "name", tier: "startsWith-name" }, { field: "symbol", tier: "startsWith-symbol" }],
+    substringField: "name",
+    substringTier: "substring",
+    ambiguous: true, // FINLYNQ-267 flip (was false — silent first-hit)
+  },
+  goal: {
+    exactFields: [{ field: "name", tier: "exact" }],
+    startsFields: [{ field: "name", tier: "startsWith" }],
+    substringField: "name",
+    substringTier: "substring",
+    ambiguous: true,
+  },
+  loan: {
+    exactFields: [{ field: "name", tier: "exact" }],
+    startsFields: [{ field: "name", tier: "startsWith" }],
+    substringField: "name",
+    substringTier: "substring",
+    ambiguous: true,
+  },
+  subscription: {
+    exactFields: [{ field: "name", tier: "exact" }],
+    startsFields: [{ field: "name", tier: "startsWith" }],
+    substringField: "name",
+    substringTier: "substring",
+    ambiguous: true,
+  },
+};
+
+/** Coerce a resolve candidate/suggestion Row into an EntityCandidate (null-safe). */
+function toCandidate(o: Row): EntityCandidate {
+  return {
+    id: Number(o.id),
+    name: (o.name ?? null) as string | null,
+    symbol: (o.symbol ?? null) as string | null,
+    alias: (o.alias ?? null) as string | null,
+    account: (o.account ?? null) as string | null,
+  };
+}
+
+export function resolveEntity(args: ResolveEntityArgs): ResolveEnvelope {
+  const { entity, id, name, options } = args;
+  const strict = args.strict ?? DEFAULT_STRICT[entity];
+
+  // 1. id fast-path — WINS over name; name is not even consulted.
+  if (id != null && Number.isInteger(id) && id > 0) {
+    const owned = options.find((o) => Number(o.id) === id);
+    if (owned) return { status: "resolved", id, via: "id" };
+    return { status: "not_found", warning: `${entity} id ${id} not found or not owned by you` };
+  }
+
+  // 2. empty name (and no usable id).
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) {
+    return { status: "not_found", warning: `no ${entity} name or id provided` };
+  }
+
+  // 3. strict match (exact → startsWith → token-gated substring → low_confidence).
+  const r = resolveStrict(trimmed, options, strict);
+  if (r.ok) return { status: "resolved", id: Number(r.row.id), via: r.tier };
+  if (r.reason === "ambiguous") {
+    return { status: "ambiguous", candidates: r.candidates.map(toCandidate) };
+  }
+  if (r.reason === "low_confidence") {
+    // Low-confidence is REJECTED (#123) — a not-found with a "did you mean" hint,
+    // never an auto-resolve.
+    return {
+      status: "not_found",
+      warning: `'${trimmed}' had no confident ${entity} match`,
+      suggestion: toCandidate(r.suggestion),
+    };
+  }
+  return { status: "not_found", warning: `'${trimmed}' matched no ${entity}` };
+}
+
+/**
+ * Envelope → "resolve, and if it didn't cleanly resolve, RETURN an MCP error
+ * now" so each callsite is 3 lines. Returns `{id}` on success or `{report}`
+ * holding a ready-to-return `err(...)` tool response on ambiguous/not_found.
+ */
+export function resolveOrReport(
+  label: string,
+  env: ResolveEnvelope,
+): { id: number } | { report: ReturnType<typeof err> } {
+  if (env.status === "resolved") return { id: env.id };
+  if (env.status === "ambiguous") {
+    const list = env.candidates
+      .map((c) => (c.symbol ? `"${c.name}" (${c.symbol}, id=${c.id})` : `"${c.name}" (id=${c.id})`))
+      .join(", ");
+    return {
+      report: err(
+        `${label} is ambiguous — ${env.candidates.length} matches: ${list}. Pass ${label}_id to disambiguate.`,
+      ),
+    };
+  }
+  const hint = env.suggestion ? ` Did you mean "${env.suggestion.name}" (id=${env.suggestion.id})?` : "";
+  return { report: err(`${env.warning}.${hint}`) };
+}
+
+/**
+ * Multi-name aggregation helper (rebalancer `targets[]`,
+ * `get_portfolio_analysis` `symbols[]`): collect each `not_found` into a
+ * response-level `warnings: string[]` (byte-identical to FINLYNQ-252 / #86)
+ * WITHOUT short-circuiting. Ambiguous cases surface per-entry via the caller.
+ */
+export function collectWarnings(
+  entries: Array<{ label: string; env: ResolveEnvelope }>,
+): string[] {
+  const warnings: string[] = [];
+  for (const { label, env } of entries) {
+    if (env.status === "not_found") {
+      const hint = env.suggestion ? ` Did you mean "${env.suggestion.name}" (id=${env.suggestion.id})?` : "";
+      warnings.push(`${env.warning} for '${label}'.${hint}`);
+    }
+  }
+  return warnings;
 }
 
 export function decryptNameish(rows: Row[], dek: Buffer | null): Row[] {

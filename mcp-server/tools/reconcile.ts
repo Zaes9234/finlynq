@@ -31,9 +31,9 @@ import {
   invalidateUser as invalidateUserTxCache,
 } from "../../src/lib/mcp/user-tx-cache";
 import {
-  signConfirmationToken,
-  verifyConfirmationToken,
-} from "../../src/lib/mcp/confirmation-token";
+  signPreviewToken,
+  verifyPreviewToken,
+} from "./_confirm";
 import {
 } from "../../src/lib/bank-ledger";
 import {
@@ -1070,7 +1070,7 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
         const preview = await applyRulesToBankRows(userId, canonicalIds, dek, {
           autoMaterialize: false,
         });
-        const token = signConfirmationToken(
+        const token = signPreviewToken(
           userId,
           "apply_rules_to_bank_rows",
           tokenPayload,
@@ -1087,7 +1087,7 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
       }
 
       // ── Execute branch ─────────────────────────────────────────────────────
-      const check = verifyConfirmationToken(
+      const check = verifyPreviewToken(
         confirmation_token,
         userId,
         "apply_rules_to_bank_rows",

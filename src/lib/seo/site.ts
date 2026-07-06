@@ -30,6 +30,7 @@ export function metaDescription(text: string, max = 157): string {
  * comparison page. It flows into the sitemap, the `/vs` index, and llms.txt.
  */
 export const VS_SLUGS = [
+  "mint",
   "monarch",
   "ynab",
   "era",
@@ -43,6 +44,11 @@ export type VsSlug = (typeof VS_SLUGS)[number];
 
 /** One-line positioning per comparison, rendered on the `/vs` index. */
 export const VS_META: Record<VsSlug, { name: string; blurb: string }> = {
+  mint: {
+    name: "Mint",
+    blurb:
+      "An open-source, ad-free, self-hostable Mint alternative after Intuit's 2024 shutdown, with per-user encryption and MCP.",
+  },
   monarch: {
     name: "Monarch Money",
     blurb:

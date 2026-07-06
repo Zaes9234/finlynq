@@ -172,29 +172,57 @@ const IDEMPOTENT_WRITE_PREFIXES = ["set_", "update_", "replace_"];
  * source file. Returns an array of `{ name, description }`. Description
  * unescapes \\n, \\", and \\\\ so the rendered text reads cleanly in HTML.
  */
+function unescapeDesc(desc) {
+  return desc
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "\t")
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\\`/g, "`")
+    .replace(/\\\\/g, "\\");
+}
+
 function extractTools(source) {
   // Match name + description as the first two string-literal arguments.
   // Description can be ", ', or `; inner content allows any escape but not
   // the same outer quote. We're conservative about template-literal interpolations
   // — none of our registrations use ${...}, so a flat regex is fine.
+  const out = [];
+
+  // 1:1 tools — server.tool("name", "description", ...).
   const re =
     /server\.tool\(\s*['"]([a-zA-Z_0-9]+)['"]\s*,\s*(["'`])((?:\\.|(?!\2).)*)\2/g;
-  const out = [];
   let m;
   while ((m = re.exec(source))) {
-    const name = m[1];
-    let desc = m[3];
-    // Unescape the standard JS string escapes used in our source.
-    desc = desc
-      .replace(/\\n/g, "\n")
-      .replace(/\\t/g, "\t")
-      .replace(/\\"/g, '"')
-      .replace(/\\'/g, "'")
-      .replace(/\\`/g, "`")
-      .replace(/\\\\/g, "\\");
-    out.push({ name, description: desc });
+    out.push({ name: m[1], description: unescapeDesc(m[3]) });
   }
-  return out;
+
+  // FINLYNQ-263 — consolidated `manage_*` / `portfolio_record_entry` tools
+  // register via `registerManageTool(server, "name", "description", union, cb)`.
+  // Name is the 2nd string arg, description the 3rd. These ARE part of the
+  // advertised surface (counted in TOOL_COUNT_HTTP / MCP_TOOL_COUNTS.http).
+  const reManage =
+    /registerManageTool\(\s*[a-zA-Z_$][\w$]*\s*,\s*['"]([a-zA-Z_0-9]+)['"]\s*,\s*(["'`])((?:\\.|(?!\2).)*)\2/g;
+  while ((m = reManage.exec(source))) {
+    out.push({ name: m[1], description: unescapeDesc(m[3]) });
+  }
+
+  // FINLYNQ-263 — hidden back-compat aliases register via
+  // `registerAlias(server, "old_name", "description", shape, cb)`. They are
+  // CALLABLE but HIDDEN from tools/list, so they must NOT be counted in the
+  // advertised surface. Collect their names so the caller can exclude any
+  // server.tool()/registerManageTool() entry that is actually an alias.
+  const aliasNames = new Set();
+  const reAlias =
+    /registerAlias\(\s*[a-zA-Z_$][\w$]*\s*,\s*['"]([a-zA-Z_0-9]+)['"]/g;
+  while ((m = reAlias.exec(source))) {
+    aliasNames.add(m[1]);
+  }
+  // Aliases forward through registerAlias → server.tool internally at RUNTIME,
+  // but in SOURCE they appear only as `registerAlias(...)` calls, so `re` above
+  // never matched them. Nothing to strip here today; the set is returned for a
+  // future-proof guard in case an alias is ever also hand-registered.
+  return out.filter((t) => !aliasNames.has(t.name));
 }
 
 /**

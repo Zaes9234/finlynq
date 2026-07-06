@@ -11,9 +11,10 @@ import {
   text,
   err,
   suggestionList,
-  fuzzyFind,
   resolveAccountStrict,
   resolveCategoryStrict,
+  resolveEntity,
+  resolveOrReport,
   decryptNameish,
   autoCategory,
   resolvePortfolioHoldingByName,
@@ -77,9 +78,12 @@ import {
   InvestmentHoldingRequiredError,
 } from "../../src/lib/investment-account";
 import {
-  signConfirmationToken,
-  verifyConfirmationToken,
-} from "../../src/lib/mcp/confirmation-token";
+  signPreviewToken,
+  verifyPreviewToken,
+  withConfirmation,
+  PreviewAbortError,
+  checkExpectedEcho,
+} from "./_confirm";
 import {
   randomUUID,
 } from "crypto";
@@ -94,61 +98,130 @@ import {
 import {
   type TxRowForLots,
 } from "../../src/lib/portfolio/lots/types";
+import { registerManageTool, registerAlias } from "./_consolidate";
 
 export function registerTransactionsTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek } = ctx;
 
+  type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
-  // ── set_budget ─────────────────────────────────────────────────────────────
-  server.tool(
+  // ── manage_budgets op handlers (lifted VERBATIM) ───────────────────────────
+  async function opBudgetSet(args: { category?: string; category_id?: number; month: string; amount: number }): Promise<ToolResult> {
+    const { category, category_id, month, amount } = args;
+    // FINLYNQ-267: `category_id` FK fast-path wins; a name resolves via the
+    // shared envelope (mistyped → refuse, 2+ → ambiguous). Requires a DEK for
+    // the name path (categories are encrypted post Stream D Phase 4).
+    if (category_id == null && !dek) return err("Cannot resolve category name without an unlocked DEK (Stream D Phase 4). Pass `category_id`.");
+    const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+    const allCats = decryptNameish(rawCats, dek);
+    const out = resolveOrReport("category", resolveEntity({ entity: "category", id: category_id, name: category, options: allCats }));
+    if ("report" in out) return out.report;
+    const cat = { id: out.id };
+
+    const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
+    if (existing.length) {
+      await db.execute(sql`UPDATE budgets SET amount = ${amount} WHERE id = ${existing[0].id}`);
+    } else {
+      await db.execute(sql`INSERT INTO budgets (user_id, category_id, month, amount) VALUES (${userId}, ${cat.id}, ${month}, ${amount})`);
+    }
+    return text({ success: true, data: { message: `Budget set: ${category ?? `category #${cat.id}`} = $${amount} for ${month}` } });
+  }
+
+  async function opBudgetDelete(args: { category?: string; category_id?: number; month: string }): Promise<ToolResult> {
+    const { category, category_id, month } = args;
+    // FINLYNQ-267: `category_id` FK fast-path wins; a name resolves via the
+    // shared envelope (mistyped → refuse, 2+ → ambiguous — was `fuzzyFind`
+    // silent-first). Requires a DEK for the name path (encrypted post Stream D
+    // Phase 4).
+    if (category_id == null && !dek) return err("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4). Pass `category_id`.");
+    const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+    const allCats = decryptNameish(rawCats, dek);
+    const out = resolveOrReport("category", resolveEntity({ entity: "category", id: category_id, name: category, options: allCats }));
+    if ("report" in out) return out.report;
+    const cat = allCats.find((c) => Number(c.id) === out.id) ?? { id: out.id, name: null };
+
+    const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
+    if (!existing.length) return err(`No budget found for "${cat.name ?? `category #${cat.id}`}" in ${month}`);
+
+    await db.execute(sql`DELETE FROM budgets WHERE id = ${existing[0].id} AND user_id = ${userId}`);
+    // Issue #211: budgets are per-tx-cache-irrelevant but invalidate for
+    // any future budget-aware tx surface.
+    invalidateUserTxCache(userId);
+    return text({ success: true, data: { message: `Budget deleted: ${cat.name ?? `category #${cat.id}`} for ${month}` } });
+  }
+
+  registerManageTool(
+    server,
+    "manage_budgets",
+    "Manage per-category monthly budgets: `op` selects set / delete. set: create or update a budget (`category`, `month` YYYY-MM, `amount` > 0). delete: remove a budget for a category/month. Use get_budget_summary to READ budget vs actuals.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("set"),
+        category: z.string().optional().describe("Category name (mistyped/unmatched is REFUSED; 2+ match → ambiguous). Pass this OR `category_id`."),
+        category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
+        month: ymPeriod.describe("Month (YYYY-MM)"),
+        amount: z.number().positive().describe("Budget amount (must be > 0)"),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        category: z.string().optional().describe("Category name (mistyped/unmatched is REFUSED; 2+ match → ambiguous). Pass this OR `category_id`."),
+        category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
+        month: ymPeriod.describe("Month (YYYY-MM)"),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "set":
+          return opBudgetSet(input);
+        case "delete":
+          return opBudgetDelete(input);
+      }
+    },
+  );
+
+  // ── hidden back-compat aliases (removed in v4.1) ─────────────────────────────
+  registerAlias(
+    server,
     "set_budget",
     "Set or update a budget for a category in a specific month",
     {
-      category: z.string().describe("Category name"),
+      category: z.string().optional().describe("Category name (mistyped/unmatched is REFUSED). Pass this OR `category_id`."),
+      category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
       month: ymPeriod.describe("Month (YYYY-MM)"),
       amount: z.number().positive().describe("Budget amount (must be > 0)"),
     },
-    async ({ category, month, amount }) => {
-      // Stream D Phase 4 — match by name_lookup HMAC.
-      if (!dek) return err("Cannot resolve category name without an unlocked DEK (Stream D Phase 4).");
-      const catLookup = nameLookup(dek, category);
-      const catRows = await q(db, sql`SELECT id FROM categories WHERE user_id = ${userId} AND name_lookup = ${catLookup}`);
-      if (!catRows.length) return err(`Category "${category}" not found`);
-      const cat = catRows[0] as { id: number };
-
-      const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
-      if (existing.length) {
-        await db.execute(sql`UPDATE budgets SET amount = ${amount} WHERE id = ${existing[0].id}`);
-      } else {
-        await db.execute(sql`INSERT INTO budgets (user_id, category_id, month, amount) VALUES (${userId}, ${cat.id}, ${month}, ${amount})`);
-      }
-      return text({ success: true, data: { message: `Budget set: ${category} = $${amount} for ${month}` } });
-    }
+    async (args) => opBudgetSet(args),
   );
 
 
-  // ── record_transaction ─────────────────────────────────────────────────────
-  server.tool(
-    "record_transaction",
-    "Record a single transaction in a cash (non-investment) account. Prefer `account_id` (exact) over `account` name; pass at least one — weak substring name matches are REJECTED with a 'did you mean…' error rather than writing to the wrong account. Category is auto-detected from payee rules/history when omitted. INVESTMENT ACCOUNTS ARE REJECTED — route all investment activity through the portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) instead. For cross-currency entries pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. Pass `dryRun: true` to validate + resolve without writing (response includes dryRun:true, wouldBeId:null, and the same resolved* fields a real write returns).",
-    {
-      amount: z.number().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."),
-      payee: z.string().describe("Payee or merchant name"),
-      account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
-      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known — e.g. resolved from a prior `get_account_balances` or `search_transactions` call. If both this and `account` are passed, this wins."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
-      category: z.string().optional().describe("Category name (auto-detected from payee if omitted)"),
-      note: z.string().optional().describe("Optional note"),
-      tags: z.string().optional().describe("Comma-separated tags"),
-      portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this transaction to a position. Get the id from get_portfolio_analysis (each holding now exposes `id`) or from add_portfolio_holding. Must belong to the user; rejected otherwise."),
-      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\" — both resolve to the same holding). Exact case-insensitive match; no fuzzy/substring fallback. Errors with a candidate list on miss. Scoped to the resolved account, so the same name/ticker in two brokerages disambiguates. When both portfolioHolding and portfolioHoldingId are passed and they disagree, returns an error. Use add_portfolio_holding to create new positions before binding."),
-      quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Conventions: RSU vest net of tax → amount=0, quantity=+net_shares; ESPP/plain buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares; dividend/interest/cash-only → omit. Without `quantity`, the holding's share count won't move. ALWAYS pair with portfolioHolding or portfolioHoldingId — a quantity on an unbound row is invisible to the portfolio aggregator."),
-      enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency (the trade side). When set, the server converts to account currency at the date's FX rate; `amount` is ignored if both are provided."),
-      enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) of enteredAmount. Defaults to account currency when omitted."),
-      tradeLinkId: z.string().optional().describe("Multi-currency trade pair linker (issue #96). Pass the UUID returned in the response of a *previous* record_transaction call when binding a second leg to that trade. Server validates the UUID exists, belongs to you, and references at most one existing row before accepting it. New trades typically use bulk_record_transactions with `tradeGroupKey` per row instead — this single-row path is only for incremental binding when the cash leg was already recorded. The server stamps `trade_link_id` on the new row; the four cost-basis aggregators then prefer the cash leg's `entered_amount` over the stock leg's amount as cost basis. Distinct from `linkId` (transfer-pair rule reserves that column)."),
-      dryRun: z.boolean().optional().describe("When true, run the full validation/resolution pipeline (account, holding, FX, category) and return a preview WITHOUT writing to the DB. Response carries `dryRun: true`, `wouldBeId: null`, plus the resolved* fields. Use this to confirm routing before committing — especially when fuzzy account/category matching might surprise you."),
-    },
-    async ({ amount, payee, date, account, account_id, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency, tradeLinkId, dryRun }) => {
+  // ── manage_transactions op handlers (lifted VERBATIM) ──────────────────────
+  // FINLYNQ-263 phase 3 — record_transaction + bulk_record_transactions +
+  // update_transaction + delete_transaction folded into manage_transactions.
+  // Every load-bearing invariant preserved VERBATIM: link_id/trade_link_id
+  // distinctness, expandLinkSiblings cascade, invalidateUser, audit trio
+  // (created_at/updated_at/source), sign-vs-category advisory, lot hooks.
+
+  // ── record (single) — lifted VERBATIM from record_transaction ──────────────
+  type RecordTxArgs = {
+    amount: number;
+    payee: string;
+    date?: string;
+    account?: string;
+    account_id?: number;
+    category?: string;
+    category_id?: number;
+    note?: string;
+    tags?: string;
+    portfolioHoldingId?: number;
+    portfolioHolding?: string;
+    quantity?: number;
+    enteredAmount?: number;
+    enteredCurrency?: string;
+    tradeLinkId?: string;
+    dryRun?: boolean;
+  };
+  async function opTxRecord(argsObj: RecordTxArgs): Promise<ToolResult> {
+      const { amount, payee, date, account, account_id, category, category_id, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency, tradeLinkId, dryRun } = argsObj;
       const today = new Date().toISOString().split("T")[0];
       const txDate = date ?? today;
 
@@ -212,16 +285,16 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       if (isInvestment) {
         return err(`Account "${acct.name}" is an investment account — record_transaction can't write to it. Use portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion instead.`);
       }
+      // FINLYNQ-267: `category_id` FK fast-path wins; a name resolves via the
+      // shared envelope (mistyped → refuse, 2+ → ambiguous — was `fuzzyFind`
+      // silent-first). Neither given ⇒ auto-categorize from the payee.
       let catId: number | null = null;
-      if (category) {
+      if (category_id != null || category) {
         const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
         const allCats = decryptNameish(rawCats, dek);
-        const cat = fuzzyFind(category, allCats);
-        if (!cat) {
-          // Issue #211 Bug e: top-N suggestions only.
-          return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
-        }
-        catId = Number(cat.id);
+        const out = resolveOrReport("category", resolveEntity({ entity: "category", id: category_id, name: category, options: allCats }));
+        if ("report" in out) return out.report;
+        catId = out.id;
       } else {
         catId = await autoCategory(db, userId, payee, dek, isInvestment, !dryRun);
       }
@@ -448,36 +521,33 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           warnings,
         },
       });
-    }
-  );
+  }
 
 
-  // ── bulk_record_transactions ───────────────────────────────────────────────
-  server.tool(
-    "bulk_record_transactions",
-    "Record many cash transactions in one batch (partial-commit: a bad row fails without unwinding the rest). Prefer per-row `account_id` (or top-level fallback) over `account` name — weak substring name matches fail that row with a 'did you mean…' message. Category auto-detected when omitted. INVESTMENT ACCOUNTS ARE REJECTED — any is_investment row fails; use the portfolio_* tools instead. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result carries `resolvedAccount`. Pass `dryRun: true` to validate + resolve without writing. Pass top-level `idempotencyKey` (fresh UUID v4 per batch) to make retries safe — a same-(user,key) commit within 72h returns the original result verbatim. A successful batch returns a top-level `possibleDuplicates` array (hints only) flagging inserts resembling an existing row (same direction, amount within 5%, dates within 7 days).",
-    {
-      account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row."),
-      dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Use this to preview routing for a whole batch (account fuzzy-matches, FX rates, holding bindings) before committing. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`/`resolvedHolding`."),
-      idempotencyKey: z.string().uuid().optional().describe("Optional UUID v4 the caller mints once per batch. First call with `(user, key)` writes the rows AND stashes the response JSON; any retry within 72h returns the stored response verbatim with no INSERTs and no cache invalidation. Skipped on `dryRun: true` (preview must not block a future real submit) and skipped when zero rows commit (caller should retry, not replay). Stored response has plaintext payees/account names redacted to row indices — replay messages read 'row #i: <amt> <ccy>' instead of '<payee>: <amt> <ccy>'; `transactionId` and `resolvedAccount.id` are preserved."),
-      transactions: z.array(z.object({
-        amount: z.number(),
-        payee: z.string(),
-        account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id`. Required if neither row-level `account_id` nor top-level `account_id` is set; rejected for low-confidence fuzzy matches."),
-        account_id: z.number().int().optional().describe("Per-row account FK (accounts.id). Skips fuzzy matching; routes to the exact account. Wins over both `account` and the top-level `account_id`."),
-        date: z.string().optional(),
-        category: z.string().optional(),
-        note: z.string().optional(),
-        tags: z.string().optional(),
-        portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this row to a position. Get the id from get_portfolio_analysis (each holding exposes `id`) or add_portfolio_holding."),
-        portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\"). Exact case-insensitive match against the user's existing holdings scoped to this row's account (no auto-create — error if no match). When both are passed and disagree, the row fails."),
-        quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Omit for cash-only rows. RSU vest → amount=0, quantity=+net_shares; ESPP/buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares. ALWAYS pair with portfolioHolding or portfolioHoldingId — quantity on an unbound row is invisible to the portfolio aggregator."),
-        enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency. Server converts to account currency."),
-        enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
-        tradeGroupKey: z.string().optional().describe("Multi-currency trade pair grouping hint (issue #96). Two rows in this batch with the same `tradeGroupKey` get the same server-minted UUID stamped into `trade_link_id`. Used to link the cash-out leg + stock-in leg of a multi-currency trade so the four cost-basis aggregators can pull the cash leg's `entered_amount` (broker's actual settlement) as cost basis instead of the stock leg's amount (Finlynq's live FX). The key itself is a per-batch label (any string — \"BNO-buy-2025\", \"trade1\", etc.); the server discards it and only the minted UUID lands in the DB. Each group must have exactly two rows: one with `quantity > 0` (stock leg) and one with `quantity == 0` or omitted (cash leg). Rows with no `tradeGroupKey` are normal single-leg inserts (current behavior)."),
-      })).describe("Array of transactions to record"),
-    },
-    async ({ transactions, account_id: defaultAccountId, dryRun, idempotencyKey }) => {
+  // ── record (bulk) — lifted VERBATIM from bulk_record_transactions ──────────
+  type BulkRecordArgs = {
+    transactions: Array<{
+      amount: number;
+      payee: string;
+      account?: string;
+      account_id?: number;
+      date?: string;
+      category?: string;
+      note?: string;
+      tags?: string;
+      portfolioHoldingId?: number;
+      portfolioHolding?: string;
+      quantity?: number;
+      enteredAmount?: number;
+      enteredCurrency?: string;
+      tradeGroupKey?: string;
+    }>;
+    account_id?: number;
+    dryRun?: boolean;
+    idempotencyKey?: string;
+  };
+  async function opTxBulkRecord(argsObj: BulkRecordArgs): Promise<ToolResult> {
+      const { transactions, account_id: defaultAccountId, dryRun, idempotencyKey } = argsObj;
       // Idempotency replay (issue #98). Look up first — before any
       // account/category/holdings prefetch — so a hit returns immediately.
       // Scoped on `(user_id, key, tool_name)` with a 72h freshness window;
@@ -1052,29 +1122,27 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
 
       return text(responseBody);
       } // end runBulkRecord
-    }
-  );
+  }
 
 
-  // ── update_transaction ─────────────────────────────────────────────────────
-  server.tool(
-    "update_transaction",
-    "Update fields of an existing transaction by ID. Pass enteredAmount + enteredCurrency to re-lock a cross-currency rate (rare); passing just `amount` keeps the entered side unchanged. To backfill a share count on an existing portfolio row, pass `quantity` (positive=buy/long, negative=sell, or null to clear).",
-    {
-      id: z.number().describe("Transaction ID"),
-      date: ymdDate.optional(),
-      amount: z.number().optional().describe("New amount in account currency. Doesn't touch the entered_* side."),
-      payee: z.string().optional(),
-      category: z.string().optional().describe("Category name (fuzzy matched)"),
-      note: z.string().optional(),
-      tags: z.string().optional(),
-      portfolioHoldingId: z.number().int().nullable().optional().describe("FK to portfolio_holdings.id (or null to clear). Get the id from get_portfolio_analysis (each holding exposes `id`) or analyze_holding (`holdingId`). Holding must belong to the user."),
-      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\"). Exact case-insensitive match against the user's existing holdings scoped to this transaction's account (no auto-create — error if no match). When both are passed and disagree, returns an error. Pass portfolioHoldingId=null to clear; passing an empty portfolioHolding is rejected."),
-      quantity: z.number().nullable().optional().describe("Share count for stock/ETF/crypto rows. Positive=shares acquired, negative=shares sold, null=clear. Useful for backfilling rows that were previously booked cash-only. Pair with portfolioHolding/portfolioHoldingId so the row joins the position aggregator."),
-      enteredAmount: z.number().optional().describe("Update the user-typed amount; server re-derives account-side amount via FX at the row's date."),
-      enteredCurrency: z.string().optional().describe("Update the entered currency. Requires enteredAmount."),
-    },
-    async ({ id, date, amount, payee, category, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency }) => {
+  // ── update — lifted VERBATIM from update_transaction ───────────────────────
+  type UpdateTxArgs = {
+    id: number;
+    date?: string;
+    amount?: number;
+    payee?: string;
+    category?: string;
+    category_id?: number;
+    note?: string;
+    tags?: string;
+    portfolioHoldingId?: number | null;
+    portfolioHolding?: string;
+    quantity?: number | null;
+    enteredAmount?: number;
+    enteredCurrency?: string;
+  };
+  async function opTxUpdate(argsObj: UpdateTxArgs): Promise<ToolResult> {
+      const { id, date, amount, payee, category, category_id, note, tags, portfolioHoldingId, portfolioHolding, quantity, enteredAmount, enteredCurrency } = argsObj;
       const existing = await q(db, sql`
         SELECT t.id, t.account_id, t.category_id, t.date, t.amount, a.currency AS account_currency
           FROM transactions t
@@ -1096,25 +1164,19 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       // matches the FIRST row regardless of input — the silent-failure mode
       // captured in issue #60. Strict resolver also gates substring matches
       // on token overlap so "Cr" never resolves to "Credit Interest".
+      // FINLYNQ-267: `category_id` FK fast-path wins; a name resolves via the
+      // shared envelope (mistyped → refuse, 2+ → ambiguous; the #60 token gate
+      // is preserved by DEFAULT_STRICT.category).
       let catId: number | undefined;
       let resolvedCategory: { id: number; name: string } | null = null;
-      if (category !== undefined) {
+      if (category_id != null || category !== undefined) {
         const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
         const allCats = decryptNameish(rawCats, dek);
-        const resolved = resolveCategoryStrict(category, allCats);
-        if (!resolved.ok) {
-          // Issue #211 Bug e: top-N suggestions only.
-          const suggestions = suggestionList(category, allCats);
-          if (resolved.reason === "ambiguous") {
-            return err(`Ambiguous: "${category}" matches ${resolved.candidates.length} categories. Did you mean: ${suggestions}?`);
-          }
-          if (resolved.reason === "low_confidence") {
-            return err(`Category "${category}" did not match strongly — did you mean "${resolved.suggestion.name}"? Re-call with the exact name to confirm.`);
-          }
-          return err(`Category "${category}" not found. Did you mean: ${suggestions}?`);
-        }
-        catId = Number(resolved.category.id);
-        resolvedCategory = { id: catId, name: String(resolved.category.name ?? "") };
+        const out = resolveOrReport("category", resolveEntity({ entity: "category", id: category_id, name: category, options: allCats }));
+        if ("report" in out) return out.report;
+        catId = out.id;
+        const row = allCats.find((c) => Number(c.id) === out.id);
+        resolvedCategory = { id: out.id, name: String(row?.name ?? "") };
       }
 
       // Resolve the holding FK from either input form, then run the existing
@@ -1303,22 +1365,27 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           warnings,
         },
       });
-    }
-  );
+  }
 
 
-  // ── delete_transaction ─────────────────────────────────────────────────────
-  server.tool(
-    "delete_transaction",
-    "Permanently delete a transaction by ID",
-    {
-      id: z.number().describe("Transaction ID to delete"),
-    },
-    async ({ id }) => {
+  // ── delete — lifted VERBATIM from delete_transaction ───────────────────────
+  // FINLYNQ-264 Phase 2 (tier-2): single-row delete guarded by an OPTIONAL
+  // `expected` echo (payee/amount) — the high-frequency, round-trip-free
+  // hallucinated-id guard. When `expected` is passed and mismatches the loaded
+  // row the delete is REFUSED; when omitted the delete proceeds (back-compat)
+  // but the tool is annotated destructive so hosts can prompt.
+  async function opTxDelete(argsObj: {
+    id: number;
+    expected?: { payee?: string; amount?: number };
+  }): Promise<ToolResult> {
+      const { id, expected } = argsObj;
       const existing = await q(db, sql`SELECT id, payee, amount, date FROM transactions WHERE user_id = ${userId} AND id = ${id}`);
       if (!existing.length) return err(`Transaction #${id} not found`);
       const t = existing[0];
       const plainPayee = dek ? (decryptField(dek, String(t.payee ?? "")) ?? "") : t.payee;
+      // Echo gate — refuse on a payee/amount mismatch (hallucinated-id guard).
+      const mismatch = checkExpectedEcho(expected, { payee: plainPayee as string, amount: Number(t.amount) }, `transaction #${id}`);
+      if (mismatch) return err(mismatch);
       // Portfolio lot tracking — reverse BEFORE the DELETE so closure rows
       // are still in place for the lookup. CASCADE on holding_lots.open_tx_id
       // catches anything reverseLotsForDeleteHook missed.
@@ -1326,34 +1393,230 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       await db.execute(sql`DELETE FROM transactions WHERE id = ${id} AND user_id = ${userId}`);
       invalidateUserTxCache(userId);
       return text({ success: true, data: { message: `Deleted transaction #${id}: "${plainPayee}" ${t.amount} on ${t.date}` } });
-    }
+  }
+
+  // ── consolidated tool: manage_transactions + hidden back-compat aliases ────
+  // record op: single row (record fields) OR many (`transactions[]` + bulk
+  // options). update/delete by id. INVESTMENT ACCOUNTS ARE REJECTED for record
+  // — route investment activity through the portfolio_* tools.
+  registerManageTool(
+    server,
+    "manage_transactions",
+    "Manage cash-account transactions: `op` selects record / update / delete. record: one row (amount/payee/account…) OR many (pass `transactions[]` + optional idempotencyKey). update: change a transaction's fields by id. delete: remove by id (optional `expected` payee/amount echo guards a mis-copied id). INVESTMENT ACCOUNTS ARE REJECTED — use the portfolio_* tools. `dryRun:true` validates without writing.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("record"),
+        // Single-row fields (used when `transactions[]` is omitted):
+        amount: z.number().optional().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Single record."),
+        payee: z.string().optional().describe("Payee or merchant name. Single record."),
+        account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id`."),
+        account_id: z.number().int().optional().describe("Account FK (accounts.id). Exact routing. As a SINGLE-record field OR the top-level bulk fallback applied to every row that omits its own account."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
+        category: z.string().optional().describe("Category name (auto-detected from payee if omitted; mistyped/unmatched is REFUSED, 2+ → ambiguous). PREFER `category_id`."),
+        category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name. Single record."),
+        note: z.string().optional().describe("Optional note"),
+        tags: z.string().optional().describe("Comma-separated tags"),
+        portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this transaction to a position."),
+        portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL. Exact case-insensitive match scoped to the resolved account."),
+        quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive=buy/long, negative=sell; omit for cash-only. ALWAYS pair with a holding."),
+        enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency (the trade side). Server converts to account currency at the date's FX rate."),
+        enteredCurrency: z.string().optional().describe("ISO code of enteredAmount. Defaults to account currency."),
+        tradeLinkId: z.string().optional().describe("Multi-currency trade-pair linker (issue #96). UUID from a previous record call. Single-record incremental binding only."),
+        dryRun: z.boolean().optional().describe("Validate + resolve (account/holding/FX/category) WITHOUT writing. Response carries dryRun:true, wouldBeId:null, resolved* fields."),
+        // Bulk fields (used when `transactions[]` is present):
+        transactions: z.array(z.object({
+          amount: z.number(),
+          payee: z.string(),
+          account: z.string().optional().describe("Account name or alias (fuzzy). PREFER `account_id`."),
+          account_id: z.number().int().optional().describe("Per-row account FK. Wins over `account` + the top-level `account_id`."),
+          date: z.string().optional(),
+          category: z.string().optional(),
+          note: z.string().optional(),
+          tags: z.string().optional(),
+          portfolioHoldingId: z.number().int().optional().describe("Bind this row to a position FK."),
+          portfolioHolding: z.string().optional().describe("Holding NAME or TICKER SYMBOL (exact, scoped to the row's account; no auto-create)."),
+          quantity: z.number().optional().describe("Share count. Positive=buy/long, negative=sell; omit for cash-only. Pair with a holding."),
+          enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency."),
+          enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
+          tradeGroupKey: z.string().optional().describe("Multi-currency trade-pair grouping hint (issue #96). Two rows sharing a key get one minted trade_link_id."),
+        })).optional().describe("Bulk record — an array of rows (partial-commit; a bad row fails without unwinding the rest)."),
+        idempotencyKey: z.string().uuid().optional().describe("Bulk only — UUID v4 minted once per batch; a retry within 72h replays the stored response verbatim."),
+      }),
+      z.object({
+        op: z.literal("update"),
+        id: z.number().describe("Transaction ID"),
+        date: ymdDate.optional(),
+        amount: z.number().optional().describe("New amount in account currency. Doesn't touch the entered_* side."),
+        payee: z.string().optional(),
+        category: z.string().optional().describe("Category name (fuzzy matched — mistyped/unmatched is REFUSED, 2+ → ambiguous). PREFER `category_id`."),
+        category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
+        note: z.string().optional(),
+        tags: z.string().optional(),
+        portfolioHoldingId: z.number().int().nullable().optional().describe("FK to portfolio_holdings.id (or null to clear)."),
+        portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL. Exact match scoped to the tx's account."),
+        quantity: z.number().nullable().optional().describe("Share count. Positive=acquired, negative=sold, null=clear."),
+        enteredAmount: z.number().optional().describe("Update the user-typed amount; server re-derives account-side amount via FX at the row's date."),
+        enteredCurrency: z.string().optional().describe("Update the entered currency. Requires enteredAmount."),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        id: z.number().describe("Transaction ID to delete"),
+        expected: z.object({
+          payee: z.string().optional().describe("The payee you believe this transaction has (case-insensitive)."),
+          amount: z.number().optional().describe("The amount you believe this transaction has (±0.01)."),
+        }).optional().describe("Optional row-content echo. If present and it doesn't match the stored row, the delete is refused."),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "record":
+          if (input.transactions !== undefined) {
+            return opTxBulkRecord({
+              transactions: input.transactions,
+              account_id: input.account_id,
+              dryRun: input.dryRun,
+              idempotencyKey: input.idempotencyKey,
+            });
+          }
+          return opTxRecord({
+            amount: input.amount ?? 0,
+            payee: input.payee ?? "",
+            date: input.date,
+            account: input.account,
+            account_id: input.account_id,
+            category: input.category,
+            note: input.note,
+            tags: input.tags,
+            portfolioHoldingId: input.portfolioHoldingId,
+            portfolioHolding: input.portfolioHolding,
+            quantity: input.quantity,
+            enteredAmount: input.enteredAmount,
+            enteredCurrency: input.enteredCurrency,
+            tradeLinkId: input.tradeLinkId,
+            dryRun: input.dryRun,
+          });
+        case "update":
+          return opTxUpdate(input);
+        case "delete":
+          return opTxDelete(input);
+      }
+    },
+  );
+
+  registerAlias(
+    server,
+    "record_transaction",
+    "Record a single transaction in a cash (non-investment) account. Prefer `account_id` (exact) over `account` name; pass at least one — weak substring name matches are REJECTED with a 'did you mean…' error rather than writing to the wrong account. Category is auto-detected from payee rules/history when omitted. INVESTMENT ACCOUNTS ARE REJECTED — route all investment activity through the portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) instead. For cross-currency entries pass enteredAmount + enteredCurrency and the server locks the FX rate at the transaction date. Pass `dryRun: true` to validate + resolve without writing (response includes dryRun:true, wouldBeId:null, and the same resolved* fields a real write returns).",
+    {
+      amount: z.number().describe("Amount in account currency (negative=expense, positive=income/transfer-in). Use this for same-currency entries OR if you don't have an entered-side amount."),
+      payee: z.string().describe("Payee or merchant name"),
+      account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `account_id` is not provided."),
+      account_id: z.number().int().optional().describe("Account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known — e.g. resolved from a prior `get_account_balances` or `search_transactions` call. If both this and `account` are passed, this wins."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
+      category: z.string().optional().describe("Category name (auto-detected from payee if omitted; mistyped/unmatched is REFUSED, 2+ → ambiguous). PREFER `category_id`."),
+      category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
+      note: z.string().optional().describe("Optional note"),
+      tags: z.string().optional().describe("Comma-separated tags"),
+      portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this transaction to a position. Get the id from get_portfolio_analysis (each holding now exposes `id`) or from add_portfolio_holding. Must belong to the user; rejected otherwise."),
+      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\" — both resolve to the same holding). Exact case-insensitive match; no fuzzy/substring fallback. Errors with a candidate list on miss. Scoped to the resolved account, so the same name/ticker in two brokerages disambiguates. When both portfolioHolding and portfolioHoldingId are passed and they disagree, returns an error. Use add_portfolio_holding to create new positions before binding."),
+      quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Conventions: RSU vest net of tax → amount=0, quantity=+net_shares; ESPP/plain buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares; dividend/interest/cash-only → omit. Without `quantity`, the holding's share count won't move. ALWAYS pair with portfolioHolding or portfolioHoldingId — a quantity on an unbound row is invisible to the portfolio aggregator."),
+      enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency (the trade side). When set, the server converts to account currency at the date's FX rate; `amount` is ignored if both are provided."),
+      enteredCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) of enteredAmount. Defaults to account currency when omitted."),
+      tradeLinkId: z.string().optional().describe("Multi-currency trade pair linker (issue #96). Pass the UUID returned in the response of a *previous* record_transaction call when binding a second leg to that trade. Server validates the UUID exists, belongs to you, and references at most one existing row before accepting it. New trades typically use bulk_record_transactions with `tradeGroupKey` per row instead — this single-row path is only for incremental binding when the cash leg was already recorded. The server stamps `trade_link_id` on the new row; the four cost-basis aggregators then prefer the cash leg's `entered_amount` over the stock leg's amount as cost basis. Distinct from `linkId` (transfer-pair rule reserves that column)."),
+      dryRun: z.boolean().optional().describe("When true, run the full validation/resolution pipeline (account, holding, FX, category) and return a preview WITHOUT writing to the DB. Response carries `dryRun: true`, `wouldBeId: null`, plus the resolved* fields. Use this to confirm routing before committing — especially when fuzzy account/category matching might surprise you."),
+    },
+    async (args) => opTxRecord(args),
+  );
+  registerAlias(
+    server,
+    "bulk_record_transactions",
+    "Record many cash transactions in one batch (partial-commit: a bad row fails without unwinding the rest). Prefer per-row `account_id` (or top-level fallback) over `account` name — weak substring name matches fail that row with a 'did you mean…' message. Category auto-detected when omitted. INVESTMENT ACCOUNTS ARE REJECTED — any is_investment row fails; use the portfolio_* tools instead. For cross-currency rows pass enteredAmount + enteredCurrency. Each per-row result carries `resolvedAccount`. Pass `dryRun: true` to validate + resolve without writing. Pass top-level `idempotencyKey` (fresh UUID v4 per batch) to make retries safe — a same-(user,key) commit within 72h returns the original result verbatim. A successful batch returns a top-level `possibleDuplicates` array (hints only) flagging inserts resembling an existing row (same direction, amount within 5%, dates within 7 days).",
+    {
+      account_id: z.number().int().optional().describe("Top-level account FK applied to every row that omits its own `account_id` and `account`. Convenient when bulk-importing one account's statement — set this once instead of repeating it on every row."),
+      dryRun: z.boolean().optional().describe("When true, run the full per-row validation/resolution pipeline but skip every INSERT. Use this to preview routing for a whole batch (account fuzzy-matches, FX rates, holding bindings) before committing. Per-row results carry `dryRun: true`, `wouldBeId: null`, plus `resolvedAccount`/`resolvedCategory`/`resolvedHolding`."),
+      idempotencyKey: z.string().uuid().optional().describe("Optional UUID v4 the caller mints once per batch. First call with `(user, key)` writes the rows AND stashes the response JSON; any retry within 72h returns the stored response verbatim with no INSERTs and no cache invalidation. Skipped on `dryRun: true` (preview must not block a future real submit) and skipped when zero rows commit (caller should retry, not replay). Stored response has plaintext payees/account names redacted to row indices — replay messages read 'row #i: <amt> <ccy>' instead of '<payee>: <amt> <ccy>'; `transactionId` and `resolvedAccount.id` are preserved."),
+      transactions: z.array(z.object({
+        amount: z.number(),
+        payee: z.string(),
+        account: z.string().optional().describe("Account name or alias — fuzzy matched against name, exact on alias. PREFER `account_id`. Required if neither row-level `account_id` nor top-level `account_id` is set; rejected for low-confidence fuzzy matches."),
+        account_id: z.number().int().optional().describe("Per-row account FK (accounts.id). Skips fuzzy matching; routes to the exact account. Wins over both `account` and the top-level `account_id`."),
+        date: z.string().optional(),
+        category: z.string().optional(),
+        note: z.string().optional(),
+        tags: z.string().optional(),
+        portfolioHoldingId: z.number().int().optional().describe("Optional FK to portfolio_holdings.id — bind this row to a position. Get the id from get_portfolio_analysis (each holding exposes `id`) or add_portfolio_holding."),
+        portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\"). Exact case-insensitive match against the user's existing holdings scoped to this row's account (no auto-create — error if no match). When both are passed and disagree, the row fails."),
+        quantity: z.number().optional().describe("Share count for stock/ETF/crypto rows. Positive for buys/long (RSU vests, ESPP, plain buys), negative for sells. Omit for cash-only rows. RSU vest → amount=0, quantity=+net_shares; ESPP/buy → amount=negative_cash, quantity=+shares; sell → amount=positive_proceeds, quantity=-shares. ALWAYS pair with portfolioHolding or portfolioHoldingId — quantity on an unbound row is invisible to the portfolio aggregator."),
+        enteredAmount: z.number().optional().describe("User-typed amount in enteredCurrency. Server converts to account currency."),
+        enteredCurrency: z.string().optional().describe("ISO code of enteredAmount; defaults to account currency."),
+        tradeGroupKey: z.string().optional().describe("Multi-currency trade pair grouping hint (issue #96). Two rows in this batch with the same `tradeGroupKey` get the same server-minted UUID stamped into `trade_link_id`. Used to link the cash-out leg + stock-in leg of a multi-currency trade so the four cost-basis aggregators can pull the cash leg's `entered_amount` (broker's actual settlement) as cost basis instead of the stock leg's amount (Finlynq's live FX). The key itself is a per-batch label (any string — \"BNO-buy-2025\", \"trade1\", etc.); the server discards it and only the minted UUID lands in the DB. Each group must have exactly two rows: one with `quantity > 0` (stock leg) and one with `quantity == 0` or omitted (cash leg). Rows with no `tradeGroupKey` are normal single-leg inserts (current behavior)."),
+      })).describe("Array of transactions to record"),
+    },
+    async (args) => opTxBulkRecord(args),
+  );
+  registerAlias(
+    server,
+    "update_transaction",
+    "Update fields of an existing transaction by ID. Pass enteredAmount + enteredCurrency to re-lock a cross-currency rate (rare); passing just `amount` keeps the entered side unchanged. To backfill a share count on an existing portfolio row, pass `quantity` (positive=buy/long, negative=sell, or null to clear).",
+    {
+      id: z.number().describe("Transaction ID"),
+      date: ymdDate.optional(),
+      amount: z.number().optional().describe("New amount in account currency. Doesn't touch the entered_* side."),
+      payee: z.string().optional(),
+      category: z.string().optional().describe("Category name (fuzzy matched — mistyped/unmatched is REFUSED, 2+ → ambiguous). PREFER `category_id`."),
+      category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
+      note: z.string().optional(),
+      tags: z.string().optional(),
+      portfolioHoldingId: z.number().int().nullable().optional().describe("FK to portfolio_holdings.id (or null to clear). Get the id from get_portfolio_analysis (each holding exposes `id`) or analyze_holding (`holdingId`). Holding must belong to the user."),
+      portfolioHolding: z.string().optional().describe("Alternative to portfolioHoldingId: the holding's NAME or TICKER SYMBOL (e.g. \"HURN\" or \"Huron Consulting Group Inc.\"). Exact case-insensitive match against the user's existing holdings scoped to this transaction's account (no auto-create — error if no match). When both are passed and disagree, returns an error. Pass portfolioHoldingId=null to clear; passing an empty portfolioHolding is rejected."),
+      quantity: z.number().nullable().optional().describe("Share count for stock/ETF/crypto rows. Positive=shares acquired, negative=shares sold, null=clear. Useful for backfilling rows that were previously booked cash-only. Pair with portfolioHolding/portfolioHoldingId so the row joins the position aggregator."),
+      enteredAmount: z.number().optional().describe("Update the user-typed amount; server re-derives account-side amount via FX at the row's date."),
+      enteredCurrency: z.string().optional().describe("Update the entered currency. Requires enteredAmount."),
+    },
+    async (args) => opTxUpdate(args),
+  );
+  registerAlias(
+    server,
+    "delete_transaction",
+    "Permanently delete a transaction by ID. RECOMMENDED: pass `expected` (the payee and/or amount you believe #id has) — if it doesn't match the stored row the delete is refused, guarding against a hallucinated / mis-copied id. Omitting `expected` still deletes (back-compat).",
+    {
+      id: z.number().describe("Transaction ID to delete"),
+      expected: z.object({
+        payee: z.string().optional().describe("The payee you believe this transaction has (case-insensitive)."),
+        amount: z.number().optional().describe("The amount you believe this transaction has (±0.01)."),
+      }).optional().describe("Optional row-content echo. If present and it doesn't match the stored row, the delete is refused."),
+    },
+    async (args) => opTxDelete(args),
   );
 
 
-  // ── record_transfer ────────────────────────────────────────────────────────
+  // ── manage_transfers op handlers (lifted VERBATIM) ─────────────────────────
+  // FINLYNQ-263 phase 3 — record/update/delete_transfer folded into
+  // manage_transfers. Transfer-pair atomicity (createTransferPair, shared
+  // link_id — DISTINCT from trade_link_id), expandLinkSiblings cascade on
+  // delete, and the withConfirmation two-step on delete preserved VERBATIM.
+
+  // ── record — lifted VERBATIM from record_transfer ──────────────────────────
   // First-class "move money between two of my accounts" primitive. Creates
   // BOTH legs atomically with a server-generated UUID `link_id` so the unified
   // edit view in the UI can pick them up via the four-check rule. Mirrors the
   // /api/transactions/transfer POST handler — both call into createTransferPair().
-  server.tool(
-    "record_transfer",
-    "Record a transfer between two of the user's accounts. Creates BOTH legs (debit source, credit destination) atomically with a shared link_id so they show as a paired transfer. PREFER `from_account_id` / `to_account_id` (exact) over name; weak substring name matches are REJECTED with a 'did you mean…' error rather than routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency (pass `receivedAmount` to lock the landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares; `amount` may be 0). Both holdings must already exist in their accounts. Same-account forex (two cash sleeves with divergent ISO-4217 name suffixes, e.g. 'Cash - USD' → 'Cash - CAD') honors `receivedAmount` for the destination leg. For brokerage moves use the portfolio_* tools.",
-    {
-      fromAccount: z.string().optional().describe("Source account name or alias — fuzzy matched against name, exact on alias. PREFER `from_account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `from_account_id` is not provided."),
-      toAccount: z.string().optional().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected. PREFER `to_account_id` when known. Required if `to_account_id` is not provided."),
-      from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `fromAccount` are passed, this wins."),
-      to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `toAccount` are passed, this wins."),
-      amount: z.number().nonnegative().describe("Cash amount the user sent, in the SOURCE account's currency. > 0 for cash transfers; 0 is allowed only when `holding` + `quantity` are also set (pure in-kind transfer)."),
-      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
-      receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: actual amount that landed in the destination account, in DESTINATION's currency. When set, FX rate is locked to receivedAmount/amount. Ignored for same-currency transfers."),
-      holding: z.string().optional().describe("Source-side holding name for an in-kind (share) transfer. MUST already exist in fromAccount. Pair with `quantity`."),
-      destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding` (auto-created in toAccount if missing). Set this only when the destination uses a different label for the same instrument (e.g. source 'Gold Ounce' → dest 'Au Bullion')."),
-      quantity: z.number().positive().optional().describe("Positive share count LEAVING source (the source row gets the negative). Required when `holding` is set."),
-      destQuantity: z.number().positive().optional().describe("Positive share count ARRIVING at destination. Defaults to `quantity`. Set when source/dest counts differ — stock split (10 → 30), reverse split (30 → 10), merger or share-class conversion (100 of X → 60 of Y)."),
-      note: z.string().optional().describe("Optional note applied to BOTH legs"),
-      tags: z.string().optional().describe("Optional comma-separated tags applied to BOTH legs"),
-    },
-    async ({ fromAccount, toAccount, from_account_id, to_account_id, amount, date, receivedAmount, holding, destHolding, quantity, destQuantity, note, tags }) => {
+  async function opTransferRecord(argsObj: {
+    fromAccount?: string;
+    toAccount?: string;
+    from_account_id?: number;
+    to_account_id?: number;
+    amount: number;
+    date?: string;
+    receivedAmount?: number;
+    holding?: string;
+    destHolding?: string;
+    quantity?: number;
+    destQuantity?: number;
+    note?: string;
+    tags?: string;
+  }): Promise<ToolResult> {
+      const { fromAccount, toAccount, from_account_id, to_account_id, amount, date, receivedAmount, holding, destHolding, quantity, destQuantity, note, tags } = argsObj;
       if (!dek) return err("Transfers require an active session DEK — log in again to encrypt the rows.");
 
       const rawAccounts = await q(db, sql`
@@ -1515,50 +1778,51 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
             : `Transferred ${amount} ${result.fromCurrency} from ${fromAcct.name} to ${toAcct.name}${inKindNote}`,
         },
       });
-    }
-  );
+  }
 
 
-  // ── update_transfer ────────────────────────────────────────────────────────
-  server.tool(
-    "update_transfer",
-    "Update both legs of an existing transfer pair atomically. Identify the pair by linkId OR by either leg's transaction id. Refuses if the targeted rows don't form a clean transfer pair. To (re)bind the in-kind side, pass `holding` + `quantity` together; to clear it (turn the row back into a pure cash transfer), pass `holdingClear: true`. Omit all three to leave the in-kind side untouched.",
-    {
-      linkId: z.string().optional().describe("UUID link_id shared by the pair. Either this OR transactionId is required."),
-      transactionId: z.number().int().optional().describe("Any one transaction id from the pair; helper resolves the other side."),
-      fromAccount: z.string().optional().describe("New source account name or alias. Re-runs FX if currency changes."),
-      toAccount: z.string().optional().describe("New destination account name or alias."),
-      amount: z.number().nonnegative().optional().describe("New amount sent (source currency); 0 only allowed when in-kind side is set."),
-      date: ymdDate.optional().describe("New date (YYYY-MM-DD); applied to both legs."),
-      receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override; rebuilds the destination leg's amount + locked FX rate."),
-      holding: z.string().optional().describe("(Re)bind the in-kind source-side to this holding name. Pair with `quantity`."),
-      destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding`. Use when destination uses a different label."),
-      quantity: z.number().positive().optional().describe("Positive share count LEAVING source when (re)binding the in-kind side."),
-      destQuantity: z.number().positive().optional().describe("Positive share count ARRIVING at destination. Defaults to `quantity`. Set when source/dest counts differ (split, merger)."),
-      holdingClear: z.boolean().optional().describe("Set true to clear the in-kind side and turn the row back into a pure cash transfer."),
-      note: z.string().optional().describe("New note applied to both legs."),
-      tags: z.string().optional().describe("New tags applied to both legs."),
-    },
-    async ({ linkId, transactionId, fromAccount, toAccount, amount, date, receivedAmount, holding, destHolding, quantity, destQuantity, holdingClear, note, tags }) => {
+  // ── update — lifted VERBATIM from update_transfer ──────────────────────────
+  async function opTransferUpdate(argsObj: {
+    linkId?: string;
+    transactionId?: number;
+    fromAccount?: string;
+    toAccount?: string;
+    from_account_id?: number;
+    to_account_id?: number;
+    amount?: number;
+    date?: string;
+    receivedAmount?: number;
+    holding?: string;
+    destHolding?: string;
+    quantity?: number;
+    destQuantity?: number;
+    holdingClear?: boolean;
+    note?: string;
+    tags?: string;
+  }): Promise<ToolResult> {
+      const { linkId, transactionId, fromAccount, toAccount, from_account_id, to_account_id, amount, date, receivedAmount, holding, destHolding, quantity, destQuantity, holdingClear, note, tags } = argsObj;
       if (!dek) return err("Transfer updates require an active session DEK — log in again.");
       if (linkId == null && transactionId == null) return err("Either linkId or transactionId is required");
 
+      // FINLYNQ-267: each side resolves via the shared envelope — a mistyped/
+      // unmatched name is REFUSED and a 2+ match returns an ambiguous list
+      // (was `fuzzyFind` silent-first); `from/to_account_id` are FK fast-paths.
       let fromAccountId: number | undefined;
       let toAccountId: number | undefined;
-      if (fromAccount || toAccount) {
+      if (fromAccount || toAccount || from_account_id != null || to_account_id != null) {
         const rawAccounts = await q(db, sql`
           SELECT id, currency, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}
         `);
         const allAccounts = decryptNameish(rawAccounts, dek);
-        if (fromAccount) {
-          const acct = fuzzyFind(fromAccount, allAccounts);
-          if (!acct) return err(`Source account "${fromAccount}" not found.`);
-          fromAccountId = Number(acct.id);
+        if (fromAccount || from_account_id != null) {
+          const out = resolveOrReport("fromAccount", resolveEntity({ entity: "account", id: from_account_id, name: fromAccount, options: allAccounts }));
+          if ("report" in out) return out.report;
+          fromAccountId = out.id;
         }
-        if (toAccount) {
-          const acct = fuzzyFind(toAccount, allAccounts);
-          if (!acct) return err(`Destination account "${toAccount}" not found.`);
-          toAccountId = Number(acct.id);
+        if (toAccount || to_account_id != null) {
+          const out = resolveOrReport("toAccount", resolveEntity({ entity: "account", id: to_account_id, name: toAccount, options: allAccounts }));
+          if ("report" in out) return out.report;
+          toAccountId = out.id;
         }
       }
 
@@ -1603,73 +1867,213 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           message: `Transfer updated (linkId ${result.linkId})`,
         },
       });
-    }
+  }
+
+
+  // ── delete — lifted VERBATIM from delete_transfer (withConfirmation) ───────
+  // FINLYNQ-264 Phase 1 (tier-1 — flagship tc-1 case): `delete_transfer`
+  // removes BOTH legs (≥2 rows, irreversible), so it REQUIRES the
+  // preview→confirmation-token two-step via the shared `withConfirmation`
+  // middleware. A bare call reads both legs and returns
+  // `{ preview, summary, confirmationToken }` WITHOUT deleting; passing the
+  // token commits the identical `deleteTransferPair` body. The token payload
+  // binds the resolved link_id so it can't be replayed against another pair.
+  // Built ONCE; reused by the manage_transfers op=delete dispatcher + the
+  // delete_transfer alias.
+  const deleteTransferHandler = withConfirmation<{ linkId?: string; transactionId?: number; confirmation_token?: string }>(userId, {
+      operation: "delete_transfer",
+      // Payload binds the resolved identity — normalize the two inputs so the
+      // same pair hashes identically whether the caller passed linkId or a leg
+      // id at preview vs commit.
+      tokenPayload: ({ linkId, transactionId }) => ({
+        linkId: linkId ?? null,
+        transactionId: transactionId ?? null,
+      }),
+      preview: async ({ linkId, transactionId }) => {
+        if (linkId == null && transactionId == null) {
+          throw new PreviewAbortError("Either linkId or transactionId is required");
+        }
+        // Resolve the pair's link_id (read-only) from either input.
+        const seedRows = linkId != null
+          ? await q(db, sql`SELECT link_id FROM transactions WHERE user_id = ${userId} AND link_id = ${linkId} LIMIT 1`)
+          : await q(db, sql`SELECT link_id FROM transactions WHERE user_id = ${userId} AND id = ${transactionId}`);
+        if (!seedRows.length || !seedRows[0].link_id) {
+          throw new PreviewAbortError("No transfer pair found for the given linkId/transactionId");
+        }
+        const resolvedLinkId = String(seedRows[0].link_id);
+        // Read both legs + their account names for the human-readable summary.
+        const legRows = await q(db, sql`
+          SELECT t.id, t.amount, t.currency, t.date, t.payee, a.name_ct AS account_ct
+          FROM transactions t
+          LEFT JOIN accounts a ON a.id = t.account_id
+          WHERE t.user_id = ${userId} AND t.link_id = ${resolvedLinkId}
+          ORDER BY t.amount
+        `);
+        const legs = legRows.map((r) => ({
+          id: Number(r.id),
+          amount: Number(r.amount),
+          currency: r.currency,
+          date: r.date,
+          payee: dek ? (decryptField(dek, String(r.payee ?? "")) ?? "") : r.payee,
+          account: r.account_ct && dek ? decryptField(dek, String(r.account_ct)) : null,
+        }));
+        return { linkId: resolvedLinkId, deletedCount: legs.length, legs };
+      },
+      commit: async ({ linkId, transactionId }) => {
+        // Existing destructive body — verbatim. deleteTransferPair reverses
+        // both legs' lots then single-statement DELETEs on link_id, and calls
+        // invalidateUser itself.
+        const result = await deleteTransferPair({ userId, linkId, transactionId });
+        if (!result.ok) return err(result.message);
+        return text({
+          success: true,
+          data: {
+            linkId: result.linkId,
+            deletedCount: result.deletedCount,
+            message: `Transfer deleted (${result.deletedCount} rows)`,
+          },
+        });
+      },
+    });
+
+  // ── consolidated tool: manage_transfers + hidden back-compat aliases ───────
+  registerManageTool(
+    server,
+    "manage_transfers",
+    "Manage transfers between two of the user's accounts: `op` selects record / update / delete. record: create BOTH legs atomically (shared link_id; cash, cross-currency via `receivedAmount`, or in-kind via `holding`+`quantity`). update: change both legs of a pair (by linkId OR either leg's transactionId). delete: TWO-STEP — remove BOTH legs (preview + token, then commit). For brokerage moves use the portfolio_* tools.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("record"),
+        fromAccount: z.string().optional().describe("Source account name or alias — fuzzy matched against name, exact on alias. PREFER `from_account_id` when known; rejects low-confidence matches. Required if `from_account_id` is not provided."),
+        toAccount: z.string().optional().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances when `holding`+`destHolding` are set; same-account cash-only transfers are rejected. PREFER `to_account_id`."),
+        from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Exact routing. Wins over `fromAccount`."),
+        to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Exact routing. Wins over `toAccount`."),
+        amount: z.number().nonnegative().describe("Cash amount sent, in the SOURCE account's currency. > 0 for cash; 0 only allowed with `holding`+`quantity` (pure in-kind)."),
+        date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
+        receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: amount that landed in DESTINATION's currency. Locks FX to receivedAmount/amount. Ignored for same-currency."),
+        holding: z.string().optional().describe("Source-side holding name for an in-kind transfer. MUST exist in fromAccount. Pair with `quantity`."),
+        destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding` (auto-created in toAccount). Set only when the destination uses a different label."),
+        quantity: z.number().positive().optional().describe("Positive share count LEAVING source. Required when `holding` is set."),
+        destQuantity: z.number().positive().optional().describe("Positive share count ARRIVING at destination. Defaults to `quantity`. Set when source/dest counts differ (split/merger)."),
+        note: z.string().optional().describe("Optional note applied to BOTH legs"),
+        tags: z.string().optional().describe("Optional comma-separated tags applied to BOTH legs"),
+      }),
+      z.object({
+        op: z.literal("update"),
+        linkId: z.string().optional().describe("UUID link_id shared by the pair. Either this OR transactionId is required."),
+        transactionId: z.number().int().optional().describe("Any one transaction id from the pair; helper resolves the other side."),
+        fromAccount: z.string().optional().describe("New source account name or alias (mistyped/unmatched is REFUSED; 2+ → ambiguous). Re-runs FX if currency changes. PREFER `from_account_id`."),
+        toAccount: z.string().optional().describe("New destination account name or alias (mistyped/unmatched is REFUSED; 2+ → ambiguous). PREFER `to_account_id`."),
+        from_account_id: z.number().int().positive().optional().describe("New source account FK — wins over the fuzzy `fromAccount` name."),
+        to_account_id: z.number().int().positive().optional().describe("New destination account FK — wins over the fuzzy `toAccount` name."),
+        amount: z.number().nonnegative().optional().describe("New amount sent (source currency); 0 only allowed when in-kind side is set."),
+        date: ymdDate.optional().describe("New date (YYYY-MM-DD); applied to both legs."),
+        receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override; rebuilds the destination leg's amount + locked FX rate."),
+        holding: z.string().optional().describe("(Re)bind the in-kind source-side to this holding name. Pair with `quantity`."),
+        destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding`. Use when destination uses a different label."),
+        quantity: z.number().positive().optional().describe("Positive share count LEAVING source when (re)binding the in-kind side."),
+        destQuantity: z.number().positive().optional().describe("Positive share count ARRIVING at destination. Defaults to `quantity`. Set when source/dest counts differ (split, merger)."),
+        holdingClear: z.boolean().optional().describe("Set true to clear the in-kind side and turn the row back into a pure cash transfer."),
+        note: z.string().optional().describe("New note applied to both legs."),
+        tags: z.string().optional().describe("New tags applied to both legs."),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        linkId: z.string().optional().describe("UUID link_id shared by the pair. Either this OR transactionId is required."),
+        transactionId: z.number().int().optional().describe("Any one transaction id from the pair."),
+        confirmation_token: z.string().optional().describe("Omit to preview both legs; pass the preview's token to commit. Single-use, 5-min TTL."),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "record":
+          return opTransferRecord(input);
+        case "update":
+          return opTransferUpdate(input);
+        case "delete":
+          return deleteTransferHandler(input);
+      }
+    },
   );
 
-
-  // ── delete_transfer ────────────────────────────────────────────────────────
-  server.tool(
+  registerAlias(
+    server,
+    "record_transfer",
+    "Record a transfer between two of the user's accounts. Creates BOTH legs (debit source, credit destination) atomically with a shared link_id so they show as a paired transfer. PREFER `from_account_id` / `to_account_id` (exact) over name; weak substring name matches are REJECTED with a 'did you mean…' error rather than routing the pair to the wrong account. Auto-creates a Transfer category (type='R') if missing. Supports cash transfers, cross-currency (pass `receivedAmount` to lock the landed amount), and in-kind/holding transfers (pass `holding` + `quantity` to move shares; `amount` may be 0). Both holdings must already exist in their accounts. Same-account forex (two cash sleeves with divergent ISO-4217 name suffixes, e.g. 'Cash - USD' → 'Cash - CAD') honors `receivedAmount` for the destination leg. For brokerage moves use the portfolio_* tools.",
+    {
+      fromAccount: z.string().optional().describe("Source account name or alias — fuzzy matched against name, exact on alias. PREFER `from_account_id` when known; this name path rejects low-confidence matches rather than guessing. Required if `from_account_id` is not provided."),
+      toAccount: z.string().optional().describe("Destination account name or alias. Same as fromAccount is allowed for intra-account in-kind rebalances (e.g. cash sleeve ↔ symbol holding, or a different-currency cash sleeve) when `holding` and `destHolding` are also set; same-account cash-only transfers are rejected. PREFER `to_account_id` when known. Required if `to_account_id` is not provided."),
+      from_account_id: z.number().int().optional().describe("Source account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `fromAccount` are passed, this wins."),
+      to_account_id: z.number().int().optional().describe("Destination account FK (accounts.id). Skips fuzzy matching entirely; always routes to the exact account. Recommended when known. If both this and `toAccount` are passed, this wins."),
+      amount: z.number().nonnegative().describe("Cash amount the user sent, in the SOURCE account's currency. > 0 for cash transfers; 0 is allowed only when `holding` + `quantity` are also set (pure in-kind transfer)."),
+      date: ymdDate.optional().describe("YYYY-MM-DD (default: today)"),
+      receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override: actual amount that landed in the destination account, in DESTINATION's currency. When set, FX rate is locked to receivedAmount/amount. Ignored for same-currency transfers."),
+      holding: z.string().optional().describe("Source-side holding name for an in-kind (share) transfer. MUST already exist in fromAccount. Pair with `quantity`."),
+      destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding` (auto-created in toAccount if missing). Set this only when the destination uses a different label for the same instrument (e.g. source 'Gold Ounce' → dest 'Au Bullion')."),
+      quantity: z.number().positive().optional().describe("Positive share count LEAVING source (the source row gets the negative). Required when `holding` is set."),
+      destQuantity: z.number().positive().optional().describe("Positive share count ARRIVING at destination. Defaults to `quantity`. Set when source/dest counts differ — stock split (10 → 30), reverse split (30 → 10), merger or share-class conversion (100 of X → 60 of Y)."),
+      note: z.string().optional().describe("Optional note applied to BOTH legs"),
+      tags: z.string().optional().describe("Optional comma-separated tags applied to BOTH legs"),
+    },
+    async (args) => opTransferRecord(args),
+  );
+  registerAlias(
+    server,
+    "update_transfer",
+    "Update both legs of an existing transfer pair atomically. Identify the pair by linkId OR by either leg's transaction id. Refuses if the targeted rows don't form a clean transfer pair. To (re)bind the in-kind side, pass `holding` + `quantity` together; to clear it (turn the row back into a pure cash transfer), pass `holdingClear: true`. Omit all three to leave the in-kind side untouched.",
+    {
+      linkId: z.string().optional().describe("UUID link_id shared by the pair. Either this OR transactionId is required."),
+      transactionId: z.number().int().optional().describe("Any one transaction id from the pair; helper resolves the other side."),
+      fromAccount: z.string().optional().describe("New source account name or alias (mistyped/unmatched is REFUSED; 2+ → ambiguous). Re-runs FX if currency changes. PREFER `from_account_id`."),
+      toAccount: z.string().optional().describe("New destination account name or alias (mistyped/unmatched is REFUSED; 2+ → ambiguous). PREFER `to_account_id`."),
+      from_account_id: z.number().int().positive().optional().describe("New source account FK — wins over the fuzzy `fromAccount` name."),
+      to_account_id: z.number().int().positive().optional().describe("New destination account FK — wins over the fuzzy `toAccount` name."),
+      amount: z.number().nonnegative().optional().describe("New amount sent (source currency); 0 only allowed when in-kind side is set."),
+      date: ymdDate.optional().describe("New date (YYYY-MM-DD); applied to both legs."),
+      receivedAmount: z.number().nonnegative().optional().describe("Cross-currency override; rebuilds the destination leg's amount + locked FX rate."),
+      holding: z.string().optional().describe("(Re)bind the in-kind source-side to this holding name. Pair with `quantity`."),
+      destHolding: z.string().optional().describe("Destination-side holding name. Defaults to `holding`. Use when destination uses a different label."),
+      quantity: z.number().positive().optional().describe("Positive share count LEAVING source when (re)binding the in-kind side."),
+      destQuantity: z.number().positive().optional().describe("Positive share count ARRIVING at destination. Defaults to `quantity`. Set when source/dest counts differ (split, merger)."),
+      holdingClear: z.boolean().optional().describe("Set true to clear the in-kind side and turn the row back into a pure cash transfer."),
+      note: z.string().optional().describe("New note applied to both legs."),
+      tags: z.string().optional().describe("New tags applied to both legs."),
+    },
+    async (args) => opTransferUpdate(args),
+  );
+  registerAlias(
+    server,
     "delete_transfer",
-    "Permanently delete BOTH legs of a transfer pair in a single statement. Identify by linkId OR by either leg's id. Refuses if the rows don't form a clean transfer pair — use delete_transaction per-leg for non-symmetric multi-leg imports.",
+    "Permanently delete BOTH legs of a transfer pair. Identify by linkId OR by either leg's id. Two-step (destructive): first call returns a preview of BOTH legs (payee/amount/account) + a confirmationToken (single-use, 5-min TTL) and deletes NOTHING; call again with the token to commit. Refuses if the rows don't form a clean transfer pair — use delete_transaction per-leg for non-symmetric multi-leg imports.",
     {
       linkId: z.string().optional().describe("UUID link_id shared by the pair. Either this OR transactionId is required."),
       transactionId: z.number().int().optional().describe("Any one transaction id from the pair."),
+      confirmation_token: z.string().optional().describe("Omit to preview both legs; pass the preview's token to commit. Single-use, 5-min TTL."),
     },
-    async ({ linkId, transactionId }) => {
-      if (linkId == null && transactionId == null) return err("Either linkId or transactionId is required");
-      const result = await deleteTransferPair({ userId, linkId, transactionId });
-      if (!result.ok) return err(result.message);
-      return text({
-        success: true,
-        data: {
-          linkId: result.linkId,
-          deletedCount: result.deletedCount,
-          message: `Transfer deleted (${result.deletedCount} rows)`,
-        },
-      });
-    }
+    async (args) => deleteTransferHandler(args),
   );
 
 
-  // ── delete_budget ──────────────────────────────────────────────────────────
-  server.tool(
+  // ── delete_budget (hidden alias → manage_budgets op=delete) ────────────────
+  registerAlias(
+    server,
     "delete_budget",
     "Delete a budget entry for a category/month",
     {
-      category: z.string().describe("Category name"),
+      category: z.string().optional().describe("Category name (mistyped/unmatched is REFUSED). Pass this OR `category_id`."),
+      category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
       month: ymPeriod.describe("Month (YYYY-MM)"),
     },
-    async ({ category, month }) => {
-      // Issue #211 (Bug a): the SELECT only returns `name_ct` (encrypted)
-      // after Stream D Phase 4. Without `decryptNameish`, `fuzzyFind` runs
-      // against ciphertext and never matches — so `cat` was always null
-      // and `delete_budget` was a tool outage for every caller.
-      if (!dek) return err("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4).");
-      const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
-      const allCats = decryptNameish(rawCats, dek);
-      const cat = fuzzyFind(category, allCats);
-      if (!cat) {
-        return err(`Category "${category}" not found. Did you mean: ${suggestionList(category, allCats)}?`);
-      }
-
-      const existing = await q(db, sql`SELECT id FROM budgets WHERE user_id = ${userId} AND category_id = ${cat.id} AND month = ${month}`);
-      if (!existing.length) return err(`No budget found for "${cat.name}" in ${month}`);
-
-      await db.execute(sql`DELETE FROM budgets WHERE id = ${existing[0].id} AND user_id = ${userId}`);
-      // Issue #211: budgets are per-tx-cache-irrelevant but invalidate for
-      // any future budget-aware tx surface.
-      invalidateUserTxCache(userId);
-      return text({ success: true, data: { message: `Budget deleted: ${cat.name} for ${month}` } });
-    }
+    async (args) => opBudgetDelete(args),
   );
 
 
-  // ── list_splits ───────────────────────────────────────────────────────────
-  server.tool(
-    "list_splits",
-    "List all splits for a transaction. Decrypts note/description/tags in memory when a DEK is available.",
-    { transaction_id: z.number().describe("Parent transaction id") },
-    async ({ transaction_id }) => {
+  // ── manage_splits op handlers (lifted VERBATIM) ────────────────────────────
+  // FINLYNQ-263 phase 3 — list/add/update/delete/replace_splits folded into
+  // manage_splits (op discriminator). Bodies byte-identical; old names stay
+  // hidden aliases.
+  async function opSplitList(args: { transaction_id: number }): Promise<ToolResult> {
+      const { transaction_id } = args;
       const owner = await q(db, sql`SELECT id FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
       if (!owner.length) return err(`Transaction #${transaction_id} not found`);
       // Stream D Phase 4: c.name + a.name dropped — read *_ct only.
@@ -1702,24 +2106,18 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
         };
       });
       return text({ success: true, data: decrypted });
-    }
-  );
+  }
 
-
-  // ── add_split ─────────────────────────────────────────────────────────────
-  server.tool(
-    "add_split",
-    "Add a single split to an existing transaction",
-    {
-      transaction_id: z.number().describe("Parent transaction id"),
-      category_id: z.number().optional().describe("Category id (split into this category)"),
-      account_id: z.number().optional().describe("Account id (rare — override parent account)"),
-      amount: z.number().describe("Split amount (same sign convention as parent)"),
-      note: z.string().optional(),
-      description: z.string().optional(),
-      tags: z.string().optional(),
-    },
-    async ({ transaction_id, category_id, account_id, amount, note, description, tags }) => {
+  async function opSplitAdd(args: {
+    transaction_id: number;
+    category_id?: number;
+    account_id?: number;
+    amount: number;
+    note?: string;
+    description?: string;
+    tags?: string;
+  }): Promise<ToolResult> {
+      const { transaction_id, category_id, account_id, amount, note, description, tags } = args;
       const owner = await q(db, sql`SELECT id FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
       if (!owner.length) return err(`Transaction #${transaction_id} not found`);
 
@@ -1734,24 +2132,18 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       `);
       invalidateUserTxCache(userId);
       return text({ success: true, data: { id: Number(result[0]?.id), message: `Split added to txn #${transaction_id}` } });
-    }
-  );
+  }
 
-
-  // ── update_split ──────────────────────────────────────────────────────────
-  server.tool(
-    "update_split",
-    "Update fields of an existing split",
-    {
-      split_id: z.number().describe("Split id"),
-      category_id: z.number().nullable().optional(),
-      account_id: z.number().nullable().optional(),
-      amount: z.number().optional(),
-      note: z.string().optional(),
-      description: z.string().optional(),
-      tags: z.string().optional(),
-    },
-    async ({ split_id, category_id, account_id, amount, note, description, tags }) => {
+  async function opSplitUpdate(args: {
+    split_id: number;
+    category_id?: number | null;
+    account_id?: number | null;
+    amount?: number;
+    note?: string;
+    description?: string;
+    tags?: string;
+  }): Promise<ToolResult> {
+      const { split_id, category_id, account_id, amount, note, description, tags } = args;
       // Ownership: split → txn → user
       const owner = await q(db, sql`
         SELECT s.id FROM transaction_splits s
@@ -1781,46 +2173,41 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       await db.execute(sql`UPDATE transaction_splits SET ${sql.join(updates, sql`, `)} WHERE id = ${split_id}`);
       invalidateUserTxCache(userId);
       return text({ success: true, data: { id: split_id, message: `Split #${split_id} updated (${updates.length} field(s))` } });
-    }
-  );
+  }
 
-
-  // ── delete_split ──────────────────────────────────────────────────────────
-  server.tool(
-    "delete_split",
-    "Delete a split by id",
-    { split_id: z.number().describe("Split id") },
-    async ({ split_id }) => {
+  // FINLYNQ-264 Phase 2 (tier-2): OPTIONAL `expected` amount echo — the
+  // round-trip-free hallucinated-id guard. A split carries no payee, so only
+  // `amount` is echoable. Omitting `expected` still deletes (back-compat).
+  async function opSplitDelete(args: {
+    split_id: number;
+    expected?: { amount?: number };
+  }): Promise<ToolResult> {
+      const { split_id, expected } = args;
       const owner = await q(db, sql`
-        SELECT s.id FROM transaction_splits s
+        SELECT s.id, s.amount FROM transaction_splits s
         JOIN transactions t ON t.id = s.transaction_id
         WHERE s.id = ${split_id} AND t.user_id = ${userId}
       `);
       if (!owner.length) return err(`Split #${split_id} not found`);
+      const mismatch = checkExpectedEcho(expected, { amount: Number(owner[0].amount) }, `split #${split_id}`);
+      if (mismatch) return err(mismatch);
       await db.execute(sql`DELETE FROM transaction_splits WHERE id = ${split_id}`);
       invalidateUserTxCache(userId);
       return text({ success: true, data: { id: split_id, message: `Split #${split_id} deleted` } });
-    }
-  );
+  }
 
-
-  // ── replace_splits ────────────────────────────────────────────────────────
-  server.tool(
-    "replace_splits",
-    "Atomically replace all splits on a transaction. Validates the splits sum equals the parent transaction amount (±$0.01).",
-    {
-      transaction_id: z.number().describe("Parent transaction id"),
-      splits: z.array(z.object({
-        category_id: z.number().nullable().optional(),
-        account_id: z.number().nullable().optional(),
-        amount: z.number(),
-        note: z.string().optional(),
-        description: z.string().optional(),
-        tags: z.string().optional(),
-      })).min(1).describe("New set of splits (replaces all existing)"),
-    },
-    { title: "Replace Splits", destructiveHint: true, idempotentHint: true },
-    async ({ transaction_id, splits }) => {
+  async function opSplitReplace(args: {
+    transaction_id: number;
+    splits: Array<{
+      category_id?: number | null;
+      account_id?: number | null;
+      amount: number;
+      note?: string;
+      description?: string;
+      tags?: string;
+    }>;
+  }): Promise<ToolResult> {
+      const { transaction_id, splits } = args;
       const owner = await q(db, sql`SELECT id, amount FROM transactions WHERE id = ${transaction_id} AND user_id = ${userId}`);
       if (!owner.length) return err(`Transaction #${transaction_id} not found`);
       const parentAmount = Number(owner[0].amount);
@@ -1847,7 +2234,139 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       }
       invalidateUserTxCache(userId);
       return text({ success: true, data: { transactionId: transaction_id, replacedWith: insertedIds.length, splitIds: insertedIds } });
-    }
+  }
+
+  // ── consolidated tool: manage_splits + hidden back-compat aliases ──────────
+  registerManageTool(
+    server,
+    "manage_splits",
+    "Manage transaction splits: `op` selects list / add / update / delete / replace. list: all splits for a transaction. add: one split. update: change a split's fields by id. delete: remove a split by id (optional `expected.amount` echo guards a mis-copied id). replace: atomically replace ALL splits on a transaction (must sum to the parent amount ±$0.01).",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("list"),
+        transaction_id: z.number().describe("Parent transaction id"),
+      }),
+      z.object({
+        op: z.literal("add"),
+        transaction_id: z.number().describe("Parent transaction id"),
+        category_id: z.number().optional().describe("Category id (split into this category)"),
+        account_id: z.number().optional().describe("Account id (rare — override parent account)"),
+        amount: z.number().describe("Split amount (same sign convention as parent)"),
+        note: z.string().optional(),
+        description: z.string().optional(),
+        tags: z.string().optional(),
+      }),
+      z.object({
+        op: z.literal("update"),
+        split_id: z.number().describe("Split id"),
+        category_id: z.number().nullable().optional(),
+        account_id: z.number().nullable().optional(),
+        amount: z.number().optional(),
+        note: z.string().optional(),
+        description: z.string().optional(),
+        tags: z.string().optional(),
+      }),
+      z.object({
+        op: z.literal("delete"),
+        split_id: z.number().describe("Split id"),
+        expected: z.object({
+          amount: z.number().optional().describe("The amount you believe this split has (±0.01)."),
+        }).optional().describe("Optional row-content echo. If present and it doesn't match the stored split, the delete is refused."),
+      }),
+      z.object({
+        op: z.literal("replace"),
+        transaction_id: z.number().describe("Parent transaction id"),
+        splits: z.array(z.object({
+          category_id: z.number().nullable().optional(),
+          account_id: z.number().nullable().optional(),
+          amount: z.number(),
+          note: z.string().optional(),
+          description: z.string().optional(),
+          tags: z.string().optional(),
+        })).min(1).describe("New set of splits (replaces all existing)"),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "list":
+          return opSplitList(input);
+        case "add":
+          return opSplitAdd(input);
+        case "update":
+          return opSplitUpdate(input);
+        case "delete":
+          return opSplitDelete(input);
+        case "replace":
+          return opSplitReplace(input);
+      }
+    },
+  );
+
+  registerAlias(
+    server,
+    "list_splits",
+    "List all splits for a transaction. Decrypts note/description/tags in memory when a DEK is available.",
+    { transaction_id: z.number().describe("Parent transaction id") },
+    async (args) => opSplitList(args),
+  );
+  registerAlias(
+    server,
+    "add_split",
+    "Add a single split to an existing transaction",
+    {
+      transaction_id: z.number().describe("Parent transaction id"),
+      category_id: z.number().optional().describe("Category id (split into this category)"),
+      account_id: z.number().optional().describe("Account id (rare — override parent account)"),
+      amount: z.number().describe("Split amount (same sign convention as parent)"),
+      note: z.string().optional(),
+      description: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async (args) => opSplitAdd(args),
+  );
+  registerAlias(
+    server,
+    "update_split",
+    "Update fields of an existing split",
+    {
+      split_id: z.number().describe("Split id"),
+      category_id: z.number().nullable().optional(),
+      account_id: z.number().nullable().optional(),
+      amount: z.number().optional(),
+      note: z.string().optional(),
+      description: z.string().optional(),
+      tags: z.string().optional(),
+    },
+    async (args) => opSplitUpdate(args),
+  );
+  registerAlias(
+    server,
+    "delete_split",
+    "Delete a split by id. RECOMMENDED: pass `expected.amount` (the amount you believe this split has) — a mismatch refuses the delete, guarding against a mis-copied id. Omitting `expected` still deletes (back-compat).",
+    {
+      split_id: z.number().describe("Split id"),
+      expected: z.object({
+        amount: z.number().optional().describe("The amount you believe this split has (±0.01)."),
+      }).optional().describe("Optional row-content echo. If present and it doesn't match the stored split, the delete is refused."),
+    },
+    async (args) => opSplitDelete(args),
+  );
+  registerAlias(
+    server,
+    "replace_splits",
+    "Atomically replace all splits on a transaction. Validates the splits sum equals the parent transaction amount (±$0.01).",
+    {
+      transaction_id: z.number().describe("Parent transaction id"),
+      splits: z.array(z.object({
+        category_id: z.number().nullable().optional(),
+        account_id: z.number().nullable().optional(),
+        amount: z.number(),
+        note: z.string().optional(),
+        description: z.string().optional(),
+        tags: z.string().optional(),
+      })).min(1).describe("New set of splits (replaces all existing)"),
+    },
+    async ({ transaction_id, splits }) => opSplitReplace({ transaction_id, splits }),
   );
 
 
@@ -2215,7 +2734,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     // can't widen the scope between preview and execute. We sign the
     // user-supplied `changes` (not the resolved form) so the execute caller
     // can pass the same payload back unchanged; execute re-runs resolution.
-    const token = signConfirmationToken(userId, op, { ids, changes });
+    const token = signPreviewToken(userId, op, { ids, changes });
     return { affectedCount: ids.length, sampleBefore: before, sampleAfter: after, unappliedChanges: unapplied, ids, confirmationToken: token };
   }
 
@@ -2334,7 +2853,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     async ({ filter, changes, confirmation_token }) => {
       try {
         const ids = await resolveFilterToIds(filter);
-        const check = verifyConfirmationToken(confirmation_token, userId, "bulk_update", { ids, changes });
+        const check = verifyPreviewToken(confirmation_token, userId, "bulk_update", { ids, changes });
         if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_update.`);
 
         // Issue #61: resolve names → ids HERE so the commit only ever writes
@@ -2399,7 +2918,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
           };
         });
         const sample = rows.map((r) => decryptTxRowFields(dek, r as Record<string, unknown>));
-        const token = signConfirmationToken(userId, "bulk_delete", { ids });
+        const token = signPreviewToken(userId, "bulk_delete", { ids });
         return text({ success: true, data: { affectedCount: ids.length, sample, confirmationToken: token } });
       } catch (e) {
         return err(String(e instanceof Error ? e.message : e));
@@ -2419,7 +2938,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
     async ({ filter, confirmation_token }) => {
       try {
         const ids = await resolveFilterToIds(filter);
-        const check = verifyConfirmationToken(confirmation_token, userId, "bulk_delete", { ids });
+        const check = verifyPreviewToken(confirmation_token, userId, "bulk_delete", { ids });
         if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_delete.`);
         if (ids.length === 0) return text({ success: true, data: { deleted: 0 } });
         // Defense-in-depth: parameterized ANY(ARRAY[...]::int[]) instead of CSV.
@@ -2482,7 +3001,7 @@ export function registerTransactionsTools(server: McpServer, ctx: PgToolContext)
       try {
         const ids = await resolveFilterToIds(filter);
         const changes: BulkChanges = { category_id };
-        const check = verifyConfirmationToken(confirmation_token, userId, "bulk_categorize", { ids, changes });
+        const check = verifyPreviewToken(confirmation_token, userId, "bulk_categorize", { ids, changes });
         if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_bulk_categorize.`);
         // Issue #61: commit takes the resolved shape now. category_id is
         // already an int so resolution is a no-op for this code path.

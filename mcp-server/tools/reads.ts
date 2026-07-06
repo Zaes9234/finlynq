@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   q,
   err,
+  text,
   dataResponse,
   decryptNameish,
   PORTFOLIO_DISCLAIMER,
@@ -55,9 +56,6 @@ import {
   applyInvestmentMarketOverlay,
 } from "../investment-balance-overlay";
 import {
-  computeGoalProgress,
-} from "../../src/lib/goals-progress";
-import {
   ymdDate,
   ymPeriod,
 } from "../lib/date-validators";
@@ -69,6 +67,9 @@ import {
 } from "../../src/lib/recurring-detection";
 import {
 } from "../../src/lib/loan-calculator";
+import {
+  registerAlias,
+} from "./_consolidate";
 
 export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek } = ctx;
@@ -76,12 +77,13 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_account_balances ───────────────────────────────────────────────────
   server.tool(
     "get_account_balances",
-    "Get current balances for all accounts. Each account's balance is in its own (account) currency. INVESTMENT accounts are valued at MARKET (current `holdings.value`, cash sleeve included), matching the web dashboard — but only on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key (no key) investment accounts fall back to ledger (net contributions = SUM(transactions.amount)) and a top-level `note` explains the fallback. Each account row carries `isInvestment` and `balanceBasis` ('market'|'ledger'); market-valued rows also carry `costBasis` and `cashFlowBasis` (the underlying tx-sum). When reportingCurrency is set, also returns a unified total converted to that currency. Default reporting = user's display currency.",
+    "Get current balances for all accounts. Each account's balance is in its own (account) currency. INVESTMENT accounts are valued at MARKET (current `holdings.value`, cash sleeve included), matching the web dashboard — but only on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key (no key) investment accounts fall back to ledger (net contributions = SUM(transactions.amount)) and a top-level `note` explains the fallback. Each account row carries `isInvestment` and `basis` ('market'|'ledger'; `balanceBasis` kept as a deprecated alias through v4.1); market-valued rows also carry `asOf`, `costBasis`, and `cashFlowBasis` (the underlying tx-sum). Pass `basis:'ledger'` to force ledger (net-contribution) valuation for every account. When reportingCurrency is set, also returns a unified total converted to that currency. Default reporting = user's display currency.",
     {
       currency: z.string().optional().describe("Filter rows by currency (ISO code, e.g. USD/CAD/EUR; omit or 'all' for every currency)"),
       reportingCurrency: z.string().optional().describe("ISO code (USD/CAD/EUR/...) — if set, response includes per-account converted balance + a grand total in this currency. Defaults to user's display currency."),
+      basis: z.enum(["market", "ledger"]).optional().describe("Valuation basis override. Default 'market' (investment accounts at market value when a decryption key is present). 'ledger' forces net-contribution (SUM of transactions) valuation for every account."),
     },
-    async ({ currency, reportingCurrency }) => {
+    async ({ currency, reportingCurrency, basis }) => {
       const raw = await q(db, sql`
         SELECT a.id, a.name_ct, a.alias_ct, a.type, a."group", a.currency,
                a.is_investment,
@@ -108,16 +110,27 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       // ledger numbers + a note instead. The Issue #210 `items` array MUST be
       // fed from the OVERLAID balances so `totalReporting` ties to
       // `get_net_worth.total.net.amount` on identical state.
-      const overlay = await applyInvestmentMarketOverlay(
-        raw.map((r, i) => ({
-          id: Number(r.id),
-          currency: String(decrypted[i].currency),
-          isInvestment: r.is_investment === true,
-          ledgerBalance: Number(r.balance),
-        })),
-        dek,
-        () => getHoldingsValueByAccount(userId, dek),
-      );
+      // FINLYNQ-268 decision 5: a `basis:'ledger'` override forces net-
+      // contribution valuation for every account (skips the market overlay
+      // WITHOUT the misleading no-DEK note). Otherwise (default 'market') the
+      // overlay applies market to investment rows when a DEK is present.
+      const overlayRows = raw.map((r, i) => ({
+        id: Number(r.id),
+        currency: String(decrypted[i].currency),
+        isInvestment: r.is_investment === true,
+        ledgerBalance: Number(r.balance),
+      }));
+      const overlay = basis === "ledger"
+        ? {
+            rows: overlayRows.map((r) => ({ ...r, balance: r.ledgerBalance, balanceBasis: "ledger" as const })),
+            marketApplied: false,
+            note: undefined as string | undefined,
+          }
+        : await applyInvestmentMarketOverlay(
+            overlayRows,
+            dek,
+            () => getHoldingsValueByAccount(userId, dek),
+          );
 
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const today = new Date().toISOString().split("T")[0];
@@ -151,13 +164,17 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           balanceTagged: tagAmount(rawBalance, ccy, "account"),
           balanceReporting: tagAmount(reportingAmount, reporting, "reporting"),
           isInvestment: ov.isInvestment,
+          // FINLYNQ-268: uniform `basis` field; `balanceBasis` retained as a
+          // deprecated alias through v4.1 (dual-emit, decision 2).
+          basis: ov.balanceBasis,
           balanceBasis: ov.balanceBasis,
         };
         if (ov.balanceBasis === "market") {
-          // Market-valued investment rows: surface the remaining cost basis
-          // and the net-contribution figure (the underlying tx-sum) so the
-          // contribution number stays reachable. Field name mirrors the
-          // dashboard's `cashFlowBasis`.
+          // Market-valued investment rows: surface `asOf` (basis === 'market'),
+          // the remaining cost basis, and the net-contribution figure (the
+          // underlying tx-sum) so the contribution number stays reachable.
+          // Field name mirrors the dashboard's `cashFlowBasis`.
+          out.asOf = today;
           out.costBasis = tagAmount(ov.costBasis ?? 0, ccy, "account");
           out.cashFlowBasis = tagAmount(roundMoney(ov.ledgerBalance, ccy), ccy, "account");
         }
@@ -316,7 +333,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           category: category_ct && dek ? decryptField(dek, category_ct) : null,
         };
       });
-      return dataResponse({ rows, reportingCurrency: reporting });
+      // FINLYNQ-268 (phase 4, flow axis): budget figures are cash-flow totals
+      // (SUM(transactions.amount) vs budget), not portfolio valuation.
+      return dataResponse({ rows, reportingCurrency: reporting, basis: "cash_flow" });
     }
   );
 
@@ -419,6 +438,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         reportingCurrency: reporting,
         priorMonths: lookback,
         currentMonth: currentMonthStr,
+        // FINLYNQ-268 (phase 4, flow axis): spending trends are cash-flow
+        // aggregates (SUM(transactions.amount)), not portfolio valuation.
+        basis: "cash_flow",
       });
     }
   );
@@ -472,6 +494,11 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       return dataResponse({
         rows,
         reportingCurrency: reporting,
+        // FINLYNQ-268 (phase 4, flow axis): the statement's primary money
+        // figures are cash-flow income/expense totals (SUM(transactions.amount)
+        // over the period). The nested `unrealized` block self-labels each
+        // account's `valuationGLBasis`; the top-level basis scopes the flows.
+        basis: "cash_flow",
         unrealized: {
           // Issue #208 — round all totals and per-account fields at the
           // response shape; the helpers themselves keep full precision so
@@ -525,14 +552,15 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   // ── get_net_worth ──────────────────────────────────────────────────────────
   server.tool(
     "get_net_worth",
-    "Net worth across all accounts. Returns per-currency assets/liabilities/net AND a unified total in the reporting currency (defaults to user's display currency). INVESTMENT accounts are valued at MARKET (current holdings value, cash sleeve included) on OAuth/built-in-chat connections that carry a decryption key; over a `pf_` API key they fall back to ledger (net contributions) with a top-level `note`. The current-totals response carries `basis` ('market'|'ledger'); `total.net.amount` equals `get_account_balances.totalReporting.amount` on identical state. Pass `priorMonths` > 0 for a month-by-month trend (current month plus N priors, `currentMonth` flagged) — the trend is ALWAYS contribution-basis (`basis: 'ledger'`), so its current-month row won't match a market-valued current-totals call. Omit `priorMonths` for current totals only. Legacy `months` param is a deprecated alias.",
+    "Net worth across all accounts. Returns per-currency assets/liabilities/net + a unified reporting-currency total (default: the user's display currency). INVESTMENT accounts value at MARKET (holdings value incl. cash sleeve) on OAuth/built-in-chat connections with a decryption key; a `pf_` API key falls back to ledger (net contributions) with a top-level `note`. Current totals carry `basis` ('market'|'ledger') plus `asOf` when 'market'; `total.net.amount` equals `get_account_balances.totalReporting.amount` on identical state. Pass `basis:'ledger'` to force contribution valuation. `priorMonths` > 0 returns a month-by-month trend (current month + N priors, `currentMonth` flagged), ALWAYS contribution-basis (`basis:'ledger'`) — its current-month row won't match a market current-totals call. Omit `priorMonths` for current totals. `months` is a deprecated alias.",
     {
       currency: z.string().optional().describe("Filter by currency (per-row ISO code, e.g. USD/CAD/EUR; omit or 'all' for every currency)"),
       priorMonths: z.number().optional().describe("If set, return a trend covering the current (partial) month plus N prior months. Omit or set to 0 for current totals."),
       months: z.number().optional().describe("DEPRECATED (issue #210) — alias for priorMonths. New callers should use priorMonths."),
       reportingCurrency: z.string().optional().describe("ISO code — unified total currency. Defaults to user's display currency."),
+      basis: z.enum(["market", "ledger"]).optional().describe("Valuation basis override for the CURRENT-totals response. Default 'market' (investment accounts at market value when a decryption key is present). 'ledger' forces net-contribution valuation. Ignored for the trend (priorMonths>0), which is always ledger."),
     },
-    async ({ currency, priorMonths, months, reportingCurrency }) => {
+    async ({ currency, priorMonths, months, reportingCurrency, basis }) => {
       const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
       const today = new Date().toISOString().split("T")[0];
       // Issue #210 — `priorMonths` is the new contract; `months` is a
@@ -565,16 +593,26 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         // Apply the identical market overlay get_account_balances uses. With a
         // DEK, investment accounts are valued at market; without one (pf_ API
         // key) they stay at ledger and `overlay.note` explains the fallback.
-        const overlay = await applyInvestmentMarketOverlay(
-          acctRows.map((r) => ({
-            id: Number(r.id),
-            currency: r.currency ?? "CAD",
-            isInvestment: r.is_investment === true,
-            ledgerBalance: Number(r.total),
-          })),
-          dek,
-          () => getHoldingsValueByAccount(userId, dek),
-        );
+        // FINLYNQ-268 decision 5: a `basis:'ledger'` override forces ledger for
+        // every account (skips the overlay), IDENTICALLY to get_account_balances
+        // so the #210 parity contract holds when the same override is passed.
+        const nwOverlayRows = acctRows.map((r) => ({
+          id: Number(r.id),
+          currency: r.currency ?? "CAD",
+          isInvestment: r.is_investment === true,
+          ledgerBalance: Number(r.total),
+        }));
+        const overlay = basis === "ledger"
+          ? {
+              rows: nwOverlayRows.map((r) => ({ ...r, balance: r.ledgerBalance, balanceBasis: "ledger" as const })),
+              marketApplied: false,
+              note: undefined as string | undefined,
+            }
+          : await applyInvestmentMarketOverlay(
+              nwOverlayRows,
+              dek,
+              () => getHoldingsValueByAccount(userId, dek),
+            );
 
         // Roll up per-currency assets/liabilities/net from the OVERLAID
         // per-account balances (+= so multiple accounts per currency sum).
@@ -627,6 +665,8 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           // contributions ('ledger', pf_ API key). `note` mirrors
           // get_account_balances.
           basis: overlay.marketApplied ? "market" : "ledger",
+          // FINLYNQ-268: `asOf` present iff basis === 'market'.
+          ...(overlay.marketApplied ? { asOf: today } : {}),
           total: {
             assets: tagAmount(aggAssets.totalReporting, reporting, "reporting"),
             liabilities: tagAmount(aggLiab.totalReporting, reporting, "reporting"),
@@ -712,76 +752,6 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   );
 
 
-  // ── get_goals ─────────────────────────────────────────────────────────────
-  server.tool("get_goals", "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking. Numeric progress fields (issue #233): `currentAmount` (in goal currency, summed across linked accounts using market value for investment accounts and SUM(amount) for cash accounts, FX-converted into goal currency), `progress` and `percentComplete` (0..100, 1dp), `remaining`, `monthlyNeeded` (when a deadline is set).", {}, async () => {
-    const goalsRaw = await q(db, sql`
-      SELECT g.id, g.name_ct, g.type, g.target_amount, g.currency, g.deadline, g.status, g.priority
-      FROM goals g
-      WHERE g.user_id = ${userId}
-      ORDER BY g.priority
-    `);
-    if (!goalsRaw.length) return dataResponse([]);
-    const goalIds = goalsRaw.map((g) => Number(g.id));
-    // Pull every (goal_id, account_id, account_name_ct) link in one query.
-    // Note: Drizzle's `sql` tag interpolates a JS array as separate scalar
-    // params (`($2, $3)`), so the previous `ANY(${goalIds}::int[])` shape
-    // rendered as `ANY(($2, $3)::int[])` — Postgres parsed `($2, $3)` as a
-    // ROW literal and rejected the row→array cast (PR #142 follow-up). Use
-    // `ARRAY[...]::int[]` with `sql.join` so the cast wraps a real array
-    // constructor.
-    const goalIdsExpr = sql.join(goalIds.map((id) => sql`${id}`), sql`, `);
-    const linksRaw = await q(db, sql`
-      SELECT ga.goal_id, ga.account_id, a.name_ct AS account_name_ct
-      FROM goal_accounts ga
-      LEFT JOIN accounts a ON ga.account_id = a.id
-      WHERE ga.user_id = ${userId} AND ga.goal_id = ANY(ARRAY[${goalIdsExpr}]::int[])
-    `);
-    const linksByGoal = new Map<number, { ids: number[]; names: string[] }>();
-    for (const l of linksRaw) {
-      const goalId = Number(l.goal_id);
-      const accountId = Number(l.account_id);
-      const acctName = l.account_name_ct && dek ? decryptField(dek, l.account_name_ct) : null;
-      const entry = linksByGoal.get(goalId) ?? { ids: [], names: [] };
-      entry.ids.push(accountId);
-      entry.names.push(acctName ?? "");
-      linksByGoal.set(goalId, entry);
-    }
-    // Issue #233 — surface progress numbers via the shared helper so MCP
-    // HTTP and REST `/api/goals` can't drift. Pure aggregation; no name
-    // decryption involved.
-    const progressByGoal = await computeGoalProgress(
-      userId,
-      dek,
-      goalsRaw.map((r) => ({
-        id: Number(r.id),
-        currency: (r.currency as string | null) ?? null,
-        targetAmount: Number(r.target_amount ?? 0),
-        deadline: (r.deadline as string | null) ?? null,
-        accountIds: linksByGoal.get(Number(r.id))?.ids ?? [],
-      })),
-    );
-    const rows = goalsRaw.map((r) => {
-      const { name_ct, ...rest } = r;
-      const links = linksByGoal.get(Number(r.id)) ?? { ids: [], names: [] };
-      const progress = progressByGoal.get(Number(r.id));
-      return {
-        ...rest,
-        name: name_ct && dek ? decryptField(dek, name_ct) : null,
-        accountIds: links.ids,
-        accounts: links.names,
-        currentAmount: progress?.currentAmount ?? 0,
-        progress: progress?.progress ?? 0,
-        // Alias matches the docstring's "with progress" promise; some
-        // existing consumers expect a literal `percentComplete` field.
-        percentComplete: progress?.progress ?? 0,
-        remaining: progress?.remaining ?? Number(r.target_amount ?? 0),
-        monthlyNeeded: progress?.monthlyNeeded ?? 0,
-      };
-    });
-    return dataResponse(rows);
-  });
-
-
   // ── get_categories ─────────────────────────────────────────────────────────
   server.tool("get_categories", "List all available transaction categories", {}, async () => {
     const raw = await q(db, sql`
@@ -800,110 +770,36 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   });
 
 
-  // ── get_loans ─────────────────────────────────────────────────────────────
-  // Issue #237 — DEPRECATED in favor of `list_loans`. The two tools return
-  // the same logical resource; `list_loans` has been the canonical surface
-  // since v3 envelope unification. Plan removal in v3.2.0.
-  server.tool("get_loans", "[DEPRECATED — use list_loans] Get all loans with amortization summary. Returned in the unified `{ success: true, data: [...] }` envelope as of v3.1.0.", {}, async () => {
-    const raw = await q(db, sql`
-      SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
-             payment_amount, payment_frequency, extra_payment, residual_value
-      FROM loans
-      WHERE user_id = ${userId}
-    `);
-    const rows = decryptNameish(raw, dek).map((r) => {
-      const { name_ct, ...rest } = r;
-      void name_ct;
-      return rest;
-    });
-    return dataResponse(rows);
-  });
-
-
-  // ── get_subscription_summary ───────────────────────────────────────────────
-  server.tool(
-    "get_subscription_summary",
-    "Get all tracked subscriptions with total monthly cost and upcoming renewals. Each subscription's amount is in its own currency; totals are converted to reportingCurrency (defaults to user's display currency). Intended split: use this for AGGREGATE cost + upcoming-renewal roll-ups; use list_subscriptions for the raw editable row set, and get_recurring_transactions for transactions the engine DETECTED as recurring (not user-tracked subscriptions).",
-    {
-      reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Used for the unified total monthly/annual cost."),
-    },
-    async ({ reportingCurrency }) => {
-      const rawSubs = await q(db, sql`
-        SELECT s.id, s.name_ct, s.amount, s.currency, s.frequency, s.next_date, s.status,
-               c.name_ct AS category_name_ct
-        FROM subscriptions s
-        LEFT JOIN categories c ON s.category_id = c.id
-        WHERE s.user_id = ${userId}
-        ORDER BY s.status
+  // ── get_loans (DEPRECATED — hidden alias of list_loans) ────────────────────
+  // FINLYNQ-265: get_loans is retired in favor of `list_loans` (the two return
+  // the same logical resource). Per the deprecation policy (CONTRIBUTING.md):
+  // HIDDEN from tools/list immediately (registered via registerAlias → excluded
+  // from the advertised surface), still HANDLED for one minor version returning
+  // its result PLUS a `deprecation` warning field, then removed (410) after.
+  // Callers should migrate to `list_loans`.
+  registerAlias(
+    server,
+    "get_loans",
+    "Deprecated — use list_loans. Get all loans with amortization summary in the unified `{ success, data }` envelope. Hidden from tools/list; still handled with a `deprecation` warning for one minor version, then removed.",
+    {},
+    async () => {
+      const raw = await q(db, sql`
+        SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
+               payment_amount, payment_frequency, extra_payment, residual_value
+        FROM loans
+        WHERE user_id = ${userId}
       `);
-      // Issue #207 — explicit whitelist so *_ct ciphertexts never escape via
-      // the downstream `taggedSubs` spread. Building a clean shape here means
-      // `taggedSubs.map(s => ({ ...s, ... }))` below carries no ciphertext.
-      const subs: Row[] = rawSubs.map((r) => ({
-        id: r.id,
-        amount: r.amount,
-        currency: r.currency,
-        frequency: r.frequency,
-        next_date: r.next_date,
-        status: r.status,
-        category_id: r.category_id,
-        name: r.name_ct && dek ? decryptField(dek, r.name_ct) : null,
-        category_name: r.category_name_ct && dek ? decryptField(dek, r.category_name_ct) : null,
-      }));
-
-      const active = subs.filter(s => s.status === "active");
-      const freqMult: Record<string, number> = { weekly: 4.33, monthly: 1, quarterly: 1/3, annual: 1/12, yearly: 1/12 };
-
-      const reporting = await resolveReportingCurrency(db, userId, reportingCurrency);
-      const today = new Date().toISOString().split("T")[0];
-      const fxByCcy = new Map<string, number>();
-      for (const ccy of new Set(active.map(s => String(s.currency ?? reporting)))) {
-        fxByCcy.set(ccy, await getRate(ccy, reporting, today, userId));
-      }
-
-      let totalMonthlyCostReporting = 0;
-      const taggedSubs = subs.map(s => {
-        const ccy = String(s.currency ?? reporting);
-        const fx = fxByCcy.get(ccy) ?? 1;
-        return {
-          ...s,
-          amountTagged: tagAmount(Number(s.amount), ccy, "account"),
-          amountReporting: tagAmount(Number(s.amount) * fx, reporting, "reporting"),
-        };
+      const rows = decryptNameish(raw, dek).map((r) => {
+        const { name_ct, ...rest } = r;
+        void name_ct;
+        return rest;
       });
-      for (const s of active) {
-        const ccy = String(s.currency ?? reporting);
-        const fx = fxByCcy.get(ccy) ?? 1;
-        totalMonthlyCostReporting += Number(s.amount) * fx * (freqMult[s.frequency] ?? 1);
-      }
-
-      const thirtyDays = new Date(Date.now() + 30 * 86400000).toISOString().split("T")[0];
-      const upcoming = active
-        .filter(s => s.next_date && s.next_date >= today && s.next_date <= thirtyDays)
-        .map(s => {
-          const ccy = String(s.currency ?? reporting);
-          const fx = fxByCcy.get(ccy) ?? 1;
-          return {
-            name: s.name,
-            amount: s.amount,
-            date: s.next_date,
-            currency: s.currency,
-            amountTagged: tagAmount(Number(s.amount), ccy, "account"),
-            amountReporting: tagAmount(Number(s.amount) * fx, reporting, "reporting"),
-          };
-        })
-        .sort((a, b) => String(a.date ?? "").localeCompare(String(b.date ?? "")));
-
-      return dataResponse({
-        reportingCurrency: reporting,
-        totalMonthlyCost: tagAmount(totalMonthlyCostReporting, reporting, "reporting"),
-        totalAnnualCost: tagAmount(totalMonthlyCostReporting * 12, reporting, "reporting"),
-        activeCount: active.length,
-        totalCount: subs.length,
-        upcomingRenewals: upcoming,
-        subscriptions: taggedSubs,
+      return text({
+        success: true,
+        data: rows,
+        deprecation: "get_loans is deprecated; use list_loans. It is hidden from tools/list and will be removed in a future release.",
       });
-    }
+    },
   );
 
 
@@ -1008,7 +904,11 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         dek: null,
         reportingCurrency: reporting,
       });
-      return dataResponse(payload);
+      // FINLYNQ-268: the score's money totals (netWorthToday, liquidAssets) are
+      // computed with dek:null, so investment accounts are valued at ledger
+      // (net contributions), never market — label the basis truthfully. The
+      // component RATIOS are currency-independent; `basis` scopes the totals.
+      return dataResponse({ ...payload, basis: "ledger" });
     }
   );
 
@@ -1099,7 +999,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       }
 
       anomalies.sort((a, b) => Math.abs(b.percentDeviation) - Math.abs(a.percentDeviation));
-      return dataResponse({ month: currentMonth, reportingCurrency: reporting, anomalies, count: anomalies.length });
+      // FINLYNQ-268 (phase 4, flow axis): anomalies compare cash-flow spending
+      // vs history (SUM(transactions.amount)), not portfolio valuation.
+      return dataResponse({ month: currentMonth, reportingCurrency: reporting, anomalies, count: anomalies.length, basis: "cash_flow" });
     }
   );
 
@@ -1170,7 +1072,11 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
 
       const order: Record<string, number> = { critical: 0, warning: 1, info: 2 };
       items.sort((a, b) => (order[a.severity] ?? 9) - (order[b.severity] ?? 9));
-      return dataResponse(items);
+      // FINLYNQ-268 (phase 4, flow axis): spotlight amounts are cash-flow
+      // figures (overspent budgets / upcoming bills — SUM(transactions.amount)),
+      // not portfolio valuation. Wrapped in an object so the money-bearing
+      // response can carry the uniform top-level `basis` (was a bare array).
+      return dataResponse({ items, count: items.length, basis: "cash_flow" });
     }
   );
 
@@ -1301,6 +1207,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         income: tagAmount(income, reporting, "reporting"),
         netCashFlow: tagAmount(income - totalSpent, reporting, "reporting"),
         notableTransactions: notable,
+        // FINLYNQ-268 (phase 4, flow axis): the recap sums cash flows
+        // (spending/income/net over the week), not portfolio valuation.
+        basis: "cash_flow",
       });
     }
   );
@@ -1551,6 +1460,10 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         recurringItems: { included: recurring.length, dropped: dropped.length },
         recurringContributions,
         stalenessThresholdMultiplier: STALENESS_THRESHOLD_MULTIPLIER,
+        // FINLYNQ-268 (phase 4, flow axis): the forecast projects cash flows
+        // (recurring in/out over the horizon) off a ledger starting balance —
+        // a cash-flow report, not a portfolio market valuation.
+        basis: "cash_flow",
       });
     }
   );
@@ -1561,7 +1474,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
     "finlynq_help",
     "Discover available Finlynq tools, schema, and usage examples. Finlynq is a personal-finance TRACKING app: every write tool records a bookkeeping entry in the user's own database and never connects to a bank or brokerage or moves real money. Full docs: https://finlynq.com/mcp-guide",
     {
-      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile", "modes"]).optional().describe("Help topic (default: tools). `modes` documents every multi-mode tool's modes with an example each."),
+      topic: z.enum(["tools", "schema", "examples", "write", "portfolio", "reconcile", "modes", "safety", "valuation"]).optional().describe("Help topic (default: tools). `modes` documents every multi-mode tool's modes with an example each; `safety` documents the destructive-tool two-step (confirmation tokens) + echo guards; `valuation` documents the uniform `basis` field on every money-bearing response + each tool's default basis."),
       tool_name: z.string().optional().describe("Get help for a specific tool"),
     },
     async ({ topic, tool_name }) => {
@@ -1611,26 +1524,27 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
 
       if (t === "tools") {
         return dataResponse({
-          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_goals", "get_categories", "get_subscription_summary", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast", "preview_delete_category"],
-          write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
+          read_tools: ["get_account_balances", "search_transactions", "get_budget_summary", "get_spending_trends", "get_income_statement", "get_net_worth", "get_categories", "get_recurring_transactions", "get_financial_health_score", "get_spending_anomalies", "get_spotlight_items", "get_weekly_recap", "get_cash_flow_forecast"],
+          write_tools: ["manage_transactions (op: record | update | delete; record takes one row OR transactions[])", "manage_transfers (op: record | update | delete)", "manage_splits (op: list | add | update | delete | replace)", "manage_budgets (op: set | delete)", "manage_accounts (op: add | update | delete | set_mode)", "manage_goals (op: add | update | delete | list)", "manage_categories (op: create | delete)", "manage_rules (op: create | update | delete | list | reorder)", "manage_subscriptions (op: add | update | delete | list)", "manage_loans (op: add | update | delete | list)", "manage_fx_overrides (op: set | delete | list)", "add_snapshot", "apply_rules_to_uncategorized"],
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
-          portfolio_write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
-          transfer_tools: ["record_transfer"],
+          portfolio_write_tools: ["portfolio_record_entry (entry_type: buy | sell | swap | transfer | income_expense | fx_conversion | deposit | withdrawal)", "manage_holdings (op: add | update | delete)"],
           reconcile_tools: ["upload_statement", "get_reconcile_suggestions", "get_reconciliation_summary", "find_duplicate_bank_rows", "get_balance_anchors", "upsert_balance_anchor", "delete_bank_transaction", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "accept_reconcile_suggestions", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
-          tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for detailed usage of any tool. INVESTMENT accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the portfolio_* write tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion). record_transfer remains the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools, or topic='modes' for the mode/lifecycle map of every multi-mode tool (get_investment_insights, get_net_worth, get_spending_trends, staged-import lifecycle).",
+          note_v4: "MCP surface v4 (v4.0.0): per-verb CRUD tools were consolidated into discriminated-union tools — `manage_*` use an `op` field, `portfolio_record_entry` uses `entry_type`. The old names (record_transaction, add_goal, portfolio_buy, …) still work as hidden aliases through v4.1. Reconcile/import tools are hidden from the default session unless the connection has the `mcp:import` scope or setting.",
+          tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='manage_transactions' for detailed usage of any tool. INVESTMENT accounts CANNOT use manage_transactions/manage_transfers for trades — use portfolio_record_entry (entry_type buy/sell/swap/transfer/deposit/withdrawal/income_expense/fx_conversion). manage_transfers is the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools, topic='modes' for the mode/lifecycle map of every multi-mode tool, or topic='safety' for the destructive-tool two-step (confirmation tokens) + delete-echo guards.",
         });
       }
 
       if (t === "write") {
         return dataResponse({
-          primary_add: "record_transaction — account required, fuzzy matching on account/category names",
-          bulk_add: "bulk_record_transactions — array of transactions (account required per item)",
-          edits: ["update_transaction(id, ...fields)", "delete_transaction(id)"],
-          budget: ["set_budget(category, month, amount)", "delete_budget(category, month)"],
-          accounts: ["add_account(name, type)", "update_account(account, ...)", "delete_account(account)"],
-          goals: ["add_goal(name, type, amount)", "update_goal(goal, ...)", "delete_goal(goal)"],
-          categories: ["create_category(name, type)", "delete_category(id, confirmation_token) — preview via preview_delete_category", "create_rule(match_payee, assign_category)"],
-          note: "All name inputs use fuzzy matching — partial names work. Each account can also have an `alias` (e.g. last 4 digits of a card); account lookups exact-match on alias in addition to fuzzy-matching on name, so you can pass either. Set category via update_transaction(id, category=...).",
+          primary_add: "manage_transactions(op='record', amount, payee, account) — one row; account required, fuzzy matching on account/category names",
+          bulk_add: "manage_transactions(op='record', transactions=[{amount, payee, date, account}, ...]) — array; account required per item",
+          edits: ["manage_transactions(op='update', id, ...fields)", "manage_transactions(op='delete', id)"],
+          budget: ["manage_budgets(op='set', category, month, amount)", "manage_budgets(op='delete', category, month)"],
+          accounts: ["manage_accounts(op='add', name, type)", "manage_accounts(op='update', account, ...)", "manage_accounts(op='delete', account)", "manage_accounts(op='set_mode', accountId, mode)"],
+          goals: ["manage_goals(op='add', name, type, target_amount)", "manage_goals(op='update', goal, ...)", "manage_goals(op='delete', goal)", "manage_goals(op='list')"],
+          categories: ["manage_categories(op='create', name, type)", "manage_categories(op='delete', id, confirmation_token) — omit the token to preview FK counts + get one", "manage_rules(op='create', match_payee, assign_category)"],
+          note: "MCP surface v4: CRUD tools consolidated into `manage_*` (op discriminator). All name inputs use fuzzy matching — partial names work. Each account can also have an `alias`; account lookups exact-match on alias in addition to fuzzy-matching on name. Set category via manage_transactions(op='update', id, category=...). Old names (record_transaction, add_goal, …) still work as hidden aliases through v4.1.",
+          deletes: "SAFETY (v4.0): manage_transfers(op='delete') / manage_accounts(op='delete', non-empty or force) / manage_holdings(op='delete', with tx or lots) are TWO-STEP — a bare call returns { preview, summary, confirmationToken } and deletes NOTHING; re-call with the token to commit. manage_transactions(op='delete') / manage_splits(op='delete') accept an OPTIONAL `expected` echo (payee/amount) that refuses a mismatch. See topic='safety' for the full contract.",
         });
       }
 
@@ -1653,20 +1567,20 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       if (t === "examples") {
         return dataResponse({
           examples: [
-            { task: "Log a coffee purchase", call: 'record_transaction(amount=-5.50, payee="Tim Hortons", account="RBC ION Visa")' },
-            { task: "Log salary deposit", call: 'record_transaction(amount=3500, payee="Employer", account="RBC Chequing", category="Salary")' },
-            { task: "Import bank statement rows", call: "bulk_record_transactions([{amount, payee, date, account}, ...])" },
-            { task: "Set grocery budget", call: 'set_budget(category="Groceries", month="2026-04", amount=600)' },
-            { task: "Fix wrong category", call: 'update_transaction(id=42, category="Restaurants")' },
+            { task: "Log a coffee purchase", call: 'manage_transactions(op="record", amount=-5.50, payee="Tim Hortons", account="RBC ION Visa")' },
+            { task: "Log salary deposit", call: 'manage_transactions(op="record", amount=3500, payee="Employer", account="RBC Chequing", category="Salary")' },
+            { task: "Import bank statement rows", call: 'manage_transactions(op="record", transactions=[{amount, payee, date, account}, ...])' },
+            { task: "Set grocery budget", call: 'manage_budgets(op="set", category="Groceries", month="2026-04", amount=600)' },
+            { task: "Fix wrong category", call: 'manage_transactions(op="update", id=42, category="Restaurants")' },
             { task: "Auto-categorize backlog", call: "apply_rules_to_uncategorized(dry_run=true)" },
-            { task: "Create savings goal", call: 'add_goal(name="Emergency Fund", type="emergency_fund", target_amount=10000)' },
+            { task: "Create savings goal", call: 'manage_goals(op="add", name="Emergency Fund", type="emergency_fund", target_amount=10000)' },
             { task: "Analyze investments", call: "get_portfolio_analysis()" },
             { task: "Rebalance vs targets", call: 'get_investment_insights(mode="rebalancing", targets=[{holding:"VEQT", target_pct:60}])' },
             { task: "Net worth trend", call: "get_net_worth(months=12)" },
-            { task: "Buy 10 AAPL for $1500 in a USD brokerage", call: 'portfolio_buy(account="Questrade USD", holding="AAPL", qty=10, totalCost=1500)' },
-            { task: "Sell 5 AAPL for $800 (FIFO)", call: 'portfolio_sell(account="Questrade USD", holding="AAPL", qty=5, totalProceeds=800)' },
-            { task: "Record a $42 dividend", call: 'portfolio_income_expense(account="Questrade USD", currency="USD", amount=42, incomeType="dividend")' },
-            { task: "Fund a brokerage from chequing", call: 'portfolio_deposit(sourceAccount="RBC Chequing", destAccount="Questrade USD", amount=2000)' },
+            { task: "Buy 10 AAPL for $1500 in a USD brokerage", call: 'portfolio_record_entry(entry_type="buy", account="Questrade USD", holding="AAPL", qty=10, totalCost=1500)' },
+            { task: "Sell 5 AAPL for $800 (FIFO)", call: 'portfolio_record_entry(entry_type="sell", account="Questrade USD", holding="AAPL", qty=5, totalProceeds=800)' },
+            { task: "Record a $42 dividend", call: 'portfolio_record_entry(entry_type="income_expense", account="Questrade USD", currency="USD", amount=42, incomeType="dividend")' },
+            { task: "Fund a brokerage from chequing", call: 'portfolio_record_entry(entry_type="deposit", sourceAccount="RBC Chequing", destAccount="Questrade USD", amount=2000)' },
           ],
         });
       }
@@ -1674,9 +1588,9 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
       if (t === "portfolio") {
         return dataResponse({
           read_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
-          write_tools: ["portfolio_buy", "portfolio_sell", "portfolio_swap", "portfolio_transfer", "portfolio_income_expense", "portfolio_fx_conversion", "portfolio_deposit", "portfolio_withdrawal", "add_portfolio_holding", "update_portfolio_holding", "delete_portfolio_holding"],
+          write_tools: ["portfolio_record_entry (entry_type: buy | sell | swap | transfer | income_expense | fx_conversion | deposit | withdrawal)", "manage_holdings (op: add | update | delete)"],
           modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
-          note_on_writes: "Investment activity MUST go through the portfolio_* write tools (record_transaction / bulk_record_transactions reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — add_portfolio_holding a 'Cash' holding for that currency first if missing.",
+          note_on_writes: "Investment activity MUST go through portfolio_record_entry (manage_transactions/manage_transfers reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — manage_holdings(op='add') a 'Cash' holding for that currency first if missing. (The old portfolio_buy/sell/… names still work as hidden aliases through v4.1.)",
           disclaimer: PORTFOLIO_DISCLAIMER,
           note: "All portfolio read tools return a disclaimer field. Not financial advice.",
         });
@@ -1730,6 +1644,65 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
             decision_rule: "Account already has ledger tx for the period → send_to_bank_ledger. Brand-new account, first import → approve_staged_rows. Unsure → default send_to_bank_ledger.",
           },
           tip: "These are the genuinely multi-mode tools. For a specific tool's full parameter docs use tool_name='<name>'; for the reconcile cohort use topic='reconcile'.",
+        });
+      }
+
+      if (t === "safety") {
+        // FINLYNQ-264 — destructive-tool safety contract (v3.4).
+        return dataResponse({
+          summary: "Destructive tools are gated so a hallucinated id can't wipe data in one shot. Two mechanisms: (A) a preview→confirmation-token two-step for irreversible / multi-row deletes, and (B) an optional `expected` row-content echo for high-frequency single-row deletes.",
+          token_two_step: {
+            tools: ["delete_transfer", "delete_account (non-empty OR force=true)", "delete_portfolio_holding (with linked transactions OR lots)", "reject_staged_import", "delete_category (via preview_delete_category)", "execute_bulk_delete / execute_bulk_update / execute_bulk_categorize", "apply_rules_to_bank_rows"],
+            how: "Call WITHOUT confirmation_token → the tool returns { preview: true, summary, confirmationToken } and writes NOTHING (the summary echoes the blast radius: both legs / cascade counts / tx+lot counts). Re-call the SAME arguments PLUS confirmation_token=<that token> to commit.",
+            token: "Single-use, 5-minute TTL, bound to your user + the operation + the resolved row id(s). A token minted for one row can't commit a delete of another (payload-mismatch) and can't be replayed (returns 'invalid: replay'). If it expires or you get 'Confirmation token invalid: …', just re-call without the token to refresh.",
+            clean_case: "A CLEAN entity skips the gate and deletes directly: delete_account on an empty account (0 transactions), delete_portfolio_holding on a holding with no transactions AND no lots.",
+          },
+          echo_guard: {
+            tools: ["delete_transaction", "delete_split"],
+            how: "OPTIONAL: pass `expected` with what you believe the row holds — delete_transaction({ id, expected: { payee, amount } }) / delete_split({ split_id, expected: { amount } }). A mismatch (payee case-insensitive, amount ±0.01) REFUSES the delete. Omitting `expected` still deletes (back-compat), but passing it guards against a mis-copied id. RECOMMENDED whenever you have the payee/amount.",
+          },
+          dry_run_variant: "delete_bank_transaction uses its own two-step: pass dryRun:true to get the would-be-unlinked transaction ids with ZERO writes, then call again with dryRun:false to commit.",
+          config_deletes: "delete_loan / delete_subscription / delete_fx_override / delete_rule / delete_budget / delete_goal are direct (single low-risk, user-recreatable config rows) but carry destructiveHint:true so a host can prompt.",
+        });
+      }
+
+      if (t === "valuation") {
+        // FINLYNQ-268 — the uniform `basis` field on every money-bearing response.
+        return dataResponse({
+          summary: "Every money-bearing MCP response carries an explicit `basis` so you never have to reverse-engineer WHICH valuation a figure is from its magnitude. Two axes: POSITION (point-in-time portfolio/account value) and FLOW (cash movements over a period).",
+          position_axis: {
+            values: {
+              market: "current/at-date market value (holdings priced live). Carries an `asOf` date. Requires an unlocked DEK — a pf_ API key falls back to active_cost + a warning.",
+              active_cost: "remaining cost basis of ACTIVE positions (price-independent; always available).",
+              ledger: "net contribution — COALESCE(SUM(transactions.amount)). The market-vs-ledger fallback for balance tools without a DEK.",
+              lifetime_cost: "Σ every buy ever (aggregateHoldings().buy_amount). A 'how much did I invest' figure — NEVER used for weights.",
+            },
+            rule: "Weights (rebalancing / diversification / concentration) are ALWAYS computed on market-else-active_cost, NEVER lifetime_cost (the weightBasis guard enforces this).",
+            asOf: "Present IFF basis === 'market'. Equals today (or the latest snapshot date for snapshot-backed tools like get_portfolio_returns).",
+          },
+          flow_axis: {
+            values: {
+              realized: "lot-level realized gains (FIFO closures, historical-FX converted). get_realized_gains only.",
+              cash_flow: "SUM(transactions.amount) cash figures (spending, income, dividends, budgets, subscriptions, forecasts).",
+            },
+          },
+          defaults: {
+            // tool → default basis → override param
+            get_net_worth: { basis: "market else ledger (current) / ledger (trend)", override: "basis ('market' | 'ledger')" },
+            get_account_balances: { basis: "per-row market (DEK) else ledger", override: "basis ('market' | 'ledger')" },
+            get_goals: { basis: "per-goal market (investment-linked + DEK) else ledger", override: "none" },
+            get_financial_health_score: { basis: "ledger (money totals; ratios currency-independent)", override: "none" },
+            get_portfolio_analysis: { basis: "lifetime_cost", override: "none" },
+            get_portfolio_performance: { basis: "active_cost", override: "none" },
+            get_portfolio_returns: { basis: "market (+ asOf = latest snapshot date)", override: "none" },
+            analyze_holding: { basis: "active_cost", override: "none" },
+            get_investment_insights: { basis: "market else active_cost (patterns/rebalancing) / lifetime_cost (benchmark totalInvested)", override: "none" },
+            get_realized_gains: { basis: "realized", override: "none" },
+            get_dividend_income: { basis: "cash_flow", override: "none" },
+            "get_spending_trends / get_income_statement / get_spending_anomalies / get_weekly_recap / get_cash_flow_forecast / get_spotlight_items / get_budget_summary / get_subscription_summary": { basis: "cash_flow", override: "none" },
+          },
+          not_labelled: "Loans (get_loans / get_loan_amortization / get_debt_payoff_plan) report scheduled/ledger loan balances, not portfolio valuation — no `basis`. Per-row listings (get_categories, search_transactions), quantity-only tools (trace_holding_quantity), and reconcile data carry no `basis` either.",
+          deprecated_aliases: "The pre-F divergent labels are kept as deprecated aliases through v4.1: get_account_balances.balanceBasis, get_investment_insights.valuationBasis / diversificationValuationBasis. Read the new uniform `basis` field.",
         });
       }
 
