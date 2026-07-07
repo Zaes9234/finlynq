@@ -607,6 +607,15 @@ async function handleGet(request: NextRequest) {
   // unrealized includes the FX gain/loss on the cost basis (the old
   // `nativeUnrealized × currentRate` dropped it). Empty when lots are disabled.
   const reportingCostBasisByHolding = new Map<number, number>();
+  // FINLYNQ-278: cash sleeves join the lot cost-basis path ONLY when their lots
+  // reconcile to the ledger balance (lot signed net qty ≈ Σ tx quantity). A
+  // sleeve whose lots are still drifted (net-negative sleeves not yet rebuilt to
+  // open short cash lots) is left OUT of reportingCostBasisByHolding, so the
+  // fiat-cash branch keeps the FINLYNQ-277 peg (cost = balance → unrealized 0)
+  // — safe until a rebuild reconciles it. A reconciled sleeve uses its signed
+  // lot cost basis + historical-FX reporting value, so same-currency cash nets
+  // to 0 and FOREIGN cash shows its real FX unrealized.
+  const cashHoldingIdSet = new Set(cashHoldings.map((h) => h.id));
   if (lotsEnabled) {
     const lotMetrics = await loadMetricsForUser({
       userId,
@@ -618,6 +627,18 @@ async function handleGet(request: NextRequest) {
     for (const lm of lotMetrics) {
       const m = metricsByHoldingId.get(lm.holdingId);
       if (!m) continue;
+      if (cashHoldingIdSet.has(lm.holdingId)) {
+        // Reconciled iff the lot signed net qty matches the ledger balance.
+        const ledgerQty = m.qty;
+        const reconciled = Math.abs(lm.qty - ledgerQty) <= Math.max(0.01, Math.abs(ledgerQty) * 1e-4);
+        if (reconciled && Math.abs(ledgerQty) > 1e-9) {
+          m.totalCostBasis = lm.costBasis;
+          m.avgCostPerShare = lm.costBasis / ledgerQty;
+          reportingCostBasisByHolding.set(lm.holdingId, lm.costBasisReporting);
+        }
+        // else: leave m as-is → the fiat-cash peg (FINLYNQ-277) applies.
+        continue;
+      }
       m.totalCostBasis = lm.qty > 1e-9 ? lm.costBasis : null;
       m.avgCostPerShare = lm.qty > 1e-9 ? lm.costBasis / lm.qty : null;
       m.realizedGain = lm.realizedGainAllTime;
@@ -802,8 +823,15 @@ async function handleGet(request: NextRequest) {
         // cost basis was surfacing as large phantom losses on Cash rows. Realized
         // FX gain on the sleeve (a FLOW figure from lot closures) is untouched —
         // only the point-in-time cost basis is corrected.
-        totalCostBasis = marketValue;
-        avgCostPerShare = 1;
+        // FINLYNQ-278: peg ONLY when the cash lots are NOT reconciled (no entry
+        // in reportingCostBasisByHolding — a still-drifted sleeve). A RECONCILED
+        // sleeve keeps its lot-derived signed cost basis (set in the lots block
+        // above), so FOREIGN cash shows its real historical-FX unrealized while
+        // same-currency cash's lot cost basis already equals the balance → 0.
+        if (!reportingCostBasisByHolding.has(h.id)) {
+          totalCostBasis = marketValue;
+          avgCostPerShare = 1;
+        }
         // FINLYNQ-246: foreign-currency cash has a DISPLAY-currency day change
         // driven purely by the FX rate's day move vs the display currency
         // (1 USD is still 1 USD natively, so the NATIVE change is genuinely 0 —
@@ -841,10 +869,15 @@ async function handleGet(request: NextRequest) {
     // Legacy / flag-off / no-lot holdings fall back to current-rate conversion,
     // which for a same-currency holding equals the native cost basis → the whole
     // display unrealized stays byte-identical to before.
+    // FINLYNQ-278: reconciled cash sleeves ARE in reportingCostBasisByHolding
+    // now (the `assetType !== "cash"` exclusion was dropped), so foreign cash
+    // uses its historical-FX reporting cost basis too. Un-reconciled cash has no
+    // entry → falls to the current-rate branch, where totalCostBasis was pegged
+    // to marketValue → costBasisDisplay == marketValueDisplay → unrealized 0.
     const costBasisDisplay: number | null =
       totalCostBasis === null
         ? null
-        : lotsEnabled && assetType !== "cash" && reportingCostBasisByHolding.has(h.id)
+        : lotsEnabled && reportingCostBasisByHolding.has(h.id)
           ? reportingCostBasisByHolding.get(h.id)!
           : convertCurrency(totalCostBasis, fxRate);
 

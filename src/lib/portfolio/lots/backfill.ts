@@ -24,9 +24,11 @@ import { db, schema } from "@/db";
 import { resolveDividendsCategoryId } from "@/lib/dividends-category";
 import {
   closeLotsForSell,
+  daysBetween,
   openLotForBuy,
   transferLot,
 } from "./engine";
+import { inferCashCloseKind } from "./cash-hooks";
 import { selectLotsToClose } from "./selection";
 import type {
   CashLegHint,
@@ -76,6 +78,7 @@ const TX_LOAD_COLS = {
   tradeLinkId: schema.transactions.tradeLinkId,
   linkId: schema.transactions.linkId,
   source: schema.transactions.source,
+  kind: schema.transactions.kind,
 } as const;
 
 /**
@@ -218,16 +221,21 @@ export async function buildLotsForUser(
     }
   }
 
-  // 4. Holding currency map.
+  // 4. Holding currency map (+ FINLYNQ-278: which holdings are cash sleeves).
   const holdingRows = await db
     .select({
       id: schema.portfolioHoldings.id,
       currency: schema.portfolioHoldings.currency,
+      isCash: schema.portfolioHoldings.isCash,
     })
     .from(schema.portfolioHoldings)
     .where(eq(schema.portfolioHoldings.userId, userId));
   const holdingCurrencies = new Map<number, string>();
-  for (const h of holdingRows) holdingCurrencies.set(h.id, h.currency);
+  const cashHoldingIds = new Set<number>();
+  for (const h of holdingRows) {
+    holdingCurrencies.set(h.id, h.currency);
+    if (h.isCash) cashHoldingIds.add(h.id);
+  }
 
   // 5. Dividends category id (issue #84).
   const dividendsCategoryId = await resolveDividendsCategoryId(
@@ -389,6 +397,84 @@ export async function buildLotsForUser(
         `tx ${r.id} (${r.date}): in-kind transfer leg with no counterpart in this account — ` +
           `rebuilt as a plain ${(r.quantity ?? 0) < 0 ? "sell" : "buy"} within this account; verify the cross-account move.`,
       );
+    }
+
+    // FINLYNQ-278: cash sleeves reconcile with SHORT lots. A cash INFLOW closes
+    // open SHORT lots FIFO (short_close, in-currency realized 0) then opens a
+    // long for the remainder; a cash OUTFLOW closes open LONG lots FIFO then
+    // opens a SHORT for any shortfall. This mirrors the live cash-hooks so a
+    // rebuild of a sleeve that ever went net-negative reconciles (open long −
+    // open short = ledger balance) instead of DROPPING the shortfall — the drift
+    // the old rebuild left, which FINLYNQ-277 had to mask with a display peg.
+    // Cost is always 1; the FX gain is deferred to augmentWithBaseCurrency
+    // (short/long openDate vs closeDate). Runs for cash-sleeve rows only, then
+    // `continue`s past the generic buy/sell path. Transfer-paired rows were
+    // already handled + continued above.
+    if (r.portfolioHoldingId != null && cashHoldingIds.has(r.portfolioHoldingId) && r.quantity != null && r.quantity !== 0) {
+      const arr = lotsByKey.get(key) ?? [];
+      const mkCashLot = (qty: number, side: "long" | "short"): InMemLot => {
+        const tmpId = nextTmpId++;
+        return {
+          userId: r.userId,
+          holdingId: r.portfolioHoldingId!,
+          accountId: r.accountId!,
+          openTxId: r.id,
+          openDate: r.date,
+          qtyOriginal: qty,
+          qtyRemaining: qty,
+          costPerShare: 1,
+          currency: holdingCurrency,
+          fxToUsdAtOpen: null,
+          origin: "backfill",
+          parentLotId: null,
+          side,
+          source: txRow.source,
+          tmpId,
+          status: "open",
+        };
+      };
+      let remaining = Math.abs(r.quantity);
+      const inflow = r.quantity > 0;
+      // Cover the opposite side FIFO first.
+      const coverSide: "long" | "short" = inflow ? "short" : "long";
+      const closeKind = inflow ? "short_close" : inferCashCloseKind(r.kind);
+      const openLots = arr
+        .filter((l) => l.side === coverSide && l.status === "open" && l.qtyRemaining > 1e-9)
+        .sort((a, b) => a.openDate.localeCompare(b.openDate) || a.tmpId - b.tmpId);
+      for (const lot of openLots) {
+        if (remaining <= 1e-9) break;
+        const closeQty = Math.min(lot.qtyRemaining, remaining);
+        pendingClosures.push({
+          userId: r.userId,
+          lotId: 0,
+          tmpLotId: lot.tmpId,
+          closeTxId: r.id,
+          closeDate: r.date,
+          qtyClosed: closeQty,
+          proceedsPerShare: 1,
+          costPerShare: 1,
+          realizedGain: 0,
+          currency: holdingCurrency,
+          daysHeld: daysBetween(lot.openDate, r.date),
+          closeKind,
+          source: txRow.source,
+        });
+        lot.qtyRemaining -= closeQty;
+        if (lot.qtyRemaining <= 1e-9) {
+          lot.status = "closed";
+          lot.qtyRemaining = 0;
+        }
+        remaining -= closeQty;
+      }
+      // Remainder opens a new lot on the flow's own side.
+      if (remaining > 1e-9) {
+        const lot = mkCashLot(remaining, inflow ? "long" : "short");
+        pendingLots.push(lot);
+        arr.push(lot);
+      }
+      lotsByKey.set(key, arr);
+      txProcessed++;
+      continue;
     }
 
     // Regular buy / dividend-reinvest / sell.

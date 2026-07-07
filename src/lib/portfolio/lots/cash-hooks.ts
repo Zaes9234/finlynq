@@ -104,7 +104,63 @@ export async function openCashLotHook(
     if (tx.portfolioHoldingId == null || tx.accountId == null) return null;
     if (tx.quantity == null || tx.quantity <= 0) return null;
 
-    const qty = Math.abs(tx.quantity);
+    let remaining = Math.abs(tx.quantity);
+
+    // FINLYNQ-278: close-shorts-first. A cash INFLOW first covers any open
+    // SHORT cash lots (an overdraft opened by an earlier outflow that ran ahead
+    // of inflows — see closeCashLotsHook), FIFO, before opening a new long lot.
+    // In-currency realized gain is 0 (cost 1 = proceeds 1); the FX gain in
+    // USD/base is computed downstream by augmentWithBaseCurrency from the short
+    // lot's openDate vs this closeDate — mirroring the stock buy → short-close
+    // path in write-hooks.ts (closeKind 'short_close').
+    const shortRows = await db
+      .select()
+      .from(schema.holdingLots)
+      .where(
+        and(
+          eq(schema.holdingLots.userId, tx.userId),
+          eq(schema.holdingLots.holdingId, tx.portfolioHoldingId),
+          eq(schema.holdingLots.accountId, tx.accountId),
+          eq(schema.holdingLots.status, "open"),
+          eq(schema.holdingLots.side, "short"),
+        ),
+      );
+    const shorts: HoldingLot[] = shortRows
+      .map(rowToCashLot)
+      .sort((a, b) => a.openDate.localeCompare(b.openDate) || a.id - b.id);
+    for (const lot of shorts) {
+      if (remaining <= 1e-9) break;
+      const closeQty = Math.min(lot.qtyRemaining, remaining);
+      if (closeQty <= 0) continue;
+      await db.insert(schema.holdingLotClosures).values({
+        userId: tx.userId,
+        lotId: lot.id,
+        closeTxId: tx.id,
+        closeDate: tx.date,
+        qtyClosed: closeQty,
+        proceedsPerShare: 1,
+        costPerShare: 1,
+        realizedGain: 0,
+        currency: opts.sleeveCurrency,
+        daysHeld: daysBetween(lot.openDate, tx.date),
+        closeKind: "short_close",
+        source: tx.source,
+      });
+      const newRemaining = lot.qtyRemaining - closeQty;
+      await db
+        .update(schema.holdingLots)
+        .set({
+          qtyRemaining: newRemaining,
+          status: newRemaining <= 1e-9 ? "closed" : "open",
+          updatedAt: sql`NOW()`,
+        })
+        .where(eq(schema.holdingLots.id, lot.id));
+      remaining -= closeQty;
+    }
+
+    // Inflow fully covered open shorts → nothing left to open as a long.
+    if (remaining <= 1e-9) return null;
+
     const inserted = await db
       .insert(schema.holdingLots)
       .values({
@@ -113,8 +169,8 @@ export async function openCashLotHook(
         accountId: tx.accountId,
         openTxId: tx.id,
         openDate: tx.date,
-        qtyOriginal: qty,
-        qtyRemaining: qty,
+        qtyOriginal: remaining,
+        qtyRemaining: remaining,
         costPerShare: 1,
         currency: opts.sleeveCurrency,
         fxToUsdAtOpen: null,
@@ -231,14 +287,31 @@ export async function closeCashLotsHook(
     }
 
     if (remaining > 1e-9) {
-      // Shortfall: more cash leaving than the lot history accounts for.
-      // Pre-backfill rollout this is normal. Log so it's discoverable.
-
-      console.warn(
-        `${HOOK_LABEL} closeCashLotsHook tx=${tx.id} sleeve=${tx.portfolioHoldingId} ` +
-          `shortfall=${remaining} (target=${targetQty}, closed=${targetQty - remaining}). ` +
-          `Pre-Phase-5c cash sleeve activity may need backfill.`,
-      );
+      // FINLYNQ-278: shortfall = the outflow exceeds the open long cash lots
+      // (the sleeve went net-negative — an outflow ran ahead of inflows, or an
+      // out-of-order import). Open a SHORT cash lot for the uncovered amount
+      // instead of DROPPING it (the old behavior, which left later inflows as
+      // phantom open longs so the sleeve never reconciled — the drift behind
+      // FINLYNQ-277). A later inflow FIFO-closes this short via
+      // openCashLotHook's close-shorts-first path. cost 1; the FX gain in
+      // USD/base is deferred to augmentWithBaseCurrency (openDate vs closeDate).
+      await db.insert(schema.holdingLots).values({
+        userId: tx.userId,
+        holdingId: tx.portfolioHoldingId,
+        accountId: tx.accountId,
+        openTxId: tx.id,
+        openDate: tx.date,
+        qtyOriginal: remaining,
+        qtyRemaining: remaining,
+        costPerShare: 1,
+        currency: opts.sleeveCurrency,
+        fxToUsdAtOpen: null,
+        origin: "buy",
+        parentLotId: null,
+        status: "open",
+        side: "short",
+        source: tx.source,
+      });
     }
 
     return closuresWritten;

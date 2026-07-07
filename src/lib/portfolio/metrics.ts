@@ -184,13 +184,21 @@ export function computeHoldingMetricsFromLots(
     let firstPurchaseDate: string | null = null;
     for (const l of cell.lots) {
       if (l.status !== "open" || l.qtyRemaining <= 0) continue;
-      qty += l.qtyRemaining;
+      // FINLYNQ-278: SHORT lots reduce the net position and represent a
+      // negative cost basis (cash overdraft / short sale), so sign them −1.
+      // Without this a short lot's qtyRemaining was added as a positive long,
+      // inflating qty + cost. For a net-negative cash sleeve (long − short =
+      // balance) this makes qty/costBasis reconcile to the ledger balance
+      // (metrics.ts is overview-only, so the blast radius is the overview).
+      const sign = l.side === "short" ? -1 : 1;
+      qty += sign * l.qtyRemaining;
       const lotCost = l.qtyRemaining * l.costPerShare;
-      costBasisInHolding += fx(lotCost, l.currency, holdingCurrency);
-      costBasisReporting += reportingCurrency && fxAtDate
+      costBasisInHolding += sign * fx(lotCost, l.currency, holdingCurrency);
+      costBasisReporting += sign * (reportingCurrency && fxAtDate
         ? fxAtDate(lotCost, l.currency, reportingCurrency, l.openDate)
-        : fx(lotCost, l.currency, holdingCurrency);
-      if (firstPurchaseDate == null || l.openDate < firstPurchaseDate) {
+        : fx(lotCost, l.currency, holdingCurrency));
+      // firstPurchaseDate tracks acquisition — a short OPEN is not a purchase.
+      if (l.side !== "short" && (firstPurchaseDate == null || l.openDate < firstPurchaseDate)) {
         firstPurchaseDate = l.openDate;
       }
     }
