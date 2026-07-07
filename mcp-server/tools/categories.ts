@@ -14,6 +14,7 @@ import {
   resolveEntity,
   decryptNameish,
   type Row,
+  type DbLike,
   type PgToolContext,
 } from "./_shared";
 import {
@@ -32,6 +33,8 @@ import {
 import {
   signPreviewToken,
   verifyPreviewToken,
+  withConfirmation,
+  PreviewAbortError,
 } from "./_confirm";
 import { registerManageTool, registerAlias } from "./_consolidate";
 
@@ -176,14 +179,248 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
     return text({ success: true, data: { categoryId: result[0]?.id, message: `Category "${name}" created (${type === "E" ? "expense" : type === "I" ? "income" : "transfer"})` } });
   }
 
+  // ── shared: resolve a category id (id fast-path over fuzzy name) ────────────
+  // FINLYNQ-275. Mirrors opDeletePreview's resolution but throws
+  // PreviewAbortError so it can front both the direct rename write AND the
+  // merge two-step (withConfirmation catches the abort → clean err, no token).
+  // Returns the decrypted category Row (carries `id` + `name`).
+  async function resolveCategoryStrictOrAbort(a: { id?: number; name?: string }): Promise<Row> {
+    const { id, name } = a;
+    if (id == null && (name == null || name === "")) {
+      throw new PreviewAbortError("Pass `id` (numeric) or `name` (fuzzy) to identify the category.");
+    }
+    if (id != null) {
+      const rows = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId} AND id = ${id}`);
+      if (!rows.length) throw new PreviewAbortError(`Category #${id} not found.`);
+      return decryptNameish(rows, dek)[0];
+    }
+    if (!dek) throw new PreviewAbortError("Cannot resolve category by name without an unlocked DEK (Stream D Phase 4). Pass `id` instead.");
+    const rawCats = await q(db, sql`SELECT id, name_ct FROM categories WHERE user_id = ${userId}`);
+    const allCats = decryptNameish(rawCats, dek);
+    // FINLYNQ-267 shared envelope — id fast-path handled above; a mistyped name
+    // is REFUSED and a 2+ match ABORTS with the ambiguous candidate list.
+    const env = resolveEntity({ entity: "category", name, options: allCats });
+    if (env.status === "ambiguous") {
+      const list = env.candidates.map((c) => `"${c.name}" (id=${c.id})`).join(", ");
+      throw new PreviewAbortError(`Category is ambiguous — ${env.candidates.length} matches: ${list}. Pass id to disambiguate.`);
+    }
+    if (env.status === "not_found") {
+      throw new PreviewAbortError(`Category "${name}" not found. Did you mean: ${suggestionList(name!, allCats)}?`);
+    }
+    const cat = allCats.find((c) => Number(c.id) === env.id);
+    if (!cat) throw new PreviewAbortError(`Category "${name}" not found.`);
+    return cat;
+  }
+
+  // ── shared: count every dependent of a category, per type ───────────────────
+  // FINLYNQ-275. The `delete` guard counts transactions/rules/subscriptions;
+  // merge must repoint EVERY table with a category_id FK, so this enumerates the
+  // full set (grep'd from src/db/schema-pg.ts): transactions, transaction_splits
+  // (owned via transaction_id → transactions; NO user_id column), subscriptions,
+  // budgets, budget_templates, recurring_transactions, email_import_rules, plus
+  // the FINLYNQ-84 transaction_rules JSONB `set_category` action. backfill_proposals
+  // (chosen_category_id) is ephemeral review state and deliberately NOT repointed.
+  async function countCategoryDependents(catId: number): Promise<{
+    transactions: number;
+    splits: number;
+    subscriptions: number;
+    budgets: number;
+    budgetTemplates: number;
+    recurringTransactions: number;
+    emailRules: number;
+    rules: number;
+  }> {
+    const one = async (query: ReturnType<typeof sql>) =>
+      Number(((await q(db, query)) as { cnt: string | number }[])[0]?.cnt ?? 0);
+    const [transactions, splits, subscriptions, budgets, budgetTemplates, recurringTransactions, emailRules, rules] =
+      await Promise.all([
+        one(sql`SELECT COUNT(*) AS cnt FROM transactions WHERE user_id = ${userId} AND category_id = ${catId}`),
+        one(sql`
+          SELECT COUNT(*) AS cnt FROM transaction_splits ts
+          JOIN transactions t ON t.id = ts.transaction_id
+          WHERE t.user_id = ${userId} AND ts.category_id = ${catId}
+        `),
+        one(sql`SELECT COUNT(*) AS cnt FROM subscriptions WHERE user_id = ${userId} AND category_id = ${catId}`),
+        one(sql`SELECT COUNT(*) AS cnt FROM budgets WHERE user_id = ${userId} AND category_id = ${catId}`),
+        one(sql`SELECT COUNT(*) AS cnt FROM budget_templates WHERE user_id = ${userId} AND category_id = ${catId}`),
+        one(sql`SELECT COUNT(*) AS cnt FROM recurring_transactions WHERE user_id = ${userId} AND category_id = ${catId}`),
+        one(sql`SELECT COUNT(*) AS cnt FROM email_import_rules WHERE user_id = ${userId} AND category_id = ${catId}`),
+        one(sql`
+          SELECT COUNT(*) AS cnt FROM transaction_rules
+          WHERE user_id = ${userId}
+            AND actions @> ${JSON.stringify([{ kind: "set_category", categoryId: catId }])}::jsonb
+        `),
+      ]);
+    return { transactions, splits, subscriptions, budgets, budgetTemplates, recurringTransactions, emailRules, rules };
+  }
+
+  // ── op: rename — pure metadata write (FINLYNQ-275) ──────────────────────────
+  // Resolves the target (id fast-path over fuzzy name), refuses a unique-name
+  // conflict with a CLEAR error (not a raw DB constraint 500), then re-writes
+  // name_ct + name_lookup. NOT a re-cluster (categories aren't securities) — the
+  // FK from every dependent stays put; only the label changes.
+  async function opRename(args: { id?: number; name?: string; new_name: string }): Promise<ToolResult> {
+    const newName = args.new_name?.trim();
+    if (!newName) return err("`new_name` is required and cannot be empty.");
+    if (!dek) return err("Cannot rename a category without an unlocked DEK (Stream D Phase 4).");
+    let cat: Row;
+    try {
+      cat = await resolveCategoryStrictOrAbort({ id: args.id, name: args.name });
+    } catch (e) {
+      if (e instanceof PreviewAbortError) return err(e.message);
+      throw e;
+    }
+    const catId = Number(cat.id);
+    const oldName = String(cat.name ?? `#${catId}`);
+    // Unique-name conflict check via the name_lookup HMAC (mirrors opCreate).
+    const newLookup = nameLookup(dek, newName);
+    const clash = await q(db, sql`
+      SELECT id FROM categories WHERE user_id = ${userId} AND name_lookup = ${newLookup} AND id <> ${catId}
+    `);
+    if (clash.length) return err(`Category "${newName}" already exists (id=${Number(clash[0].id)}). Pick a different name or merge into it.`);
+    const n = encryptName(dek, newName);
+    await db.execute(sql`
+      UPDATE categories SET name_ct = ${n.ct}, name_lookup = ${n.lookup}
+      WHERE id = ${catId} AND user_id = ${userId}
+    `);
+    // A rename changes the DISPLAYED category name on decrypted tx reads
+    // (getTransactions LEFT JOINs categories), so drop the per-user tx cache.
+    invalidateUserTxCache(userId);
+    return text({ success: true, data: { id: catId, oldName, newName, message: `Category "${oldName}" renamed to "${newName}"` } });
+  }
+
+  // ── op: merge — token-gated atomic repoint of ALL dependents (FINLYNQ-275) ──
+  // TWO-STEP via the shared withConfirmation middleware: a bare call previews
+  // per-type dependent counts + a token (writes NOTHING); a valid token commits
+  // — one db.transaction repoints every dependent source→target, then DELETEs
+  // the source. The token payload BINDS the resolved {source,target} ids.
+  type MergeArgs = {
+    source?: number | string;
+    target?: number | string;
+    confirmation_token?: string;
+    // memo slots — resolved once, shared across required/preview/tokenPayload/commit.
+    __src?: Row;
+    __tgt?: Row;
+  };
+  // A `source|target` may be a numeric id (fast-path) or a fuzzy name string.
+  function splitIdName(v: number | string | undefined): { id?: number; name?: string } {
+    if (v == null) return {};
+    if (typeof v === "number") return { id: v };
+    const asNum = Number(v.trim());
+    if (v.trim() !== "" && Number.isInteger(asNum) && asNum > 0 && String(asNum) === v.trim()) return { id: asNum };
+    return { name: v };
+  }
+  async function resolveMerge(a: MergeArgs): Promise<{ src: Row; tgt: Row }> {
+    if (a.__src && a.__tgt) return { src: a.__src, tgt: a.__tgt };
+    const src = await resolveCategoryStrictOrAbort(splitIdName(a.source));
+    const tgt = await resolveCategoryStrictOrAbort(splitIdName(a.target));
+    if (Number(src.id) === Number(tgt.id)) {
+      throw new PreviewAbortError("Source and target are the same category — nothing to merge.");
+    }
+    a.__src = src;
+    a.__tgt = tgt;
+    return { src, tgt };
+  }
+
+  const mergeHandler = withConfirmation<MergeArgs>(userId, {
+    operation: "merge_category",
+    tokenPayload: (a) => ({ source: a.__src ? Number(a.__src.id) : null, target: a.__tgt ? Number(a.__tgt.id) : null }),
+    preview: async (a) => {
+      const { src, tgt } = await resolveMerge(a);
+      const srcId = Number(src.id);
+      const deps = await countCategoryDependents(srcId);
+      const total = deps.transactions + deps.splits + deps.subscriptions + deps.budgets + deps.budgetTemplates + deps.recurringTransactions + deps.emailRules + deps.rules;
+      return {
+        source: { id: srcId, name: String(src.name ?? `#${srcId}`) },
+        target: { id: Number(tgt.id), name: String(tgt.name ?? `#${Number(tgt.id)}`) },
+        dependents: deps,
+        totalDependents: total,
+        action: `Repoint ${total} dependent row(s) to "${String(tgt.name ?? `#${Number(tgt.id)}`)}" then delete "${String(src.name ?? `#${srcId}`)}".`,
+      };
+    },
+    commit: async (a) => {
+      const { src, tgt } = await resolveMerge(a);
+      const srcId = Number(src.id);
+      const tgtId = Number(tgt.id);
+      // Re-count under the atomic transaction so the response reflects what was
+      // actually moved (a row could have changed between preview and commit).
+      const before = await countCategoryDependents(srcId);
+      // ctx.db is the real Drizzle instance at runtime (the route passes `db`
+      // from @/db); `DbLike` only advertises `execute`, so narrow-cast to reach
+      // `.transaction` for the atomic multi-table repoint + source delete.
+      const txdb = db as unknown as {
+        transaction: (fn: (tx: { execute: DbLike["execute"] }) => Promise<unknown>) => Promise<unknown>;
+      };
+      await txdb.transaction(async (tx) => {
+        // audit-trio: the transactions repoint bumps updated_at (every UPDATE
+        // site appends it). The other tables have no audit-trio contract.
+        await tx.execute(sql`UPDATE transactions SET category_id = ${tgtId}, updated_at = NOW() WHERE user_id = ${userId} AND category_id = ${srcId}`);
+        await tx.execute(sql`
+          UPDATE transaction_splits SET category_id = ${tgtId}
+          WHERE category_id = ${srcId}
+            AND transaction_id IN (SELECT id FROM transactions WHERE user_id = ${userId})
+        `);
+        await tx.execute(sql`UPDATE subscriptions SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
+        await tx.execute(sql`UPDATE budgets SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
+        await tx.execute(sql`UPDATE budget_templates SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
+        await tx.execute(sql`UPDATE recurring_transactions SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
+        await tx.execute(sql`UPDATE email_import_rules SET category_id = ${tgtId} WHERE user_id = ${userId} AND category_id = ${srcId}`);
+        // FINLYNQ-84 JSONB — rewrite every `set_category` action pointing at
+        // src. Element-wise via jsonb_agg + jsonb_set (NOT a text REPLACE —
+        // jsonb::text reformats keys/whitespace, so a stringified needle
+        // wouldn't match); each matching element's `categoryId` is set to tgt,
+        // every other action passed through untouched.
+        await tx.execute(sql`
+          UPDATE transaction_rules
+          SET actions = (
+            SELECT jsonb_agg(
+              CASE
+                WHEN elem->>'kind' = 'set_category' AND (elem->>'categoryId')::int = ${srcId}
+                THEN jsonb_set(elem, '{categoryId}', to_jsonb(${tgtId}::int))
+                ELSE elem
+              END
+            )
+            FROM jsonb_array_elements(actions) AS elem
+          )
+          WHERE user_id = ${userId}
+            AND actions @> ${JSON.stringify([{ kind: "set_category", categoryId: srcId }])}::jsonb
+        `);
+        // Source now has no dependents → delete it.
+        await tx.execute(sql`DELETE FROM categories WHERE id = ${srcId} AND user_id = ${userId}`);
+      });
+      // Transactions moved category → drop the per-user tx cache.
+      invalidateUserTxCache(userId);
+      return text({
+        success: true,
+        data: {
+          merged: true,
+          source: srcId,
+          target: tgtId,
+          repointed: {
+            transactions: before.transactions,
+            splits: before.splits,
+            subscriptions: before.subscriptions,
+            budgets: before.budgets,
+            budgetTemplates: before.budgetTemplates,
+            recurringTransactions: before.recurringTransactions,
+            emailRules: before.emailRules,
+            rules: before.rules,
+          },
+          message: `Merged category #${srcId} into #${tgtId} and deleted the source.`,
+        },
+      });
+    },
+  });
+
   // ── consolidated tool ───────────────────────────────────────────────────────
-  // `op: create | delete`. The delete op is a preview→confirmation-token
-  // two-step: WITHOUT `confirmation_token` it returns FK counts + a token
-  // (read-only preview); WITH the token it commits (refuses if FKs non-zero).
+  // `op: create | rename | merge | delete`. delete + merge are preview→token
+  // two-steps: WITHOUT `confirmation_token` they return a summary + a token
+  // (read-only preview); WITH the token they commit. rename + create write
+  // directly.
   registerManageTool(
     server,
     "manage_categories",
-    "Manage transaction categories: `op` selects create / delete. create: a new category (name + type E/I/R). delete: TWO-STEP — call with `id`/`name` and NO `confirmation_token` to preview FK counts (transactions/rules/subscriptions) + get a token, then call again with `id` + that `confirmation_token` to commit. Delete refuses while any dependent still references the category.",
+    "Manage transaction categories: `op` selects create / rename / merge / delete. create: a new category (name + type E/I/R). rename: change a category's name (`id`/`name` + `new_name`); a duplicate name is refused. merge: TWO-STEP — call with `source`+`target` and NO `confirmation_token` to preview per-type dependent counts + get a token, then call again with the same source/target + that `confirmation_token` to atomically repoint EVERY dependent (transactions/splits/rules/subscriptions/budgets/…) into the target and delete the source. delete: TWO-STEP — preview FK counts + token, then commit; delete refuses while any dependent still references the category (use merge to fold it into another).",
     z.discriminatedUnion("op", [
       z.object({
         op: z.literal("create"),
@@ -191,6 +428,18 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
         type: z.enum(["E", "I", "R"]).describe("Type: 'E'=expense, 'I'=income, 'R'=transfer"),
         group: z.string().optional().describe("Group label (e.g. 'Housing', 'Food')"),
         note: z.string().optional(),
+      }),
+      z.object({
+        op: z.literal("rename"),
+        id: z.number().int().positive().optional().describe("Category FK (categories.id). Exact match — preferred; wins over `name`."),
+        name: z.string().optional().describe("Category name (fuzzy matched). Requires an unlocked DEK. Pass `id` instead when no DEK is available."),
+        new_name: z.string().describe("The new category name. Must be unique — a clash is refused with a clear error."),
+      }),
+      z.object({
+        op: z.literal("merge"),
+        source: z.union([z.number().int().positive(), z.string()]).optional().describe("Source category to fold into the target: a numeric id (fast-path) or a fuzzy name. Its dependents are repointed to the target, then it is deleted."),
+        target: z.union([z.number().int().positive(), z.string()]).optional().describe("Target category that will own all of the source's dependents: a numeric id (fast-path) or a fuzzy name."),
+        confirmation_token: z.string().optional().describe("Token from the preview call for this exact source→target pair. Omit to preview per-type dependent counts; pass verbatim to commit. Single-use; 5-minute TTL."),
       }),
       z.object({
         op: z.literal("delete"),
@@ -201,6 +450,8 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
     ]),
     async (input) => {
       if (input.op === "create") return opCreate(input);
+      if (input.op === "rename") return opRename({ id: input.id, name: input.name, new_name: input.new_name });
+      if (input.op === "merge") return mergeHandler({ source: input.source, target: input.target, confirmation_token: input.confirmation_token });
       // delete: token present → commit; absent → preview.
       if (input.confirmation_token) {
         if (input.id == null) return err("Pass `id` (numeric) with `confirmation_token` to commit the delete.");

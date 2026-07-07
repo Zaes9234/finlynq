@@ -81,6 +81,8 @@ export const TOOL_ANNOTATION_OVERRIDES: Record<string, ToolAnnotations> = {
   // Phase 1 (goals / accounts / budgets / fx-overrides / categories / holdings):
   manage_goals: { destructiveHint: true },
   manage_fx_overrides: { destructiveHint: true },
+  // FINLYNQ-275 adds `op:"merge"` (deletes a row + repoints many dependents) and
+  // `op:"rename"` (metadata) — both covered by this tool-level destructive hint.
   manage_categories: { destructiveHint: true },
   manage_accounts: { destructiveHint: true },
   manage_budgets: { destructiveHint: true },
