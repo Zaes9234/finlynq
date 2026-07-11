@@ -20,6 +20,10 @@ export function clientCanonicalKey(
   const sym = h.symbol ? h.symbol.trim().toUpperCase() : "";
   if (h.assetType === "crypto" && sym) return `crypto:${sym}`;
   if ((h.assetType === "stock" || h.assetType === "etf") && sym) return `eq:${sym}`;
+  // Metals are symbol-keyed like stocks. The server's display assetType is
+  // "metal" but its canonicalKey coerces it through the cash branch, which
+  // re-derives `metal:<SYM>` from the symbol — so match that key here.
+  if (h.assetType === "metal" && sym) return `metal:${sym}`;
   if (h.assetType === "cash") {
     if (sym) {
       if (isMetalCurrency(sym)) return `metal:${sym}`;
