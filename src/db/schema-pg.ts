@@ -1495,6 +1495,23 @@ export const incomingEmails = pgTable("incoming_emails", {
   triagedBy: text("triaged_by").references(() => users.id),
 });
 
+// Admin replies sent from /admin/inbox, persisted so the conversation thread
+// (their inbound + our outbound) is visible in-app. Plaintext + no user_id,
+// mirroring incoming_emails. ON DELETE CASCADE with the replied-to email.
+export const incomingEmailReplies = pgTable("incoming_email_replies", {
+  id: text("id").primaryKey(), // UUID
+  incomingEmailId: text("incoming_email_id")
+    .notNull()
+    .references(() => incomingEmails.id, { onDelete: "cascade" }),
+  toAddress: text("to_address").notNull(),
+  fromAddress: text("from_address").notNull(),
+  subject: text("subject"),
+  body: text("body").notNull(),
+  sentBy: text("sent_by").references(() => users.id),
+  resendId: text("resend_id"),
+  sentAt: timestamp("sent_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 // ─── Email-to-Transaction Inbox (Epic B2, 2026-06-05) ──────────────────────
 //
 // Per-user inbound email turned into transactions. Distinct from

@@ -18,6 +18,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "crypto";
 import { db, schema } from "@/db";
 import { eq } from "drizzle-orm";
 import { requireAdmin } from "@/lib/auth/require-admin";
@@ -108,6 +109,20 @@ export async function POST(
       { status: 502 },
     );
   }
+
+  // Persist the reply so the conversation thread is visible in-app.
+  const fromBare = onVerifiedDomain
+    ? mailbox
+    : (/<([^>]+)>/.exec(from)?.[1] ?? from).trim();
+  await db.insert(schema.incomingEmailReplies).values({
+    id: randomUUID(),
+    incomingEmailId: id,
+    toAddress: recipient,
+    fromAddress: fromBare,
+    subject,
+    body: replyBody,
+    sentBy: userId,
+  });
 
   // Mark triaged on a successful send (admin has handled it).
   await db
