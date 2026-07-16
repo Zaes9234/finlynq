@@ -1073,6 +1073,15 @@ export const stagedImports = pgTable("staged_imports", {
   // decryptSampleRows). `headers` stays plaintext (column-names only, low
   // sensitivity).
   encryptionTier: text("encryption_tier").notNull().default("service"),
+  // ─── FINLYNQ-271: file-level content hash (idempotent MCP upload) ─────
+  // sha256 (hex) of the RAW uploaded file bytes, PLAINTEXT — the file-level
+  // idempotency key for the `upload_statement` MCP tool: a re-upload of the
+  // SAME bytes while a pending import for that hash already exists returns the
+  // existing stagedImportId (`duplicateOf`) instead of staging twice. NULL for
+  // the web upload route (which stays hash-less + byte-identical) and every
+  // pre-FINLYNQ-271 row. DISTINCT from `import_hash` (row-level, over the
+  // plaintext payee) — never conflate the two.
+  contentHash: text("content_hash"),
 });
 
 export const stagedTransactions = pgTable("staged_transactions", {

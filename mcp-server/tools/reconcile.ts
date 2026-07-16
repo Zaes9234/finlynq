@@ -6,6 +6,7 @@
  * Do not reformat or re-logic the handlers.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createHash } from "node:crypto";
 import {
   q,
   err,
@@ -811,7 +812,7 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
   const UPLOAD_STATEMENT_MAX_BYTES = 5 * 1024 * 1024; // 5 MB decoded
   server.tool(
     "upload_statement",
-    "Stage a bank/brokerage statement file (CSV, OFX, or QFX) over this MCP connection (no browser session needed). Pass the file bytes base64-encoded in fileContent; the format is detected from fileName's extension. Runs the STAGING pipeline and returns { stagedImportId, rowCount, duplicateCount, newCount, dateStart, dateEnd, statementBalance, statementBalanceDate, statementCurrency, detectedFormat } — feed the stagedImportId to get_staged_import (inspect) then send_to_bank_ledger (load the bank side) or approve_staged_rows (first import). Max file size 5 MB decoded (~6.7 MB base64). accountId must be one of your accounts (required for OFX/QFX). An unsupported/unparseable file returns an error with detectedFormat:'unrecognised' and NO staged import. Re-uploading the same file creates a NEW staged import (row-level dedup flags known rows). Requires an unlocked DEK.",
+    "Stage a bank/brokerage statement file (CSV, OFX, or QFX) over this MCP connection (no browser session). Pass the bytes base64-encoded in fileContent; format detected from fileName's extension. Runs the STAGING pipeline and returns { stagedImportId, rowCount, duplicateCount, newCount, dateStart, dateEnd, statementBalance/Date/Currency, detectedFormat } — feed stagedImportId to get_staged_import then send_to_bank_ledger (or approve_staged_rows for a first import). Max 5 MB decoded (~6.7 MB base64). accountId must be one of your accounts (required for OFX/QFX). An unparseable file errors with detectedFormat:'unrecognised' and NO staged import. Idempotent by content hash: re-sending the SAME bytes while a pending import for that file exists returns the existing { stagedImportId, duplicateOf } and stages nothing (re-upload after approval/rejection stages fresh). Requires an unlocked DEK.",
     {
       fileContent: z
         .string()
@@ -869,6 +870,46 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
         );
       }
 
+      // ─── Idempotency probe (FINLYNQ-271) ───────────────────────────────────
+      // File-level sha256 of the RAW bytes (plaintext; DISTINCT from the
+      // row-level import_hash over the plaintext payee). If a PENDING staged
+      // import for the same (user, hash) already exists, return it verbatim +
+      // duplicateOf and stage NOTHING — so a re-sent file doesn't double-stage.
+      // Pending-only (Resolved decision #2): a re-upload AFTER approval/rejection
+      // correctly stages fresh (its rows flag as `existing` via row-level dedup).
+      const contentHash = createHash("sha256").update(bytes).digest("hex");
+      const existing = await q(
+        db,
+        sql`
+          SELECT id, total_row_count, duplicate_count, statement_balance,
+                 statement_balance_date, statement_currency, date_range_start,
+                 date_range_end, file_format
+          FROM staged_imports
+          WHERE user_id = ${userId}
+            AND content_hash = ${contentHash}
+            AND status = 'pending'
+          LIMIT 1
+        `,
+      );
+      if (existing.length) {
+        const e = existing[0];
+        const total = Number(e.total_row_count ?? 0);
+        const dup = Number(e.duplicate_count ?? 0);
+        return dataResponse({
+          stagedImportId: String(e.id),
+          duplicateOf: String(e.id),
+          rowCount: total,
+          duplicateCount: dup,
+          newCount: total - dup,
+          dateStart: e.date_range_start ?? null,
+          dateEnd: e.date_range_end ?? null,
+          statementBalance: e.statement_balance ?? null,
+          statementBalanceDate: e.statement_balance_date ?? null,
+          statementCurrency: e.statement_currency ?? null,
+          detectedFormat: e.file_format ?? null,
+        });
+      }
+
       // Construct a File from the bytes so the shared staging chokepoint parses
       // it identically to the browser upload (it reads file.text() + the name).
       const file = new File([new Uint8Array(bytes)], fileName, {
@@ -880,6 +921,7 @@ export function registerReconcileTools(server: McpServer, ctx: PgToolContext) {
         dek,
         file,
         accountId,
+        contentHash,
       });
 
       if (!result.ok) {
