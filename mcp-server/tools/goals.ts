@@ -39,7 +39,7 @@ import {
 } from "../lib/date-validators";
 import { computeGoalProgress } from "../../src/lib/goals-progress";
 import { todayISO } from "../../src/lib/utils/date";
-import { registerManageTool, registerAlias } from "./_consolidate";
+import { registerManageTool } from "./_consolidate";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -352,53 +352,5 @@ export function registerGoalsTools(server: McpServer, ctx: PgToolContext) {
     },
   );
 
-  // ── hidden back-compat aliases (removed in v4.1) ─────────────────────────────
-  registerAlias(
-    server,
-    "add_goal",
-    "Create a new financial goal. `account_ids` (issue #130) accepts 0..N account ids — the goal's progress sums across all linked accounts. Legacy single `account` (fuzzy-matched name) is still accepted as a single-element list. Pass `account_ids: []` for a manual-tracking goal.",
-    {
-      name: z.string().describe("Goal name"),
-      type: z.enum(["savings", "debt_payoff", "investment", "emergency_fund"]).describe("Goal type"),
-      target_amount: z.number().positive().describe("Target amount (must be > 0)"),
-      deadline: ymdDate.optional().describe("Deadline (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Legacy single-account linker — name or alias (fuzzy matched). A mistyped/unmatched name is REFUSED (never silently unlinked). Prefer `account_id` or `account_ids`."),
-      account_id: z.number().int().positive().optional().describe("Single-account linker FK fast-path — wins over the fuzzy `account` name. Prefer `account_ids` for multi-account goals."),
-      account_ids: z.array(z.number().int()).optional().describe("Multi-account linker (issue #130). Goal progress sums transactions across every account id supplied. Each id must belong to the user. Empty array = unlinked (manual tracking)."),
-    },
-    async (args) => opAdd(args),
-  );
-  registerAlias(
-    server,
-    "update_goal",
-    "Update a financial goal's target, deadline, status, or linked accounts. `account_ids` (issue #130) replaces the existing account-link set atomically — pass `[]` to unlink all, or omit to leave links unchanged.",
-    {
-      goal: z.string().optional().describe("Goal name (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Pass this OR `goal_id`."),
-      goal_id: z.number().int().positive().optional().describe("Goal FK fast-path — wins over the fuzzy `goal` name."),
-      target_amount: z.number().positive().optional().describe("Target amount (must be > 0)"),
-      deadline: ymdDate.optional().describe("YYYY-MM-DD"),
-      status: z.enum(["active", "completed", "paused"]).optional(),
-      name: z.string().optional().describe("Rename the goal"),
-      account_ids: z.array(z.number().int()).optional().describe("Replace the goal's linked accounts (issue #130). When supplied, the existing goal_accounts rows are deleted and replaced with the new set in a single transaction. Pass `[]` to unlink all. Omit to leave links unchanged."),
-    },
-    async (args) => opUpdate(args),
-  );
-  registerAlias(
-    server,
-    "delete_goal",
-    "Delete a financial goal by name or id",
-    {
-      goal: z.string().optional().describe("Goal name (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Pass this OR `goal_id`."),
-      goal_id: z.number().int().positive().optional().describe("Goal FK fast-path — wins over the fuzzy `goal` name."),
-    },
-    async (args) => opDelete(args),
-  );
-  registerAlias(
-    server,
-    "get_goals",
-    "Get all financial goals with progress. Each goal carries `accountIds: number[]` (every linked account) and `accounts: string[]` (decrypted display names) — issue #130 multi-account linking. Numeric progress fields (issue #233): `currentAmount` (in goal currency), `progress` and `percentComplete` (0..100, 1dp), `remaining`, `monthlyNeeded` (when a deadline is set).",
-    {},
-    async () => opList(),
-  );
 
 }

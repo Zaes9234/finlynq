@@ -44,7 +44,7 @@ import {
 import { resolveReportingCurrency } from "../reporting-currency";
 import { getRate } from "../../src/lib/fx-service";
 import { tagAmount } from "../currency-tagging";
-import { registerManageTool, registerAlias } from "./_consolidate";
+import { registerManageTool } from "./_consolidate";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -540,7 +540,7 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
       return text({ success: true, data: { created, skipped, message: `Created ${created} subscription(s); skipped ${skipped.length} existing` } });
   }
 
-  // ── consolidated tool: manage_subscriptions + hidden back-compat aliases ────
+  // ── consolidated tool: manage_subscriptions ────
   registerManageTool(
     server,
     "manage_subscriptions",
@@ -610,7 +610,12 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
             next_billing_date: input.next_billing_date ?? new Date().toISOString().split("T")[0],
             currency: input.currency,
             category: input.category,
+            // FK fast-paths — MUST be forwarded so `*_id` wins over the fuzzy
+            // name (CLAUDE.md invariant). The removed `add_subscription` alias
+            // forwarded these; dropping them here silently lost the fast-path.
+            category_id: input.category_id,
             account: input.account,
+            account_id: input.account_id,
             notes: input.notes,
           });
         case "update":
@@ -623,85 +628,4 @@ export function registerSubscriptionsTools(server: McpServer, ctx: PgToolContext
     },
   );
 
-  registerAlias(
-    server,
-    "list_subscriptions",
-    "List all subscriptions with full detail (status, next billing, category, account, notes). Issue #210 — `amount` is always positive (the storage convention); a subscription is by definition an outflow. Intended split: use this for the raw editable row set; use get_subscription_summary for aggregate monthly/annual cost + upcoming renewals, and get_recurring_transactions for engine-DETECTED recurrences that are not tracked subscriptions.",
-    { status: z.enum(["active", "paused", "cancelled", "all"]).optional().describe("Filter by status (default: all)") },
-    async (args) => opList(args),
-  );
-  registerAlias(
-    server,
-    "add_subscription",
-    "Create a new subscription. Issue #210 — `amount` MUST be positive (the storage convention). A subscription is by definition an outflow; the sign is implicit, not in the value.",
-    {
-      name: z.string().describe("Subscription name (unique per user)"),
-      amount: z.number().positive().describe("Amount per billing cycle (must be > 0)"),
-      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).describe("Billing frequency"),
-      next_billing_date: ymdDate.describe("Next billing date (YYYY-MM-DD)"),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: full SUPPORTED_CURRENCIES list."),
-      category: z.string().optional().describe("Category name (fuzzy matched — mistyped/unmatched is REFUSED)"),
-      category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
-      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias — mistyped/unmatched is REFUSED)"),
-      account_id: z.number().int().positive().optional().describe("Account FK fast-path — wins over the fuzzy `account` name."),
-      notes: z.string().optional(),
-    },
-    async (args) => opAddSingle(args),
-  );
-  registerAlias(
-    server,
-    "bulk_add_subscriptions",
-    "Commit a set of detected subscriptions. Pass the candidates returned by detect_subscriptions (payee + amount + cadence), plus the confirmationToken.",
-    {
-      candidates: z.array(z.object({
-        payee: z.string(),
-        amount: z.number(),
-        cadence: z.enum(["weekly", "monthly", "quarterly", "annual"]),
-        next_billing_date: ymdDate.optional().describe("YYYY-MM-DD. Defaults to today + cadence interval"),
-        category_id: z.number().optional(),
-      })).min(1),
-      confirmation_token: z.string(),
-    },
-    async (args) => opBulkAdd(args),
-  );
-  registerAlias(
-    server,
-    "update_subscription",
-    "Update any field of an existing subscription",
-    {
-      id: z.number().describe("Subscription id"),
-      name: z.string().optional(),
-      amount: z.number().positive().optional().describe("Amount per billing cycle (must be > 0)"),
-      cadence: z.enum(["weekly", "monthly", "quarterly", "annual", "yearly"]).optional(),
-      next_billing_date: ymdDate.optional().describe("YYYY-MM-DD"),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
-      category: z.string().optional().describe("Category name (fuzzy — mistyped/unmatched is REFUSED). Empty string clears."),
-      category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `category` name."),
-      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias — mistyped/unmatched is REFUSED). Empty string clears."),
-      account_id: z.number().int().positive().optional().describe("Account FK fast-path — wins over the fuzzy `account` name."),
-      status: z.enum(["active", "paused", "cancelled"]).optional(),
-      cancel_reminder_date: ymdDate.optional().describe("YYYY-MM-DD"),
-      notes: z.string().optional(),
-    },
-    async (args) => opUpdate(args),
-  );
-  registerAlias(
-    server,
-    "delete_subscription",
-    "Permanently delete a subscription by id or name (`name` resolves via the shared envelope; `id` fast-path wins).",
-    {
-      id: z.number().int().positive().optional().describe("Subscription FK fast-path — wins over `name`. Pass this OR `name`."),
-      name: z.string().optional().describe("Subscription name (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Requires an unlocked DEK."),
-    },
-    async (args) => opDelete(args),
-  );
-  registerAlias(
-    server,
-    "get_subscription_summary",
-    "Get all tracked subscriptions with total monthly cost and upcoming renewals. Each subscription's amount is in its own currency; totals are converted to reportingCurrency (defaults to user's display currency). Intended split: use this for AGGREGATE cost + upcoming-renewal roll-ups; use list_subscriptions for the raw editable row set, and get_recurring_transactions for transactions the engine DETECTED as recurring (not user-tracked subscriptions).",
-    {
-      reportingCurrency: z.string().optional().describe("ISO code; defaults to user's display currency. Used for the unified total monthly/annual cost."),
-    },
-    async (args) => opSummary(args),
-  );
 }

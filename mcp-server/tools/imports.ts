@@ -1,9 +1,19 @@
 /**
- * MCP HTTP tool group: imports (FINLYNQ-109 extraction).
+ * MCP HTTP tool group: imports / staged-import lifecycle (FINLYNQ-109 extraction;
+ * reconcile-consolidation).
  *
- * Handler bodies moved VERBATIM out of register-tools-pg.ts. The only edits
- * are the enclosing function wrapper + the shared-state destructure from ctx.
- * Do not reformat or re-logic the handlers.
+ * The staged-import cohort is folded into ONE `manage_statement_import`
+ * discriminated-union tool (`op`: upload / list / get / list_rows / update_row /
+ * link_transfer_pair / approve / send_to_bank_ledger / apply_rules / reject).
+ * Handler bodies are lifted VERBATIM (the `upload` / `send_to_bank_ledger` /
+ * `apply_rules` bodies moved here from reconcile.ts). Response shapes stay
+ * byte-identical; only the input envelope gained an `op` discriminator.
+ *
+ * The legacy `mcp_uploads` path (list_pending_uploads / preview_import /
+ * execute_import / cancel_import) was REMOVED outright (D-2): it wrote the wrong
+ * artifact (a file on disk + an mcp_uploads row, not a staged_imports row) and
+ * caused real duplication; the staging pipeline is the one import path shared by
+ * web / MCP / mobile. Do not reformat or re-logic the handlers.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
@@ -11,8 +21,6 @@ import {
   text,
   err,
   dataResponse,
-  decryptNameish,
-  shiftIsoDate,
   type Row,
   type PgToolContext,
 } from "./_shared";
@@ -24,15 +32,15 @@ import {
   z,
 } from "zod";
 import {
+  db as drizzleDb,
+} from "../../src/db";
+import {
   stagedTransactions,
 } from "../../src/db/schema-pg";
 import {
   encryptField,
   tryDecryptField,
 } from "../../src/lib/crypto/envelope";
-import {
-  maybeDecryptFileBytes,
-} from "../../src/lib/crypto/file-envelope";
 import {
   getRate,
 } from "../../src/lib/fx-service";
@@ -52,17 +60,11 @@ import {
   withConfirmation,
   PreviewAbortError,
 } from "./_confirm";
-import fs from "fs/promises";
+import { registerManageTool } from "./_consolidate";
 import {
   randomUUID,
-} from "crypto";
-import {
-  csvToRawTransactions,
-  csvToRawTransactionsWithMapping,
-} from "../../src/lib/csv-parser";
-import {
-  parseOfx,
-} from "../../src/lib/ofx-parser";
+  createHash,
+} from "node:crypto";
 import {
   executeImport as pipelineExecute,
   type RawTransaction,
@@ -74,15 +76,14 @@ import {
   upsertBankTransaction,
 } from "../../src/lib/bank-ledger";
 import {
-  detectProbableDuplicates,
-  type DuplicateCandidatePool,
-  type DuplicateCandidateRow,
-  type DuplicateMatch,
-} from "../../src/lib/external-import/duplicate-detect";
+  sendStagedRowsToBankLedger,
+} from "../../src/lib/import/send-to-bank-ledger";
 import {
-  applyRulesToBatch,
-  type TransactionRule,
-} from "../../src/lib/auto-categorize";
+  stageStatementFile,
+} from "../../src/lib/import/stage-statement-file";
+import {
+  applyRulesToStagedBatch,
+} from "../../src/lib/rules/apply-to-staged-batch";
 import {
   decryptStaged,
   encryptStaged,
@@ -96,392 +97,221 @@ import {
   type FormatTag,
 } from "../../src/lib/tx-source";
 
+type ToolResult = { content: Array<{ type: "text"; text: string }> };
+
+// 5 MB on the DECODED bytes (mirrors the browser upload's MAX_BYTES). base64
+// inflates ~33%, so the MCP message carrying fileContent is ~6.7 MB for a 5 MB
+// file — the effective per-message cap is documented in the op description.
+const UPLOAD_STATEMENT_MAX_BYTES = 5 * 1024 * 1024; // 5 MB decoded
+
 export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek } = ctx;
 
 
-  // ─── Part 1 tail — file upload preview/execute ─────────────────────────────
-
-  /**
-   * Load a parsed-rows array from a stored upload. Returns the raw RawTransaction
-   * list plus parse errors. Used by both preview_import and execute_import.
-   */
-  async function loadUploadRows(
-    uploadId: string,
-    columnMapping: Record<string, string> | undefined
-  ): Promise<{ upload: Row; rows: RawTransaction[]; errors: Array<{ row: number; message: string }> }> {
-    const uploads = await q(db, sql`
-      SELECT id, user_id, format, storage_path, original_filename, size_bytes, status, created_at, expires_at
-      FROM mcp_uploads
-      WHERE id = ${uploadId} AND user_id = ${userId}
-    `);
-    if (!uploads.length) throw new Error(`Upload #${uploadId} not found`);
-    const upload = uploads[0];
-    if (String(upload.status) === "executed") throw new Error("Upload already executed");
-    if (String(upload.status) === "cancelled") throw new Error("Upload was cancelled");
-    const expiresAt = new Date(String(upload.expires_at));
-    if (expiresAt.getTime() < Date.now()) throw new Error("Upload expired");
-
-    const rawBuf = await fs.readFile(String(upload.storage_path));
-    // Finding #7 — files are encrypted at rest; decrypt with the user's DEK.
-    // Legacy plaintext files (pre-rollout) pass through via the magic check.
-    const buf = maybeDecryptFileBytes(dek, rawBuf);
-    const format = String(upload.format);
-    let rows: RawTransaction[] = [];
-    const errors: Array<{ row: number; message: string }> = [];
-
-    if (format === "csv") {
-      const text = buf.toString("utf8");
-      const result = columnMapping
-        ? csvToRawTransactionsWithMapping(text, columnMapping)
-        : csvToRawTransactions(text);
-      rows = result.rows;
-      errors.push(...result.errors);
-    } else if (format === "ofx" || format === "qfx") {
-      const text = buf.toString("utf8");
-      const parsed = parseOfx(text);
-      rows = parsed.transactions.map((t) => ({
-        date: t.date,
-        account: "", // OFX doesn't name the account — user fills via column_mapping.account if needed
-        amount: t.amount,
-        payee: t.payee,
-        currency: parsed.currency,
-        note: t.memo,
-        fitId: t.fitId,
-      }));
-    } else {
-      throw new Error(`Unsupported upload format: ${format}`);
+  // ── op: upload — lifted VERBATIM from upload_statement (was reconcile.ts) ───
+  // Stage a statement file (CSV / OFX / QFX) over the authenticated MCP
+  // connection — no browser session needed. Decodes the base64 `fileContent`
+  // server-side and runs the STAGING pipeline via the shared `stageStatementFile`
+  // chokepoint, so the returned `stagedImportId` is a REAL `staged_imports.id`
+  // that op:send_to_bank_ledger + op:approve consume unchanged. HTTP-only: a DEK
+  // is required to encrypt staged rows under the user key. Idempotent by content
+  // hash: re-sending the SAME bytes while a pending import for that file exists
+  // returns the existing { stagedImportId, duplicateOf } and stages nothing.
+  async function opUpload(args: {
+    fileContent: string;
+    fileName: string;
+    accountId: number;
+    mimeType?: string;
+  }): Promise<ToolResult> {
+    const { fileContent, fileName, accountId } = args;
+    if (!dek) {
+      return err(
+        "manage_statement_import(op:upload) requires an unlocked DEK to encrypt the staged rows under your key. Re-login to refresh your session.",
+      );
     }
 
-    return { upload, rows, errors };
+    // ─── Decode base64 → bytes (5 MB cap on the DECODED size) ──────────────
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(fileContent, "base64");
+    } catch {
+      return err("fileContent is not valid base64.");
+    }
+    if (bytes.length === 0) {
+      return err("Decoded file is empty.");
+    }
+    if (bytes.length > UPLOAD_STATEMENT_MAX_BYTES) {
+      return err(
+        `File exceeds the ${UPLOAD_STATEMENT_MAX_BYTES} byte (5 MB) limit (decoded size ${bytes.length} bytes). Split the statement into smaller files.`,
+      );
+    }
+
+    // ─── Idempotency probe (FINLYNQ-271) ───────────────────────────────────
+    // File-level sha256 of the RAW bytes (plaintext; DISTINCT from the
+    // row-level import_hash over the plaintext payee). If a PENDING staged
+    // import for the same (user, hash) already exists, return it verbatim +
+    // duplicateOf and stage NOTHING — so a re-sent file doesn't double-stage.
+    // Pending-only (Resolved decision #2): a re-upload AFTER approval/rejection
+    // correctly stages fresh (its rows flag as `existing` via row-level dedup).
+    const contentHash = createHash("sha256").update(bytes).digest("hex");
+    const existing = await q(
+      db,
+      sql`
+        SELECT id, total_row_count, duplicate_count, statement_balance,
+               statement_balance_date, statement_currency, date_range_start,
+               date_range_end, file_format
+        FROM staged_imports
+        WHERE user_id = ${userId}
+          AND content_hash = ${contentHash}
+          AND status = 'pending'
+        LIMIT 1
+      `,
+    );
+    if (existing.length) {
+      const e = existing[0];
+      const total = Number(e.total_row_count ?? 0);
+      const dup = Number(e.duplicate_count ?? 0);
+      return dataResponse({
+        stagedImportId: String(e.id),
+        duplicateOf: String(e.id),
+        rowCount: total,
+        duplicateCount: dup,
+        newCount: total - dup,
+        dateStart: e.date_range_start ?? null,
+        dateEnd: e.date_range_end ?? null,
+        statementBalance: e.statement_balance ?? null,
+        statementBalanceDate: e.statement_balance_date ?? null,
+        statementCurrency: e.statement_currency ?? null,
+        detectedFormat: e.file_format ?? null,
+      });
+    }
+
+    // Construct a File from the bytes so the shared staging chokepoint parses
+    // it identically to the browser upload (it reads file.text() + the name).
+    const file = new File([new Uint8Array(bytes)], fileName, {
+      type: "application/octet-stream",
+    });
+
+    const result = await stageStatementFile({
+      userId,
+      dek,
+      file,
+      accountId,
+      contentHash,
+    });
+
+    if (!result.ok) {
+      // Parse / ownership / size failure. Surface a descriptive error +
+      // detectedFormat so the caller knows it was an unrecognised format vs a
+      // bound-account problem. No staged import was created.
+      const msg =
+        typeof result.body?.error === "string"
+          ? (result.body.error as string)
+          : "Could not stage the statement file.";
+      return err(`${msg} (detectedFormat: ${result.detectedFormat})`);
+    }
+
+    // No invalidateUser — this op writes ONLY staged_imports /
+    // staged_transactions (a pending review batch), not `transactions`, so the
+    // per-user tx cache is untouched (mirrors send_to_bank_ledger).
+    return dataResponse({
+      stagedImportId: result.stagedImportId,
+      rowCount: result.rowCount,
+      duplicateCount: result.duplicateCount,
+      newCount: result.newCount,
+      dateStart: result.dateStart,
+      dateEnd: result.dateEnd,
+      statementBalance: result.statementBalance,
+      statementBalanceDate: result.statementBalanceDate,
+      statementCurrency: result.statementCurrency,
+      detectedFormat: result.format,
+      counts: result.counts,
+      rowErrors: result.rowErrors,
+    });
   }
 
-  // ── list_pending_uploads ───────────────────────────────────────────────────
-  server.tool(
-    "list_pending_uploads",
-    "List MCP uploads that are still pending or previewed (not yet executed, cancelled, or expired).",
-    {},
-    async () => {
-      const rows = await q(db, sql`
-        SELECT id, format, original_filename, size_bytes, row_count, status,
-               created_at, expires_at
-        FROM mcp_uploads
-        WHERE user_id = ${userId}
-          AND status IN ('pending', 'previewed')
-          AND expires_at > NOW()
-        ORDER BY created_at DESC
-      `);
-      return text({ success: true, data: rows });
+  // ── op: send_to_bank_ledger — lifted VERBATIM (was reconcile.ts) ────────────
+  // FINLYNQ-220 (R-07). Promote staged rows into bank_transactions ONLY — the
+  // reconcile-only workflow. Shares the sendStagedRowsToBankLedger chokepoint
+  // with the web "Send to bank ledger" button. NEVER writes a `transactions`
+  // row. No confirmation token; upsertBankTransaction is idempotent (ON CONFLICT
+  // bumps last_seen). HTTP-only — needs the DEK to decrypt payee/note.
+  async function opSendToBankLedger(args: {
+    stagedImportId: string;
+    rowIds?: string[];
+    skipExistingMatches?: boolean;
+  }): Promise<ToolResult> {
+    const { stagedImportId, rowIds, skipExistingMatches } = args;
+    if (!dek) {
+      return err(
+        "manage_statement_import(op:send_to_bank_ledger) requires an unlocked DEK to decrypt staged rows and re-encrypt them under your key. Re-login to refresh your session.",
+      );
     }
-  );
-
-
-  // ── preview_import ─────────────────────────────────────────────────────────
-  server.tool(
-    "preview_import",
-    "Preview an uploaded CSV/OFX/QFX file. Returns first 20 parsed rows, dedup hit count, category auto-match coverage, unresolved accounts, probable cross-source duplicates (FX-spread + ±7 day fuzzy match — heuristic, not exact), and a confirmationToken for execute_import.",
-    {
-      upload_id: z.string().describe("The id returned by POST /api/mcp/upload"),
-      template_id: z.number().optional().describe("Apply a saved import template's column mapping"),
-      column_mapping: z.record(z.string(), z.string()).optional().describe("Ad-hoc column mapping {date, amount, payee?, account?, category?, note?, tags?}"),
-    },
-    async ({ upload_id, template_id, column_mapping }) => {
-      try {
-        // Resolve column mapping from template_id or inline.
-        let mapping: Record<string, string> | undefined = column_mapping;
-        if (template_id !== undefined && !mapping) {
-          const tpl = await q(db, sql`
-            SELECT column_mapping, default_account
-            FROM import_templates
-            WHERE id = ${template_id} AND user_id = ${userId}
-          `);
-          if (!tpl.length) return err(`Import template #${template_id} not found`);
-          try {
-            mapping = JSON.parse(String(tpl[0].column_mapping)) as Record<string, string>;
-          } catch {
-            return err("Import template has invalid column_mapping JSON");
-          }
-        }
-
-        const { upload, rows, errors } = await loadUploadRows(upload_id, mapping);
-
-        // Dedup via generateImportHash — runs against plaintext payee, which
-        // is what we have at this boundary.
-        // Stream D Phase 4: a.name dropped — decrypt name_ct via decryptNameish
-        // before building the lookup map.
-        const accountsRaw = await q(db, sql`SELECT id, name_ct, alias_ct FROM accounts WHERE user_id = ${userId}`);
-        const accounts = decryptNameish(accountsRaw, dek);
-        const accountByName = new Map<string, number>(accounts.map((a) => [String(a.name ?? ""), Number(a.id)]));
-        const existingHashRows = await q(db, sql`SELECT import_hash FROM transactions WHERE user_id = ${userId} AND import_hash IS NOT NULL`);
-        const existingHashes = new Set<string>(existingHashRows.map((r) => String(r.import_hash)));
-
-        let dedupHits = 0;
-        const unresolvedAccounts = new Set<string>();
-        // Issue #65: collect non-exact-dedup rows so we can run probable-duplicate detection
-        // afterwards. The detector deliberately doesn't see rows that exact-match upstream.
-        const fuzzyInputs: Array<{
-          rowIndex: number;
-          date: string;
-          accountId: number;
-          amount: number;
-          payeePlain: string;
-          importHash: string;
-        }> = [];
-        for (let i = 0; i < rows.length; i++) {
-          const r = rows[i];
-          const aId = accountByName.get(r.account);
-          if (!aId && r.account) unresolvedAccounts.add(r.account);
-          if (aId) {
-            const h = generateImportHash(r.date, aId, r.amount, r.payee);
-            if (existingHashes.has(h)) {
-              dedupHits++;
-            } else {
-              fuzzyInputs.push({
-                rowIndex: i,
-                date: r.date,
-                accountId: aId,
-                amount: r.amount,
-                payeePlain: r.payee ?? "",
-                importHash: h,
-              });
-            }
-          }
-        }
-
-        // Issue #65: cross-source duplicate detection. Builds a one-shot pool
-        // over the union of touched accounts in a ±7 day window and runs the
-        // shared scoring helper. Warning surface only — never blocks the
-        // import. The helper handles the consume-once-per-existing-row
-        // invariant.
-        let probableDuplicates: DuplicateMatch[] = [];
-        if (fuzzyInputs.length > 0) {
-          try {
-            const accountIdSet = Array.from(new Set(fuzzyInputs.map((f) => f.accountId)));
-            const dates = fuzzyInputs.map((f) => f.date).sort();
-            const dateMin = shiftIsoDate(dates[0], -7);
-            const dateMax = shiftIsoDate(dates[dates.length - 1], 7);
-            if (dateMin && dateMax) {
-              // `ARRAY[...]::int[]` (not `(${arr})::int[]` — Drizzle expands
-              // each element as a scalar param, so the latter parses as a
-              // row-cast). PR #142 follow-up.
-              const accountIdSetExpr = sql.join(accountIdSet.map((id) => sql`${id}`), sql`, `);
-              const poolRows = await q(db, sql`
-                SELECT t.id, t.account_id, t.date, t.amount, t.payee, t.import_hash,
-                       t.fit_id, t.link_id, c.type AS category_type, t.source,
-                       t.portfolio_holding_id
-                  FROM transactions t
-                  LEFT JOIN categories c ON c.id = t.category_id
-                 WHERE t.user_id = ${userId}
-                   AND t.account_id = ANY(ARRAY[${accountIdSetExpr}]::int[])
-                   AND t.date BETWEEN ${dateMin} AND ${dateMax}
-              `);
-              const byAccount = new Map<number, DuplicateCandidateRow[]>();
-              const linkIds: string[] = [];
-              for (const p of poolRows) {
-                const accId = Number(p.account_id);
-                const payeeRaw = p.payee == null ? null : String(p.payee);
-                const payeePlain =
-                  payeeRaw && payeeRaw.startsWith("v1:")
-                    ? dek
-                      ? tryDecryptField(dek, payeeRaw, "transactions.payee")
-                      : null
-                    : payeeRaw;
-                const row: DuplicateCandidateRow = {
-                  id: Number(p.id),
-                  accountId: accId,
-                  date: String(p.date),
-                  amount: Number(p.amount),
-                  payeePlain,
-                  importHash: p.import_hash == null ? null : String(p.import_hash),
-                  fitId: p.fit_id == null ? null : String(p.fit_id),
-                  linkId: p.link_id == null ? null : String(p.link_id),
-                  categoryType: p.category_type == null ? null : String(p.category_type),
-                  source: p.source == null ? null : String(p.source),
-                  portfolioHoldingId: p.portfolio_holding_id == null ? null : Number(p.portfolio_holding_id),
-                };
-                const arr = byAccount.get(accId) ?? [];
-                arr.push(row);
-                byAccount.set(accId, arr);
-                if (row.categoryType === "R" && row.linkId) linkIds.push(row.linkId);
-              }
-
-              // Sibling-account index for transfer-pair hint.
-              const siblingAccountByLinkId = new Map<string, number>();
-              if (linkIds.length > 0) {
-                // `ARRAY[...]::text[]` for the same Drizzle-expansion reason
-                // documented above (PR #142 follow-up).
-                const linkIdsExpr = sql.join(linkIds.map((id) => sql`${id}`), sql`, `);
-                const sibRows = await q(db, sql`
-                  SELECT link_id, account_id
-                    FROM transactions
-                   WHERE user_id = ${userId}
-                     AND link_id = ANY(ARRAY[${linkIdsExpr}]::text[])
-                `);
-                const accountSet = new Set<number>(accountIdSet);
-                const byLink = new Map<string, number[]>();
-                for (const sr of sibRows) {
-                  const lid = sr.link_id == null ? null : String(sr.link_id);
-                  const a = sr.account_id == null ? null : Number(sr.account_id);
-                  if (!lid || a == null) continue;
-                  const arr = byLink.get(lid) ?? [];
-                  arr.push(a);
-                  byLink.set(lid, arr);
-                }
-                for (const [linkId, accs] of byLink) {
-                  const sib = accs.find((a) => !accountSet.has(a));
-                  if (sib != null) siblingAccountByLinkId.set(linkId, sib);
-                }
-              }
-
-              const pool: DuplicateCandidatePool = {
-                byAccount,
-                siblingAccountByLinkId,
-              };
-              probableDuplicates = detectProbableDuplicates(fuzzyInputs, pool);
-            }
-          } catch {
-            // Heuristic — never block the preview on a detection error.
-            probableDuplicates = [];
-          }
-        }
-
-        // Category coverage via the active rule set (FINLYNQ-84: JSONB conditions+actions).
-        const rules = await q(db, sql`
-          SELECT id, name, conditions, actions, priority
-          FROM transaction_rules
-          WHERE user_id = ${userId} AND is_active = true
-          ORDER BY priority DESC
-        `);
-        const ruleSet: TransactionRule[] = rules.map((r) => ({
-          id: Number(r.id),
-          name: String(r.name ?? ""),
-          conditions: (r.conditions ?? { all: [] }) as TransactionRule["conditions"],
-          actions: (Array.isArray(r.actions) ? r.actions : []) as TransactionRule["actions"],
-          isActive: true,
-          priority: Number(r.priority ?? 0),
-        }));
-        let matchedCat = 0;
-        if (ruleSet.length > 0 && rows.length > 0) {
-          const results = applyRulesToBatch(
-            rows.map((r) => ({ payee: r.payee ?? "", amount: r.amount, tags: r.tags ?? "" })),
-            ruleSet,
-          );
-          for (const res of results) {
-            if (!res.match) continue;
-            // Coverage means a category will land — only set_category counts.
-            const willCategorize = res.match.actions.some((a) => a.kind === "set_category");
-            if (willCategorize) matchedCat++;
-          }
-        }
-        // Rows that already carry an explicit category name also count.
-        for (const r of rows) {
-          if (r.category && r.category.length > 0) matchedCat++;
-        }
-
-        // Record the preview — update status + rowCount.
-        await db.execute(sql`
-          UPDATE mcp_uploads
-          SET status = 'previewed', row_count = ${rows.length}
-          WHERE id = ${upload_id} AND user_id = ${userId}
-        `);
-
-        const token = signPreviewToken(userId, "execute_import", {
-          uploadId: upload_id,
-          templateId: template_id ?? null,
-          columnMapping: mapping ?? null,
-        });
-
-        return text({
-          success: true,
-          data: {
-            uploadId: upload_id,
-            format: upload.format,
-            parsedRows: rows.length,
-            sampleRows: rows.slice(0, 20),
-            parseErrors: errors.slice(0, 20),
-            dedupHits,
-            categoryCoveragePct: rows.length === 0 ? 0 : Math.round((matchedCat / rows.length) * 100),
-            unresolvedAccounts: Array.from(unresolvedAccounts),
-            // Issue #65: warning surface only — these rows still commit on
-            // execute_import unless the user explicitly skips them. Heuristic
-            // thresholds: ±7 days, amount within ±7% OR ±$50 (whichever
-            // larger), score ≥ 0.6.
-            probableDuplicates,
-            confirmationToken: token,
-          },
-        });
-      } catch (e) {
-        return err(String(e instanceof Error ? e.message : e));
-      }
+    const result = await sendStagedRowsToBankLedger({
+      userId,
+      dek,
+      stagedImportId,
+      rowIds,
+      // MCP default: skip rows already in the bank ledger so a re-import of a
+      // mostly-known statement loads the anchor + only the genuinely new rows.
+      skipExistingMatches: skipExistingMatches ?? true,
+    });
+    if (!result.ok) {
+      // Only refusal is ownership / empty selection.
+      return err(result.message);
     }
-  );
+    // No invalidateUser — this op writes nothing to `transactions`, so the
+    // per-user tx cache is untouched.
+    return dataResponse({
+      loaded: result.approved,
+      skipped: result.skippedDuplicates,
+      skippedExisting: result.skippedExisting,
+      legacyLinked: result.legacyLinked,
+      anchorLoaded: result.anchorLoaded,
+      anchorDate: result.anchorDate,
+      anchorAmount: result.anchorAmount,
+      anchorsPromoted: result.anchorsPromoted,
+      batchId: result.batchId,
+      balanceWarnings: result.balanceWarnings,
+      rowErrors: result.rowErrors,
+    });
+  }
 
-
-  // ── execute_import ─────────────────────────────────────────────────────────
-  server.tool(
-    "execute_import",
-    "Commit an upload as transactions. Requires the token from preview_import with matching uploadId + templateId + columnMapping.",
-    {
-      upload_id: z.string(),
-      confirmation_token: z.string(),
-      template_id: z.number().optional(),
-      column_mapping: z.record(z.string(), z.string()).optional(),
-    },
-    async ({ upload_id, confirmation_token, template_id, column_mapping }) => {
-      if (!dek) return err("Import requires an unlocked session (DEK unavailable).");
-
-      const check = verifyPreviewToken(confirmation_token, userId, "execute_import", {
-        uploadId: upload_id,
-        templateId: template_id ?? null,
-        columnMapping: column_mapping ?? null,
-      });
-      if (!check.valid) return err(`Confirmation token invalid: ${check.reason}. Re-run preview_import.`);
-
-      try {
-        // Load mapping same way preview did.
-        let mapping: Record<string, string> | undefined = column_mapping;
-        if (template_id !== undefined && !mapping) {
-          const tpl = await q(db, sql`SELECT column_mapping FROM import_templates WHERE id = ${template_id} AND user_id = ${userId}`);
-          if (tpl.length) {
-            try { mapping = JSON.parse(String(tpl[0].column_mapping)) as Record<string, string>; }
-            catch { /* fall through — executeImport will error on unresolved accounts */ }
-          }
-        }
-
-        const { rows } = await loadUploadRows(upload_id, mapping);
-        const result = await pipelineExecute(rows, [], userId, dek);
-
-        await db.execute(sql`
-          UPDATE mcp_uploads SET status = 'executed' WHERE id = ${upload_id} AND user_id = ${userId}
-        `);
-        invalidateUserTxCache(userId);
-        return text({ success: true, data: result });
-      } catch (e) {
-        return err(String(e instanceof Error ? e.message : e));
-      }
+  // ── op: apply_rules — lifted VERBATIM from apply_rules_to_staged_import ──────
+  // Re-fire active rules over a pending staged import (the /import/pending
+  // "Re-apply rules" button). Mutates staged_transactions only → no
+  // invalidateUser. Requires a non-null DEK (the lib decrypts rule + row text).
+  async function opApplyRules(args: {
+    stagedImportId: string;
+    rowIds?: string[];
+    onlyRuleId?: number;
+  }): Promise<ToolResult> {
+    const { stagedImportId, rowIds, onlyRuleId } = args;
+    if (!dek) {
+      return err(
+        "manage_statement_import(op:apply_rules) requires an unlocked DEK to decrypt rules + staged rows. Re-login to refresh your session.",
+      );
     }
-  );
-
-
-  // ── cancel_import ──────────────────────────────────────────────────────────
-  server.tool(
-    "cancel_import",
-    "Cancel a pending MCP upload — marks the row as cancelled and deletes the file from disk.",
-    { upload_id: z.string() },
-    { title: "Cancel Import", destructiveHint: true },
-    async ({ upload_id }) => {
-      const uploads = await q(db, sql`
-        SELECT id, storage_path, status FROM mcp_uploads
-        WHERE id = ${upload_id} AND user_id = ${userId}
-      `);
-      if (!uploads.length) return err(`Upload #${upload_id} not found`);
-      const u = uploads[0];
-      if (String(u.status) === "executed") return err("Upload already executed, cannot cancel");
-      try { await fs.unlink(String(u.storage_path)); } catch { /* file already gone */ }
-      await db.execute(sql`UPDATE mcp_uploads SET status = 'cancelled' WHERE id = ${upload_id} AND user_id = ${userId}`);
-      return text({ success: true, data: { uploadId: upload_id, message: "Upload cancelled" } });
+    // Ownership + pending-status pre-check (cross-tenant → Not found).
+    const staged = await q(
+      db,
+      sql`SELECT id, status FROM staged_imports WHERE id = ${stagedImportId} AND user_id = ${userId} LIMIT 1`,
+    );
+    if (!staged.length) return err("Not found");
+    if (String(staged[0].status) !== "pending") {
+      return err("Staged import is not pending — already processed.");
     }
-  );
+    // The lib uses the Drizzle `@/db` proxy (same singleton the staging tools
+    // use); pass it directly so the in-tier re-encrypt path runs as on web.
+    const result = await applyRulesToStagedBatch(
+      drizzleDb,
+      userId,
+      dek,
+      stagedImportId,
+      { rowIds, onlyRuleId },
+    );
+    return dataResponse(result);
+  }
 
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -537,18 +367,12 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
     return encryptStaged(value);
   };
 
-  // ── list_staged_imports ────────────────────────────────────────────────────
-  server.tool(
-    "list_staged_imports",
-    "List the user's staged imports (pending statements awaiting review). Each row carries the import-level metadata + a synthetic `reconciliation` block (statement balance vs current balance vs projected post-approval balance) when the import is bound to an account. Use this before `get_staged_import` to find imports needing review.",
-    {
-      status: z
-        .enum(["pending", "imported", "rejected"])
-        .optional()
-        .describe("Filter by staged_imports.status; defaults to 'pending'."),
-      limit: z.number().int().positive().max(200).optional().describe("Max imports to return (default 50)."),
-    },
-    async ({ status, limit }) => {
+  // ── op: list — lifted VERBATIM from list_staged_imports ─────────────────────
+  async function opList(args: {
+    status?: "pending" | "imported" | "rejected";
+    limit?: number;
+  }): Promise<ToolResult> {
+      const { status, limit } = args;
       const filterStatus = status ?? "pending";
       const lim = limit ?? 50;
       const imports = await q(
@@ -709,18 +533,12 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
       );
 
       return dataResponse({ imports: enriched, count: enriched.length, status: filterStatus });
-    },
-  );
+  }
 
 
-  // ── get_staged_import ──────────────────────────────────────────────────────
-  server.tool(
-    "get_staged_import",
-    "Fetch full detail for one staged import — top-level metadata + every row with decrypted display fields. Returns 404 (Not found) when the id doesn't belong to the caller; cross-tenant attacks never leak that the id exists for someone else.",
-    {
-      stagedImportId: z.string().describe("staged_imports.id (UUID)"),
-    },
-    async ({ stagedImportId }) => {
+  // ── op: get — lifted VERBATIM from get_staged_import ────────────────────────
+  async function opGet(args: { stagedImportId: string }): Promise<ToolResult> {
+      const { stagedImportId } = args;
       const stagedRows = await q(
         db,
         sql`
@@ -803,28 +621,18 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
         },
         rows: decryptedRows,
       });
-    },
-  );
+  }
 
 
-  // ── list_staged_transactions ───────────────────────────────────────────────
-  server.tool(
-    "list_staged_transactions",
-    "Flat list of staged transaction rows across one or many imports. Useful for 'show me every uncategorized pending row across all my pending statements.' Filter by stagedImportId, dedupStatus, rowStatus, or txType. Always user-scoped.",
-    {
-      stagedImportId: z.string().optional().describe("Restrict to one staged_imports.id"),
-      dedupStatus: z
-        .enum(["new", "existing", "probable_duplicate"])
-        .optional()
-        .describe("Filter by dedup_status."),
-      rowStatus: z
-        .enum(["pending", "approved", "rejected"])
-        .optional()
-        .describe("Filter by row_status."),
-      txType: z.enum(["E", "I", "R"]).optional().describe("Filter by tx_type."),
-      limit: z.number().int().positive().max(500).optional().describe("Max rows (default 100)."),
-    },
-    async ({ stagedImportId, dedupStatus, rowStatus, txType, limit }) => {
+  // ── op: list_rows — lifted VERBATIM from list_staged_transactions ───────────
+  async function opListRows(args: {
+    stagedImportId?: string;
+    dedupStatus?: "new" | "existing" | "probable_duplicate";
+    rowStatus?: "pending" | "approved" | "rejected";
+    txType?: "E" | "I" | "R";
+    limit?: number;
+  }): Promise<ToolResult> {
+      const { stagedImportId, dedupStatus, rowStatus, txType, limit } = args;
       const lim = limit ?? 100;
       // Verify ownership when stagedImportId is specified — return 404 shape
       // rather than silently returning [] (so cross-tenant attacks get a
@@ -889,49 +697,40 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
       });
 
       return dataResponse({ rows: decrypted, count: decrypted.length });
-    },
-  );
+  }
 
 
-  // ── update_staged_transaction ──────────────────────────────────────────────
-  server.tool(
-    "update_staged_transaction",
-    "Edit a single staged transaction row in place. Same shape and validations as the PATCH /api/import/staged/[id]/rows/[rowId] endpoint. Re-encrypts text fields under the row's existing tier (service/user); never flips the tier mid-edit. import_hash is NEVER recomputed (load-bearing for cross-source dedup). peerStagedId and targetAccountId are mutually exclusive.",
-    {
-      stagedTransactionId: z.string().describe("staged_transactions.id (UUID)"),
-      txType: z.enum(["E", "I", "R"]).optional(),
-      payee: z.string().max(2000).optional(),
-      category: z.string().max(2000).optional(),
-      note: z.string().max(2000).optional(),
-      tags: z.string().max(2000).optional(),
-      quantity: z.number().nullable().optional(),
-      portfolioHoldingId: z.number().int().nullable().optional(),
-      enteredAmount: z.number().nullable().optional(),
-      enteredCurrency: z.string().max(8).nullable().optional(),
-      peerStagedId: z.string().nullable().optional(),
-      targetAccountId: z.number().int().nullable().optional(),
-      forceCommit: z
-        .boolean()
-        .optional()
-        .describe(
-          "Reserved for the partial-approve flow. Accepted but currently a no-op here — approve_staged_rows is the gate for dedup overrides.",
-        ),
-    },
-    async ({
-      stagedTransactionId,
-      txType,
-      payee,
-      category,
-      note,
-      tags,
-      quantity,
-      portfolioHoldingId,
-      enteredAmount,
-      enteredCurrency,
-      peerStagedId,
-      targetAccountId,
-      // forceCommit deliberately unused — see schema description.
-    }) => {
+  // ── op: update_row — lifted VERBATIM from update_staged_transaction ─────────
+  async function opUpdateRow(args: {
+    stagedTransactionId: string;
+    txType?: "E" | "I" | "R";
+    payee?: string;
+    category?: string;
+    note?: string;
+    tags?: string;
+    quantity?: number | null;
+    portfolioHoldingId?: number | null;
+    enteredAmount?: number | null;
+    enteredCurrency?: string | null;
+    peerStagedId?: string | null;
+    targetAccountId?: number | null;
+    forceCommit?: boolean;
+  }): Promise<ToolResult> {
+      const {
+        stagedTransactionId,
+        txType,
+        payee,
+        category,
+        note,
+        tags,
+        quantity,
+        portfolioHoldingId,
+        enteredAmount,
+        enteredCurrency,
+        peerStagedId,
+        targetAccountId,
+        // forceCommit deliberately unused — see schema description.
+      } = args;
       // Load the row + parent import in one go so cross-tenant attacks hit a
       // single 404 path. The user_id filter is the cross-tenant guard.
       const rowResult = await q(
@@ -1107,19 +906,15 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
           },
         },
       });
-    },
-  );
+  }
 
 
-  // ── link_staged_transfer_pair ──────────────────────────────────────────────
-  server.tool(
-    "link_staged_transfer_pair",
-    "Sugar over update_staged_transaction: pair two staged rows as a transfer. Sets txType='R' on both and cross-points peer_staged_id. Validates: same staged_import_id, opposite-sign amounts (additive inverse), and different account names. Either row id may be passed first.",
-    {
-      rowAId: z.string().describe("First staged_transactions.id"),
-      rowBId: z.string().describe("Second staged_transactions.id"),
-    },
-    async ({ rowAId, rowBId }) => {
+  // ── op: link_transfer_pair — lifted VERBATIM from link_staged_transfer_pair ─
+  async function opLinkTransferPair(args: {
+    rowAId: string;
+    rowBId: string;
+  }): Promise<ToolResult> {
+      const { rowAId, rowBId } = args;
       if (rowAId === rowBId) return err("rowAId and rowBId must be different rows.");
 
       const rowsForPair = await q(
@@ -1170,57 +965,35 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
       );
 
       return dataResponse({ paired: { rowAId, rowBId } });
-    },
-  );
+  }
 
 
-  // ── approve_staged_rows ────────────────────────────────────────────────────
-  // Destructive — uses the confirmation-token preview/execute pattern.
-  // First call (no confirmation_token) returns a summary + token. Second
-  // call (with token) materializes rows into `transactions` and cleans up
-  // staged_transactions.
+  // ── op: approve — lifted VERBATIM from approve_staged_rows ──────────────────
+  // Destructive — uses the confirmation-token preview/execute pattern. First
+  // call (no confirmation_token) returns a summary + token. Second call (with
+  // token) materializes rows into `transactions` and cleans up
+  // staged_transactions. The token's `operation` string stays
+  // "approve_staged_rows" (historical) so a token minted just before deploy
+  // still verifies just after.
   //
   // Idempotency: optional caller-supplied UUID stored in mcp_idempotency_keys
   // with the same 72h window pattern as bulk_record_transactions. The stored
   // response is metadata-only ({imported, errors, stagedImportId}) so no
-  // plaintext redaction is required (CLAUDE.md "response_json MUST be redacted
-  // ... already metadata-only, no plaintext to redact, but flag it in code").
-  server.tool(
-    "approve_staged_rows",
-    "Create REAL ledger transactions from staged rows (writes into the live `transactions` table). Use this ONLY for a first-time import of a brand-new account that has no existing transactions — running it on an account that already has manual/imported transactions for the period DUPLICATES them. For the normal reconcile workflow (load the bank side without creating ledger entries) use send_to_bank_ledger instead. Two-step: first call returns a summary + confirmationToken (5-min TTL); second call with the token + same payload commits. Optional rowIds = subset (omit = all). Optional idempotencyKey is stored 72h to make retries safe. Calls invalidateUser after commit so the per-user tx cache reflects the new rows.",
-    {
-      stagedImportId: z.string().describe("staged_imports.id"),
-      rowIds: z
-        .array(z.string())
-        .optional()
-        .describe("Subset of staged_transactions.id to approve. Omit to approve all."),
-      forceImportIndices: z
-        .array(z.number().int())
-        .optional()
-        .describe(
-          "Row indices to import even if dedup flags them as duplicates (passes through to executeImport).",
-        ),
-      idempotencyKey: z
-        .string()
-        .uuid()
-        .optional()
-        .describe(
-          "UUID supplied by the caller. Same key within 72h returns the stored response without re-INSERTing.",
-        ),
-      confirmation_token: z
-        .string()
-        .optional()
-        .describe(
-          "Token returned by the preview call. Omit to get a preview; pass to commit.",
-        ),
-    },
-    async ({
-      stagedImportId,
-      rowIds,
-      forceImportIndices,
-      idempotencyKey,
-      confirmation_token,
-    }) => {
+  // plaintext redaction is required.
+  async function opApprove(args: {
+    stagedImportId: string;
+    rowIds?: string[];
+    forceImportIndices?: number[];
+    idempotencyKey?: string;
+    confirmation_token?: string;
+  }): Promise<ToolResult> {
+      const {
+        stagedImportId,
+        rowIds,
+        forceImportIndices,
+        idempotencyKey,
+        confirmation_token,
+      } = args;
       if (!dek) {
         return err(
           "approve_staged_rows requires an unlocked DEK to encrypt rows under your key. Re-login to refresh your session.",
@@ -1827,30 +1600,16 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
       }
 
       return text(responseBody);
-    },
-  );
+  }
 
 
-  // ── reject_staged_import ───────────────────────────────────────────────────
-  // Destructive — uses the confirmation-token preview/execute pattern.
-  // Hard-deletes staged_imports + cascades to staged_transactions via FK.
-  server.tool(
-    "reject_staged_import",
-    "Reject (hard-delete) a staged import. Two-step: first call returns a summary + confirmationToken (5-min TTL); second call with the token commits. Cascades the staged_transactions delete via FK.",
-    {
-      stagedImportId: z.string().describe("staged_imports.id"),
-      confirmation_token: z
-        .string()
-        .optional()
-        .describe(
-          "Token returned by the preview call. Omit to get a preview; pass to commit.",
-        ),
-    },
-    // FINLYNQ-264 Phase 0 — refactored onto the shared `withConfirmation`
-    // middleware (convention S). Behaviour is byte-identical to the prior
-    // hand-rolled two-step: bare call → preview + token (no writes); token →
-    // cascade-delete. The token payload still binds `{ stagedImportId }`.
-    withConfirmation<{ stagedImportId: string; confirmation_token?: string }>(userId, {
+  // ── op: reject — lifted VERBATIM from reject_staged_import ───────────────────
+  // Destructive — uses the shared `withConfirmation` middleware (convention S).
+  // Bare call → preview + token (no writes); token → cascade-delete. The token
+  // payload binds `{ stagedImportId }` and the operation string stays
+  // "reject_staged_import" (historical) so a token minted just before deploy
+  // still verifies just after. Built ONCE, dispatched by op:reject.
+  const rejectHandler = withConfirmation<{ stagedImportId: string; confirmation_token?: string }>(userId, {
       operation: "reject_staged_import",
       tokenPayload: ({ stagedImportId }) => ({ stagedImportId }),
       preview: async ({ stagedImportId }) => {
@@ -1896,6 +1655,187 @@ export function registerImportsTools(server: McpServer, ctx: PgToolContext) {
         );
         return dataResponse({ stagedImportId });
       },
-    }),
+  });
+
+
+  // ── consolidated tool: manage_statement_import ───────────────────────────────
+  // The staged-import lifecycle in ONE tool. Every op operates on the SAME
+  // artifact (`staged_imports`), so id-chaining across ops always works. Carries
+  // `reject` (data-discarding) → tool-level destructiveHint:true (annotation
+  // override). Confirmation-token ops (approve/reject) keep their HISTORICAL
+  // `operation` strings so a token minted just before deploy still verifies.
+  registerManageTool(
+    server,
+    "manage_statement_import",
+    "Manage the staged-import lifecycle in one union tool. `op` selects upload / list / get / list_rows / update_row / link_transfer_pair / approve / send_to_bank_ledger / apply_rules / reject. upload: stage a CSV/OFX/QFX file (base64 fileContent; content-hash idempotent). list/get/list_rows: review staged imports + rows (read). update_row / link_transfer_pair: fix or pair staged rows. send_to_bank_ledger: promote rows into the bank ledger ONLY (normal reconcile — no `transactions`). approve: TWO-STEP create of REAL ledger transactions (first-import ONLY; preview→token then commit). apply_rules: re-fire rules over a pending import. reject: TWO-STEP hard-delete (preview→token then commit). Requires an unlocked DEK.",
+    z.discriminatedUnion("op", [
+      z.object({
+        op: z.literal("upload"),
+        fileContent: z
+          .string()
+          .min(1)
+          .describe("The statement file bytes, base64-encoded. Max 5 MB decoded (~6.7 MB base64)."),
+        fileName: z
+          .string()
+          .min(1)
+          .describe(
+            "Original filename — its extension selects the parser (.csv / .ofx / .qfx).",
+          ),
+        accountId: z
+          .number()
+          .int()
+          .positive()
+          .describe(
+            "Finlynq account id to bind the import to (must belong to you; required for OFX/QFX).",
+          ),
+        mimeType: z
+          .string()
+          .optional()
+          .describe("Optional MIME type hint (advisory only; format is detected from fileName)."),
+      }),
+      z.object({
+        op: z.literal("list"),
+        status: z
+          .enum(["pending", "imported", "rejected"])
+          .optional()
+          .describe("Filter by staged_imports.status; defaults to 'pending'."),
+        limit: z.number().int().positive().max(200).optional().describe("Max imports to return (default 50)."),
+      }),
+      z.object({
+        op: z.literal("get"),
+        stagedImportId: z.string().describe("staged_imports.id (UUID)"),
+      }),
+      z.object({
+        op: z.literal("list_rows"),
+        stagedImportId: z.string().optional().describe("Restrict to one staged_imports.id"),
+        dedupStatus: z
+          .enum(["new", "existing", "probable_duplicate"])
+          .optional()
+          .describe("Filter by dedup_status."),
+        rowStatus: z
+          .enum(["pending", "approved", "rejected"])
+          .optional()
+          .describe("Filter by row_status."),
+        txType: z.enum(["E", "I", "R"]).optional().describe("Filter by tx_type."),
+        limit: z.number().int().positive().max(500).optional().describe("Max rows (default 100)."),
+      }),
+      z.object({
+        op: z.literal("update_row"),
+        stagedTransactionId: z.string().describe("staged_transactions.id (UUID)"),
+        txType: z.enum(["E", "I", "R"]).optional(),
+        payee: z.string().max(2000).optional(),
+        category: z.string().max(2000).optional(),
+        note: z.string().max(2000).optional(),
+        tags: z.string().max(2000).optional(),
+        quantity: z.number().nullable().optional(),
+        portfolioHoldingId: z.number().int().nullable().optional(),
+        enteredAmount: z.number().nullable().optional(),
+        enteredCurrency: z.string().max(8).nullable().optional(),
+        peerStagedId: z.string().nullable().optional(),
+        targetAccountId: z.number().int().nullable().optional(),
+        forceCommit: z
+          .boolean()
+          .optional()
+          .describe(
+            "Reserved for the partial-approve flow. Accepted but currently a no-op here — op:approve is the gate for dedup overrides.",
+          ),
+      }),
+      z.object({
+        op: z.literal("link_transfer_pair"),
+        rowAId: z.string().describe("First staged_transactions.id"),
+        rowBId: z.string().describe("Second staged_transactions.id"),
+      }),
+      z.object({
+        op: z.literal("approve"),
+        stagedImportId: z.string().describe("staged_imports.id"),
+        rowIds: z
+          .array(z.string())
+          .optional()
+          .describe("Subset of staged_transactions.id to approve. Omit to approve all."),
+        forceImportIndices: z
+          .array(z.number().int())
+          .optional()
+          .describe(
+            "Row indices to import even if dedup flags them as duplicates (passes through to executeImport).",
+          ),
+        idempotencyKey: z
+          .string()
+          .uuid()
+          .optional()
+          .describe(
+            "UUID supplied by the caller. Same key within 72h returns the stored response without re-INSERTing.",
+          ),
+        confirmation_token: z
+          .string()
+          .optional()
+          .describe(
+            "Token returned by the preview call. Omit to get a preview; pass to commit.",
+          ),
+      }),
+      z.object({
+        op: z.literal("send_to_bank_ledger"),
+        stagedImportId: z.string().describe("staged_imports.id"),
+        rowIds: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Subset of staged_transactions.id to promote. Omit to promote all eligible rows.",
+          ),
+        skipExistingMatches: z
+          .boolean()
+          .optional()
+          .describe(
+            "Default true: skip staged rows already present in the bank ledger (dedup_status='existing'). Set false to load every selected row.",
+          ),
+      }),
+      z.object({
+        op: z.literal("apply_rules"),
+        stagedImportId: z.string().describe("staged_imports.id (must be status='pending')."),
+        rowIds: z
+          .array(z.string())
+          .optional()
+          .describe("Subset of staged_transactions.id to apply to. Omit for the whole batch."),
+        onlyRuleId: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Restrict to a single transaction_rules.id (e.g. a just-created rule)."),
+      }),
+      z.object({
+        op: z.literal("reject"),
+        stagedImportId: z.string().describe("staged_imports.id"),
+        confirmation_token: z
+          .string()
+          .optional()
+          .describe(
+            "Token returned by the preview call. Omit to get a preview; pass to commit.",
+          ),
+      }),
+    ]),
+    async (input) => {
+      switch (input.op) {
+        case "upload":
+          return opUpload(input);
+        case "list":
+          return opList(input);
+        case "get":
+          return opGet(input);
+        case "list_rows":
+          return opListRows(input);
+        case "update_row":
+          return opUpdateRow(input);
+        case "link_transfer_pair":
+          return opLinkTransferPair(input);
+        case "approve":
+          return opApprove(input);
+        case "send_to_bank_ledger":
+          return opSendToBankLedger(input);
+        case "apply_rules":
+          return opApplyRules(input);
+        case "reject":
+          return rejectHandler(input);
+      }
+    },
   );
 }

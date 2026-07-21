@@ -42,7 +42,7 @@ import {
   ymdDate,
   parseYmdSafe,
 } from "../lib/date-validators";
-import { registerManageTool, registerAlias } from "./_consolidate";
+import { registerManageTool } from "./_consolidate";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -361,7 +361,7 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
       });
   }
 
-  // ── consolidated tool: manage_loans + hidden back-compat aliases ───────────
+  // ── consolidated tool: manage_loans ───────────
   registerManageTool(
     server,
     "manage_loans",
@@ -423,64 +423,6 @@ export function registerLoansTools(server: McpServer, ctx: PgToolContext) {
     },
   );
 
-  registerAlias(
-    server,
-    "list_loans",
-    "List all loans with balance, rate, payment, payoff date, and linked account",
-    {},
-    async () => opList(),
-  );
-  registerAlias(
-    server,
-    "add_loan",
-    "Create a new loan or lease. Term-driven (term_months → payment derived) or payment-driven (payment_amount → payoff date solved); at least one of the two is required. Leases set residual_value (balance remaining at term end).",
-    {
-      name: z.string().describe("Loan name"),
-      type: z.string().describe("Loan type (e.g. 'mortgage', 'lease', 'auto', 'student', 'personal')"),
-      principal: z.number().positive().describe("Original loan principal (must be > 0)"),
-      annual_rate: z.number().nonnegative().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0; zero allowed for 0% promo)"),
-      term_months: z.number().int().positive().optional().describe("Loan term in months (optional when payment_amount is given — the term is solved from the payment)"),
-      start_date: ymdDate.describe("Loan start date (YYYY-MM-DD)"),
-      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched — mistyped/unmatched is REFUSED, never silently unlinked). When linked, the account's ledger balance drives the outstanding balance. PREFER `account_id`."),
-      account_id: z.number().int().positive().optional().describe("Linked-account FK fast-path — wins over the fuzzy `account` name."),
-      payment_amount: z.number().positive().optional().describe("Payment per period (must be > 0). Must exceed the period interest or the call is refused."),
-      payment_frequency: z.enum(PAYMENT_FREQUENCIES).optional().describe("weekly | biweekly | semi_monthly | monthly | quarterly | annual (default monthly)"),
-      extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0; default 0)"),
-      residual_value: z.number().nonnegative().optional().describe("Lease residual/buyout — the schedule amortizes down to this instead of 0 (must be < principal)"),
-      min_payment: z.number().positive().optional().describe("Alias for payment_amount — minimum required payment (must be > 0)"),
-      note: z.string().optional(),
-    },
-    async (args) => opAdd(args),
-  );
-  registerAlias(
-    server,
-    "update_loan",
-    "Update any field of an existing loan by id",
-    {
-      id: z.number().describe("Loan id"),
-      name: z.string().optional(),
-      type: z.string().optional(),
-      principal: z.number().positive().optional().describe("Original loan principal (must be > 0)"),
-      annual_rate: z.number().nonnegative().optional().describe("Annual interest rate, e.g. 5.5 for 5.5% (must be >= 0)"),
-      term_months: z.number().int().positive().optional(),
-      start_date: ymdDate.optional(),
-      payment_amount: z.number().positive().optional().describe("Payment per period (must be > 0; must exceed the period interest)"),
-      payment_frequency: z.enum(PAYMENT_FREQUENCIES).optional().describe("weekly | biweekly | semi_monthly | monthly | quarterly | annual"),
-      extra_payment: z.number().nonnegative().optional().describe("Extra principal per payment (must be >= 0)"),
-      residual_value: z.number().nonnegative().optional().describe("Lease residual/buyout — balance remaining at term end (must be < principal)"),
-      account: z.string().optional().describe("Linked account — name or alias (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Pass empty string to clear. PREFER `account_id`."),
-      account_id: z.number().int().positive().optional().describe("Linked-account FK fast-path — wins over the fuzzy `account` name."),
-      note: z.string().optional(),
-    },
-    async (args) => opUpdate(args),
-  );
-  registerAlias(
-    server,
-    "delete_loan",
-    "Delete a loan by id",
-    { id: z.number().describe("Loan id to delete") },
-    async (args) => opDelete(args),
-  );
 
 
   // ── get_loan_amortization ─────────────────────────────────────────────────

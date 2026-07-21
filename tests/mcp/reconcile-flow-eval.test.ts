@@ -7,10 +7,11 @@
  *   - the final get_reconciliation_summary row has bankOnly === 0 AND
  *     balanceDelta === 0.
  *
- * Flow exercised (8 tool calls): upload_statement → find_duplicate_bank_rows →
- * send_to_bank_ledger → get_reconcile_suggestions (buckets) →
- * apply_rules_to_bank_rows (preview → commit, ONE token for the whole batch) →
- * upsert_balance_anchor → get_reconciliation_summary.
+ * Flow exercised (8 tool calls, post reconcile-consolidation):
+ * manage_statement_import(op:upload) → manage_bank_ledger(op:find_duplicates) →
+ * manage_statement_import(op:send_to_bank_ledger) → reconcile(op:suggest, buckets)
+ * → reconcile(op:apply_rules) (preview → commit, ONE token for the whole batch)
+ * → manage_bank_ledger(op:upsert_anchor) → get_reconciliation_summary.
  *
  * Deterministic: a fixed 200-row CSV (no Math.random), a fresh empty account,
  * and a single catch-all rule (payee contains "Merchant" → an expense category)
@@ -178,16 +179,16 @@ describeDb("AI-native reconciliation e2e eval (FINLYNQ-271)", () => {
 
     // ─── Phase 1: ingest (ONE upload call) ─────────────────────────────────
     const up = await call<{ stagedImportId: string; rowCount: number }>(
-      "upload_statement",
-      { fileContent, fileName: "reconcile-eval.csv", accountId },
+      "manage_statement_import",
+      { op: "upload", fileContent, fileName: "reconcile-eval.csv", accountId },
     );
     expect(up.success).toBe(true);
     expect(up.data.rowCount).toBe(ROW_COUNT);
     const stagedImportId = up.data.stagedImportId;
 
-    // ─── Phase 2: stage + dedup (find_duplicate_bank_rows finds no dup GROUPS —
+    // ─── Phase 2: stage + dedup (op:find_duplicates finds no dup GROUPS —
     //     the 200 rows are all distinct) ─────────────────────────────────────
-    const dup = await call<unknown[]>("find_duplicate_bank_rows", { accountId });
+    const dup = await call<unknown[]>("manage_bank_ledger", { op: "find_duplicates", accountId });
     expect(Array.isArray(dup.data)).toBe(true);
     expect(dup.data.length).toBe(0);
 
@@ -218,7 +219,8 @@ describeDb("AI-native reconciliation e2e eval (FINLYNQ-271)", () => {
     //     false bypass BOTH staging filters). loaded may be 0 if the rows were
     //     already promoted elsewhere — the authoritative check is that the bank
     //     rows EXIST + are unmatched, asserted via get_reconcile_suggestions. ─
-    await call("send_to_bank_ledger", {
+    await call("manage_statement_import", {
+      op: "send_to_bank_ledger",
       stagedImportId,
       rowIds: stagedRowIds,
       skipExistingMatches: false,
@@ -227,20 +229,21 @@ describeDb("AI-native reconciliation e2e eval (FINLYNQ-271)", () => {
     // ─── Phase 3: match → buckets. Every bank row is no-match against the empty
     //     ledger, so noMatch carries all 200 — the real "bank rows exist" check. ─
     const sug = await call<{ buckets: { noMatch: { bankTransactionIds: string[] } } }>(
-      "get_reconcile_suggestions",
-      { accountId },
+      "reconcile",
+      { op: "suggest", accountId },
     );
     const bankRowIds = sug.data.buckets.noMatch.bankTransactionIds;
     expect(bankRowIds.length).toBe(ROW_COUNT);
 
     // ─── Phase 4b: batched commit — ONE confirmation token for the batch ───
     const preview = await call<{ confirmationToken: string }>(
-      "apply_rules_to_bank_rows",
-      { bankRowIds },
+      "reconcile",
+      { op: "apply_rules", bankRowIds },
     );
     const token = preview.data.confirmationToken;
     expect(typeof token).toBe("string");
-    const commit = await call<{ materialized: number }>("apply_rules_to_bank_rows", {
+    const commit = await call<{ materialized: number }>("reconcile", {
+      op: "apply_rules",
       bankRowIds,
       confirmation_token: token,
       autoMaterialize: true,
@@ -248,7 +251,8 @@ describeDb("AI-native reconciliation e2e eval (FINLYNQ-271)", () => {
     expect(commit.data.materialized).toBe(ROW_COUNT);
 
     // ─── Phase 5: anchor + verify ──────────────────────────────────────────
-    await call("upsert_balance_anchor", {
+    await call("manage_bank_ledger", {
+      op: "upsert_anchor",
       accountId,
       date: fixture.anchorDate,
       amount: fixture.sum,

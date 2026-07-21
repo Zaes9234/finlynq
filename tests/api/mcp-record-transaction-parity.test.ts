@@ -144,6 +144,33 @@ function bootstrap() {
   return { tools };
 }
 
+// v4.1 clean break: the per-verb aliases (record_transaction,
+// bulk_record_transactions) were removed; both fold into
+// `manage_transactions(op:"record")` — the record op handles a single row AND
+// the `transactions[]` array. Grab the union tool and wrap its handler to inject
+// the `op` discriminator so each test's args stay identical. Returns undefined
+// if the union tool isn't registered so the `toBeDefined()` registration
+// assertion still means something.
+const ALIAS_TO_CONSOLIDATED: Record<string, { tool: string; op: string }> = {
+  record_transaction: { tool: "manage_transactions", op: "record" },
+  bulk_record_transactions: { tool: "manage_transactions", op: "record" },
+};
+
+function getConsolidatedTool(
+  tools: Record<string, { handler?: (args: unknown, extra: unknown) => Promise<unknown> }>,
+  name: string,
+): { handler: (args: unknown, extra: unknown) => Promise<unknown> } | undefined {
+  const map = ALIAS_TO_CONSOLIDATED[name];
+  if (!map) throw new Error(`no consolidated mapping for ${name}`);
+  const tool = tools[map.tool];
+  if (!tool?.handler) return undefined;
+  const handler = tool.handler;
+  return {
+    handler: (args: unknown, extra: unknown) =>
+      handler({ op: map.op, ...(args as Record<string, unknown>) }, extra),
+  };
+}
+
 beforeEach(() => {
   createTransactionSpy.mockReset();
   invalidateUserSpy.mockReset();
@@ -162,9 +189,9 @@ beforeEach(() => {
 describe("FINLYNQ-108 — record_transaction routes through createTransaction", () => {
   it("hands createTransaction an encrypted, rounded, source-stamped payload (REST-parity)", async () => {
     const { tools } = bootstrap();
-    const tool = tools["record_transaction"];
+    const tool = getConsolidatedTool(tools, "record_transaction");
     expect(tool, "record_transaction is registered").toBeDefined();
-    const cb = tool.handler!;
+    const cb = tool!.handler;
 
     const res = await cb(
       {
@@ -218,7 +245,7 @@ describe("FINLYNQ-108 — record_transaction routes through createTransaction", 
 
   it("surfaces the sign-vs-category advisory but still writes the row (warn-but-allow)", async () => {
     const { tools } = bootstrap();
-    const cb = tools["record_transaction"].handler!;
+    const cb = getConsolidatedTool(tools, "record_transaction")!.handler;
 
     // Positive amount on an Expense ('E') category violates the sign rule →
     // advisory warning, but the row must still land (createTransaction called).
@@ -237,7 +264,7 @@ describe("FINLYNQ-108 — record_transaction routes through createTransaction", 
 
   it("does not call createTransaction on dryRun (no write)", async () => {
     const { tools } = bootstrap();
-    const cb = tools["record_transaction"].handler!;
+    const cb = getConsolidatedTool(tools, "record_transaction")!.handler;
     const res = await cb(
       { amount: -10, payee: "Preview", account_id: 7, category: "Groceries", dryRun: true, date: "2026-06-03" },
       {},
@@ -253,7 +280,7 @@ describe("FINLYNQ-108 — record_transaction routes through createTransaction", 
 describe("FINLYNQ-108 — bulk_record_transactions routes through createTransaction", () => {
   it("calls createTransaction once per row with source='mcp_http' + encrypted payee", async () => {
     const { tools } = bootstrap();
-    const cb = tools["bulk_record_transactions"].handler!;
+    const cb = getConsolidatedTool(tools, "bulk_record_transactions")!.handler;
 
     const res = await cb(
       {

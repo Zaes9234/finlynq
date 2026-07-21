@@ -31,13 +31,14 @@
 export const SCOPE_MCP_READ = "mcp:read" as const;
 export const SCOPE_MCP_WRITE = "mcp:write" as const;
 /**
- * FINLYNQ-263 (child A) — the import-pipeline toolset scope. A token carrying
- * `mcp:import` sees the 25 statement-import + bank-reconcile tools; without it
- * those tools are hidden from `tools/list` (session-scoped toolsets). Import is
- * OFF by default: `DEFAULT_SCOPE` deliberately does NOT include it, so a
- * back-compat token (or a client that omits `scope`) gets analytics +
- * ledger-write only. A user grants import at the consent screen (or via the
- * connection-level setting for Bearer/stdio callers, see MCP route).
+ * FINLYNQ-263 (child A) — the former import-pipeline toolset scope. The
+ * import/reconcile cohort was folded into the default-ON `reconcile` /
+ * `manage_statement_import` / `manage_bank_ledger` union tools and un-gated
+ * (reconcile-consolidation), so this scope no longer enables anything. It stays
+ * a VALID token for ONE version (accepted-but-inert) so a client that hardcoded
+ * `scope=… mcp:import` in its authorize request doesn't start getting 400s from
+ * `normalizeRequestedScope`; it is silently dropped from the canonical scope and
+ * grants no extra tools. Remove the token entirely in the next minor.
  */
 export const SCOPE_MCP_IMPORT = "mcp:import" as const;
 export const DEFAULT_SCOPE = `${SCOPE_MCP_READ} ${SCOPE_MCP_WRITE}`;
@@ -153,10 +154,11 @@ export function normalizeRequestedScope(input: string | null | undefined): strin
   if (seen.size === 0) return DEFAULT_SCOPE;
   // Stable order: read first, write second. Lets the DB DEFAULT match exactly
   // for the common case so `scope = 'mcp:read mcp:write'` strings collide.
+  // `mcp:import` is deliberately NOT re-emitted — it's accepted-but-inert
+  // (validated above so it doesn't 400) and dropped from the canonical scope.
   const ordered: string[] = [];
   if (seen.has(SCOPE_MCP_READ)) ordered.push(SCOPE_MCP_READ);
   if (seen.has(SCOPE_MCP_WRITE)) ordered.push(SCOPE_MCP_WRITE);
-  if (seen.has(SCOPE_MCP_IMPORT)) ordered.push(SCOPE_MCP_IMPORT);
   return ordered.join(" ");
 }
 
@@ -179,30 +181,23 @@ export function isToolAllowedForScope(toolName: string, scope: Set<string>): boo
 }
 
 /**
- * FINLYNQ-263 (child A) — resolve the enabled session toolsets for a request.
+ * Resolve the enabled session toolsets for a request.
  *
- * The hybrid exposure model (owner decision #2, 2026-07-04):
- *   (a) OAuth scope — a token carrying `mcp:import` enables the import-pipeline
- *       set. This is durable per-grant and reuses the existing scope filter.
- *   (b) connection-level setting — for Bearer `pf_` keys and stdio (which carry
- *       no scope claim), `importSettingEnabled` opts the whole connection in.
+ * Since the import/reconcile cohort was folded into the default-ON union tools
+ * (reconcile-consolidation), there is no default-OFF user-facing set left, so
+ * every connection gets the same base profile — analytics + ledger-write.
+ * Retained (with the `admin` seam) so the MCP route's `isToolInEnabledToolsets`
+ * filter has a set to check against for a future reserved cohort.
  *
- * Analytics + ledger-write are ALWAYS in the base set (they're the default
- * profile); import-pipeline is added when EITHER (a) OR (b) is true. Returns a
- * `Set<Toolset>` the MCP route feeds to `isToolInEnabledToolsets`.
- *
- * Kept here (not in toolsets.ts) so the scope→toolset bridge lives with the
- * scope definitions; `Toolset` is imported from the mcp/toolsets module.
+ * `scope` is unused today (read/write gating happens per-tool via
+ * `isToolAllowedForScope`); it is kept in the signature so the route call site
+ * and a future scope→toolset bridge stay stable.
  */
 export function enabledToolsetsForRequest(
-  scope: Set<string>,
-  opts?: { importSettingEnabled?: boolean },
-): Set<"analytics" | "ledger-write" | "import-pipeline" | "admin"> {
-  const enabled = new Set<
-    "analytics" | "ledger-write" | "import-pipeline" | "admin"
-  >(["analytics", "ledger-write"]);
-  if (scope.has(SCOPE_MCP_IMPORT) || opts?.importSettingEnabled === true) {
-    enabled.add("import-pipeline");
-  }
-  return enabled;
+  _scope: Set<string>,
+): Set<"analytics" | "ledger-write" | "admin"> {
+  return new Set<"analytics" | "ledger-write" | "admin">([
+    "analytics",
+    "ledger-write",
+  ]);
 }

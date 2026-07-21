@@ -134,6 +134,25 @@ const CASES: Array<{
     missingField: { entry_type: "buy", holding: "AAPL" }, // missing qty/totalCost
     good: { entry_type: "buy", holding: "AAPL", qty: 10, totalCost: 1900 },
   },
+  // reconcile-consolidation — the 3 folded import/reconcile union tools.
+  {
+    name: "reconcile",
+    badOp: { op: "nuke", accountId: 1 },
+    missingField: { op: "accept" }, // missing pairs[] (min 1)
+    good: { op: "suggest", accountId: 1 },
+  },
+  {
+    name: "manage_statement_import",
+    badOp: { op: "frobnicate" },
+    missingField: { op: "upload", fileName: "x.csv" }, // missing fileContent + accountId
+    good: { op: "list" },
+  },
+  {
+    name: "manage_bank_ledger",
+    badOp: { op: "frobnicate", accountId: 1 },
+    missingField: { op: "upsert_anchor", accountId: 1 }, // missing date/amount/currency
+    good: { op: "list_anchors", accountId: 1 },
+  },
 ];
 
 describe("consolidated manage_* schema contracts (FINLYNQ-263 tc-2)", () => {
@@ -283,6 +302,49 @@ const COERCE_CASES: CoerceCase[] = [
     arrayStringPayload: { op: "record", transactions: '[{"amount":-5,"payee":"X","account":"Chq"}]' },
     arrayField: "transactions",
     expectArray: [{ amount: -5, payee: "X", account: "Chq" }],
+  },
+  {
+    // reconcile-consolidation — the `accept` op's `pairs[]` arrives stringified
+    // from clients that flatten whole JSON arrays; must coerce to a native array.
+    name: "reconcile",
+    numericStringPayload: { op: "suggest", accountId: "3" },
+    numericField: "accountId",
+    expectNumber: 3,
+    numericTypedPayload: { op: "suggest", accountId: 3 },
+    emptyStringPayload: { op: "suggest", accountId: "" },
+    nonNumericPayload: { op: "suggest", accountId: "abc" },
+    arrayStringPayload: {
+      op: "accept",
+      pairs: '[{"bankTransactionId":"550e8400-e29b-41d4-a716-446655440000","transactionId":5,"linkType":"primary"}]',
+    },
+    arrayField: "pairs",
+    expectArray: [
+      { bankTransactionId: "550e8400-e29b-41d4-a716-446655440000", transactionId: 5, linkType: "primary" },
+    ],
+  },
+  {
+    // manage_statement_import(op:upload) — accountId stringified coerces; the
+    // base64 fileContent is a string field and passes through UNTOUCHED.
+    name: "manage_statement_import",
+    numericStringPayload: { op: "upload", fileContent: "aGVsbG8=", fileName: "x.csv", accountId: "12" },
+    numericField: "accountId",
+    expectNumber: 12,
+    numericTypedPayload: { op: "upload", fileContent: "aGVsbG8=", fileName: "x.csv", accountId: 12 },
+    emptyStringPayload: { op: "upload", fileContent: "aGVsbG8=", fileName: "x.csv", accountId: "" },
+    nonNumericPayload: { op: "upload", fileContent: "aGVsbG8=", fileName: "x.csv", accountId: "abc" },
+  },
+  {
+    // manage_bank_ledger(op:delete_row) — dryRun boolean coercion.
+    name: "manage_bank_ledger",
+    numericStringPayload: { op: "list_anchors", accountId: "7" },
+    numericField: "accountId",
+    expectNumber: 7,
+    numericTypedPayload: { op: "list_anchors", accountId: 7 },
+    emptyStringPayload: { op: "list_anchors", accountId: "" },
+    nonNumericPayload: { op: "list_anchors", accountId: "abc" },
+    booleanStringPayload: { op: "delete_row", bankTransactionId: "550e8400-e29b-41d4-a716-446655440000", dryRun: "true" },
+    booleanField: "dryRun",
+    expectBoolean: true,
   },
 ];
 

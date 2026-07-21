@@ -68,9 +68,6 @@ import {
 } from "../../src/lib/recurring-detection";
 import {
 } from "../../src/lib/loan-calculator";
-import {
-  registerAlias,
-} from "./_consolidate";
 
 export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   const { db, userId, dek } = ctx;
@@ -780,37 +777,8 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
   });
 
 
-  // ── get_loans (DEPRECATED — hidden alias of list_loans) ────────────────────
-  // FINLYNQ-265: get_loans is retired in favor of `list_loans` (the two return
-  // the same logical resource). Per the deprecation policy (CONTRIBUTING.md):
-  // HIDDEN from tools/list immediately (registered via registerAlias → excluded
-  // from the advertised surface), still HANDLED for one minor version returning
-  // its result PLUS a `deprecation` warning field, then removed (410) after.
-  // Callers should migrate to `list_loans`.
-  registerAlias(
-    server,
-    "get_loans",
-    "Deprecated — use list_loans. Get all loans with amortization summary in the unified `{ success, data }` envelope. Hidden from tools/list; still handled with a `deprecation` warning for one minor version, then removed.",
-    {},
-    async () => {
-      const raw = await q(db, sql`
-        SELECT id, name_ct, type, principal, annual_rate, term_months, start_date,
-               payment_amount, payment_frequency, extra_payment, residual_value
-        FROM loans
-        WHERE user_id = ${userId}
-      `);
-      const rows = decryptNameish(raw, dek).map((r) => {
-        const { name_ct, ...rest } = r;
-        void name_ct;
-        return rest;
-      });
-      return text({
-        success: true,
-        data: rows,
-        deprecation: "get_loans is deprecated; use list_loans. It is hidden from tools/list and will be removed in a future release.",
-      });
-    },
-  );
+  // get_loans (the FINLYNQ-265 hidden deprecated alias of list_loans) was
+  // REMOVED in the v4.1 clean break (reconcile-consolidation D-4). Use list_loans.
 
 
   // ── get_recurring_transactions ─────────────────────────────────────────────
@@ -1538,8 +1506,8 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           write_tools: ["manage_transactions (op: record | update | delete; record takes one row OR transactions[])", "manage_transfers (op: record | update | delete)", "manage_splits (op: list | add | update | delete | replace)", "manage_budgets (op: set | delete)", "manage_accounts (op: add | update | delete | set_mode)", "manage_goals (op: add | update | delete | list)", "manage_categories (op: create | rename | merge | delete)", "manage_rules (op: create | update | delete | list | reorder)", "manage_subscriptions (op: add | update | delete | list)", "manage_loans (op: add | update | delete | list)", "manage_fx_overrides (op: set | delete | list)", "add_snapshot", "apply_rules_to_uncategorized"],
           portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           portfolio_write_tools: ["portfolio_record_entry (entry_type: buy | sell | swap | transfer | income_expense | fx_conversion | deposit | withdrawal)", "manage_holdings (op: add | update | delete)"],
-          reconcile_tools: ["upload_statement", "get_reconcile_suggestions", "get_reconciliation_summary", "find_duplicate_bank_rows", "get_balance_anchors", "upsert_balance_anchor", "delete_bank_transaction", "send_to_bank_ledger", "materialize_bank_row", "accept_reconcile_suggestion", "accept_reconcile_suggestions", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import", "apply_rules_to_bank_rows"],
-          note_v4: "MCP surface v4 (v4.0.0): per-verb CRUD tools were consolidated into discriminated-union tools — `manage_*` use an `op` field, `portfolio_record_entry` uses `entry_type`. The old names (record_transaction, add_goal, portfolio_buy, …) still work as hidden aliases through v4.1. Reconcile/import tools are hidden from the default session unless the connection has the `mcp:import` scope or setting.", // lint-allow-retired: names the retired tools as still-callable aliases, not a remedy
+          reconcile_tools: ["get_reconciliation_summary", "reconcile (op: suggest | accept | unlink | materialize | apply_rules)", "manage_statement_import (op: upload | list | get | list_rows | update_row | link_transfer_pair | approve | send_to_bank_ledger | apply_rules | reject)", "manage_bank_ledger (op: list_anchors | upsert_anchor | find_duplicates | delete_row)"],
+          note_v4: "MCP surface v4.1: per-verb CRUD tools are consolidated into discriminated-union tools — `manage_*` use an `op` field, `portfolio_record_entry` uses `entry_type`. v4.1 is the CLEAN BREAK: the v4.0 hidden back-compat aliases were REMOVED — call the consolidated names only. The reconcile/import cohort is folded into `reconcile` / `manage_statement_import` / `manage_bank_ledger` and is now default-ON in every session (no scope or setting needed).",
           tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='manage_transactions' for detailed usage of any tool. INVESTMENT accounts CANNOT use manage_transactions/manage_transfers for trades — use portfolio_record_entry (entry_type buy/sell/swap/transfer/deposit/withdrawal/income_expense/fx_conversion). manage_transfers is the path for plain cash transfers between non-investment accounts. Use topic='reconcile' for the bank-ledger reconciliation + rule-application tools, topic='modes' for the mode/lifecycle map of every multi-mode tool, or topic='safety' for the destructive-tool two-step (confirmation tokens) + delete-echo guards.",
         });
       }
@@ -1553,7 +1521,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           accounts: ["manage_accounts(op='add', name, type)", "manage_accounts(op='update', account, ...)", "manage_accounts(op='delete', account)", "manage_accounts(op='set_mode', accountId, mode)"],
           goals: ["manage_goals(op='add', name, type, target_amount)", "manage_goals(op='update', goal, ...)", "manage_goals(op='delete', goal)", "manage_goals(op='list')"],
           categories: ["manage_categories(op='create', name, type)", "manage_categories(op='rename', id|name, new_name) — pure metadata; a duplicate name is refused", "manage_categories(op='merge', source, target, confirmation_token) — TWO-STEP: omit the token to preview per-type dependent counts + get one, then re-call to atomically repoint EVERY dependent (transactions/splits/rules/subscriptions/budgets/…) into target and delete source", "manage_categories(op='delete', id, confirmation_token) — omit the token to preview FK counts + get one", "manage_rules(op='create', match_payee, assign_category)"],
-          note: "MCP surface v4: CRUD tools consolidated into `manage_*` (op discriminator). All name inputs use fuzzy matching — partial names work. Each account can also have an `alias`; account lookups exact-match on alias in addition to fuzzy-matching on name. Set category via manage_transactions(op='update', id, category=...). Old names (record_transaction, add_goal, …) still work as hidden aliases through v4.1.",
+          note: "MCP surface v4.1: CRUD tools consolidated into `manage_*` (op discriminator). All name inputs use fuzzy matching — partial names work. Each account can also have an `alias`; account lookups exact-match on alias in addition to fuzzy-matching on name. Set category via manage_transactions(op='update', id, category=...). v4.1 is the CLEAN BREAK — the v4.0 hidden aliases were REMOVED; call the consolidated `manage_*` names only.",
           deletes: "SAFETY (v4.0): manage_transfers(op='delete') / manage_accounts(op='delete', non-empty or force) / manage_holdings(op='delete', with tx or lots) are TWO-STEP — a bare call returns { preview, summary, confirmationToken } and deletes NOTHING; re-call with the token to commit. manage_transactions(op='delete') / manage_splits(op='delete') accept an OPTIONAL `expected` echo (payee/amount) that refuses a mismatch. See topic='safety' for the full contract.",
         });
       }
@@ -1600,26 +1568,28 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
           read_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
           write_tools: ["portfolio_record_entry (entry_type: buy | sell | swap | transfer | income_expense | fx_conversion | deposit | withdrawal)", "manage_holdings (op: add | update | delete)"],
           modes: "get_investment_insights supports mode: 'patterns' (default) | 'rebalancing' (needs targets) | 'benchmark' (needs benchmark)",
-          note_on_writes: "Investment activity MUST go through portfolio_record_entry (manage_transactions/manage_transfers reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — manage_holdings(op='add') a 'Cash' holding for that currency first if missing. (The old portfolio_buy/sell/… names still work as hidden aliases through v4.1.)", // lint-allow-retired: names the retired aliases as historical back-compat, not a remedy
+          note_on_writes: "Investment activity MUST go through portfolio_record_entry (manage_transactions/manage_transfers reject investment accounts). Buys/sells need an existing cash sleeve in the trade currency — manage_holdings(op='add') a 'Cash' holding for that currency first if missing. (v4.1 CLEAN BREAK: the old portfolio_buy/sell/… hidden aliases were REMOVED — use portfolio_record_entry entry_types.)", // lint-allow-retired: names the retired aliases as history, not a remedy
           disclaimer: PORTFOLIO_DISCLAIMER,
           note: "All portfolio read tools return a disclaimer field. Not financial advice.",
         });
       }
 
       if (t === "reconcile") {
-        // FINLYNQ-271 — the AI-native reconciliation runbook: file-in-chat →
-        // staged → bucketed match → batched commit → balance anchor.
+        // The AI-native reconciliation runbook: file-in-chat → staged →
+        // bucketed match → batched commit → balance anchor, over the 3 folded
+        // union tools (reconcile / manage_statement_import / manage_bank_ledger)
+        // + the standalone get_reconciliation_summary. All default-ON.
         return dataResponse({
-          read_tools: ["get_reconciliation_summary", "get_reconcile_suggestions", "find_duplicate_bank_rows", "get_balance_anchors"],
-          write_tools: ["upload_statement", "send_to_bank_ledger", "delete_bank_transaction", "upsert_balance_anchor", "materialize_bank_row", "accept_reconcile_suggestion", "unlink_reconcile", "set_account_mode", "apply_rules_to_staged_import"],
-          bulk_tools: ["accept_reconcile_suggestions", "apply_rules_to_bank_rows"],
-          discover: "get_reconciliation_summary is in the DEFAULT profile — call it first (portfolio-wide { totals, accounts, enableHint? }). If the response carries enableHint.needsScope='mcp:import', the WRITE cohort below is gated: ask the user to grant the mcp:import scope (or enable the import toolset in Settings → Integrations) before phases 2-5, then continue.",
-          phase_1_ingest: "Parse the CSV/OFX/QFX/PDF the user dropped INTO chat yourself — normalize to {date, payee, amount, balance?}, detect the sign convention + date format, extract the closing balance + statement period. Then make ONE upload_statement(fileContent[base64], fileName, accountId) call (NOT per-row staging). It returns a real staged_imports.id. IDEMPOTENT by content hash: re-sending the SAME bytes while a pending import exists returns { stagedImportId, duplicateOf } and stages nothing — so a retry never double-stages.",
-          phase_2_stage_dedup: "BEFORE matching, run find_duplicate_bank_rows(accountId) to catch month-boundary overlap with prior statements (distinct ids for one event). Duplicates are FLAGGED (report 'n already in ledger, skipped'), never silently dropped; delete_bank_transaction(bankTransactionId, dryRun:true→false) removes an extra, keeping canonicalId (oldest).",
-          phase_3_match_buckets: "get_reconcile_suggestions(accountId) leads with buckets: EXACT (amount delta 0 + date ±3d) → batch-approve material; FUZZY (looser amount/date) → a compact confirm/reject list for the USER — NEVER auto-commit; NO-MATCH (= bankOnly ids) → candidate NEW transactions: apply_rules_to_bank_rows for known payees, suggest_transaction_details for novel ones, and for a RECURRING novel payee propose a persistent rule via test_rule (dry-run) before creating it.",
-          phase_4_commit_batched: "Commit in BATCHES, one confirmation token per batch — never per row. send_to_bank_ledger(stagedImportId) promotes the pending import into bank_transactions ONLY (no `transactions`; use approve_staged_rows only for a first import of a brand-new account). accept_reconcile_suggestions(pairs[]) links the exact bucket's tx↔bank pairs in ONE call (positional results; partial commit). apply_rules_to_bank_rows(bankRowIds) is a two-step: preview → confirmationToken → resend token + autoMaterialize:true (ONE token for the whole batch). A 200-row statement = ~3 token round-trips, not 200.",
-          phase_5_anchor_verify: "upsert_balance_anchor(accountId, date, amount, currency) with the statement's closing balance/date, then re-run get_reconciliation_summary — the account's balanceDelta MUST read 0. A nonzero delta means you're not done: drill in with get_reconcile_suggestions and NAME the explaining rows (pending txns, fees). Final report to the user: 'n matched / n created / n dup-skipped / m flagged / delta=<x>'.",
-          note: "All reconcile tools are HTTP-only and need an unlocked DEK. upload_statement stages a real staged_imports.id (NOT the mcp_uploads artifact of the legacy /api/mcp/upload path); an unrecognised/unparseable file returns detectedFormat:'unrecognised' and creates nothing. send_to_bank_ledger writes ONLY bank_transactions; approve_staged_rows is the one that CREATES ledger transactions (first-import only). The FUZZY bucket is never auto-committed — always route it through the user.",
+          read_tools: ["get_reconciliation_summary", "reconcile(op='suggest')", "manage_bank_ledger(op='find_duplicates')", "manage_bank_ledger(op='list_anchors')"],
+          write_tools: ["manage_statement_import(op='upload')", "manage_statement_import(op='send_to_bank_ledger')", "manage_bank_ledger(op='delete_row')", "manage_bank_ledger(op='upsert_anchor')", "reconcile(op='materialize')", "reconcile(op='unlink')", "manage_accounts(op='set_mode')", "manage_statement_import(op='apply_rules')"],
+          bulk_tools: ["reconcile(op='accept', pairs[])", "reconcile(op='apply_rules')"],
+          discover: "get_reconciliation_summary is in the DEFAULT profile — call it first (portfolio-wide { totals, accounts }). The whole reconcile/import cohort is default-ON in every session now — no scope or setting to grant.",
+          phase_1_ingest: "Parse the CSV/OFX/QFX/PDF the user dropped INTO chat yourself — normalize to {date, payee, amount, balance?}, detect the sign convention + date format, extract the closing balance + statement period. Then make ONE manage_statement_import(op='upload', fileContent[base64], fileName, accountId) call (NOT per-row staging). It returns a real staged_imports.id. IDEMPOTENT by content hash: re-sending the SAME bytes while a pending import exists returns { stagedImportId, duplicateOf } and stages nothing — so a retry never double-stages.",
+          phase_2_stage_dedup: "BEFORE matching, run manage_bank_ledger(op='find_duplicates', accountId) to catch month-boundary overlap with prior statements (distinct ids for one event). Duplicates are FLAGGED (report 'n already in ledger, skipped'), never silently dropped; manage_bank_ledger(op='delete_row', bankTransactionId, dryRun:true→false) removes an extra, keeping canonicalId (oldest).",
+          phase_3_match_buckets: "reconcile(op='suggest', accountId) leads with buckets: EXACT (amount delta 0 + date ±3d) → batch-approve material; FUZZY (looser amount/date) → a compact confirm/reject list for the USER — NEVER auto-commit; NO-MATCH (= bankOnly ids) → candidate NEW transactions: reconcile(op='apply_rules') for known payees, suggest_transaction_details for novel ones, and for a RECURRING novel payee propose a persistent rule via test_rule (dry-run) before creating it.",
+          phase_4_commit_batched: "Commit in BATCHES, one confirmation token per batch — never per row. manage_statement_import(op='send_to_bank_ledger', stagedImportId) promotes the pending import into bank_transactions ONLY (no `transactions`; use op='approve' only for a first import of a brand-new account). reconcile(op='accept', pairs[]) links the exact bucket's tx↔bank pairs in ONE call (positional results; partial commit). reconcile(op='apply_rules', bankRowIds) is a two-step: preview → confirmationToken → resend token + autoMaterialize:true (ONE token for the whole batch). A 200-row statement = ~3 token round-trips, not 200.",
+          phase_5_anchor_verify: "manage_bank_ledger(op='upsert_anchor', accountId, date, amount, currency) with the statement's closing balance/date, then re-run get_reconciliation_summary — the account's balanceDelta MUST read 0. A nonzero delta means you're not done: drill in with reconcile(op='suggest') and NAME the explaining rows (pending txns, fees). Final report to the user: 'n matched / n created / n dup-skipped / m flagged / delta=<x>'.",
+          note: "All reconcile ops are HTTP-only and need an unlocked DEK. manage_statement_import(op='upload') stages a real staged_imports.id; an unrecognised/unparseable file returns detectedFormat:'unrecognised' and creates nothing. op='send_to_bank_ledger' writes ONLY bank_transactions; op='approve' is the one that CREATES ledger transactions (first-import only). The FUZZY bucket is never auto-committed — always route it through the user.",
         });
       }
 
@@ -1649,16 +1619,16 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
               { mode: "detail", when: "detail:true — ALSO returns the full per-(period,category) cell rows", example: 'get_spending_trends(period="monthly", priorMonths=6, detail=true)' },
             ],
           },
-          staged_import_lifecycle: {
-            summary: "Ordered tool sequence to bring a statement from a file to a reconciled ledger. All HTTP-only; need an unlocked DEK. See topic='reconcile' for the full flow.",
+          manage_statement_import: {
+            summary: "The staged-import lifecycle in ONE tool (op discriminator). Ordered sequence to bring a statement from a file to a reconciled ledger. All HTTP-only; need an unlocked DEK. See topic='reconcile' for the full flow.",
             steps: [
-              { step: 1, tool: "upload_statement", when: "stage a CSV/OFX/QFX file over MCP (base64) → a real stagedImportId", example: 'upload_statement(fileContent="<base64>", fileName="oct.csv", accountId=12)' },
-              { step: 2, tool: "get_staged_import / list_staged_imports", when: "inspect what was staged before promoting", example: "get_staged_import(stagedImportId=88)" },
-              { step: "3a", tool: "send_to_bank_ledger", when: "NORMAL reconcile — account already has ledger tx for the period; promotes to bank_transactions ONLY (no `transactions`)", example: "send_to_bank_ledger(stagedImportId=88)" },
-              { step: "3b", tool: "approve_staged_rows", when: "FIRST import of a brand-new account — CREATES ledger transactions", example: "approve_staged_rows(stagedImportId=88)" },
-              { step: 4, tool: "get_reconcile_suggestions", when: "review link/materialize suggestions per bank row", example: "get_reconcile_suggestions(accountId=12)" },
+              { step: 1, op: "upload", when: "stage a CSV/OFX/QFX file over MCP (base64) → a real stagedImportId", example: 'manage_statement_import(op="upload", fileContent="<base64>", fileName="oct.csv", accountId=12)' },
+              { step: 2, op: "get / list", when: "inspect what was staged before promoting", example: 'manage_statement_import(op="get", stagedImportId=88)' },
+              { step: "3a", op: "send_to_bank_ledger", when: "NORMAL reconcile — account already has ledger tx for the period; promotes to bank_transactions ONLY (no `transactions`)", example: 'manage_statement_import(op="send_to_bank_ledger", stagedImportId=88)' },
+              { step: "3b", op: "approve", when: "FIRST import of a brand-new account — CREATES ledger transactions", example: 'manage_statement_import(op="approve", stagedImportId=88)' },
+              { step: 4, tool: "reconcile(op='suggest')", when: "review link/materialize suggestions per bank row", example: 'reconcile(op="suggest", accountId=12)' },
             ],
-            decision_rule: "Account already has ledger tx for the period → send_to_bank_ledger. Brand-new account, first import → approve_staged_rows. Unsure → default send_to_bank_ledger.",
+            decision_rule: "Account already has ledger tx for the period → op='send_to_bank_ledger'. Brand-new account, first import → op='approve'. Unsure → default op='send_to_bank_ledger'.",
           },
           tip: "These are the genuinely multi-mode tools. For a specific tool's full parameter docs use tool_name='<name>'; for the reconcile cohort use topic='reconcile'.",
         });
@@ -1669,7 +1639,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
         return dataResponse({
           summary: "Destructive tools are gated so a hallucinated id can't wipe data in one shot. Two mechanisms: (A) a preview→confirmation-token two-step for irreversible / multi-row deletes, and (B) an optional `expected` row-content echo for high-frequency single-row deletes.",
           token_two_step: {
-            tools: ["delete_transfer", "delete_account (non-empty OR force=true)", "delete_portfolio_holding (with linked transactions OR lots)", "reject_staged_import", "delete_category (via preview_delete_category)", "manage_categories(op='merge') — repoints ALL dependents into target then deletes source", "execute_bulk_delete / execute_bulk_update / execute_bulk_categorize", "apply_rules_to_bank_rows"],
+            tools: ["delete_transfer", "delete_account (non-empty OR force=true)", "delete_portfolio_holding (with linked transactions OR lots)", "manage_statement_import(op='reject')", "delete_category (via preview_delete_category)", "manage_categories(op='merge') — repoints ALL dependents into target then deletes source", "execute_bulk_delete / execute_bulk_update / execute_bulk_categorize", "reconcile(op='apply_rules')"],
             how: "Call WITHOUT confirmation_token → the tool returns { preview: true, summary, confirmationToken } and writes NOTHING (the summary echoes the blast radius: both legs / cascade counts / tx+lot counts / per-type dependent counts for a category merge). Re-call the SAME arguments PLUS confirmation_token=<that token> to commit.",
             token: "Single-use, 5-minute TTL, bound to your user + the operation + the resolved row id(s). A token minted for one row can't commit a delete of another (payload-mismatch) and can't be replayed (returns 'invalid: replay'). If it expires or you get 'Confirmation token invalid: …', just re-call without the token to refresh.",
             zero_match_no_token: "A zero-match preview_bulk_* (affectedCount:0) mints NO token — the response OMITS `confirmationToken` and carries note:'No rows matched; nothing to confirm.'. Do NOT thread an empty/absent confirmation_token into execute_bulk_*: that returns 'no_token: run preview first (a zero-match preview mints no token)', NOT 'malformed'. There's nothing to delete/update — stop, don't retry.",
@@ -1679,7 +1649,7 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
             tools: ["delete_transaction", "delete_split"],
             how: "OPTIONAL: pass `expected` with what you believe the row holds — delete_transaction({ id, expected: { payee, amount } }) / delete_split({ split_id, expected: { amount } }). A mismatch (payee case-insensitive, amount ±0.01) REFUSES the delete. Omitting `expected` still deletes (back-compat), but passing it guards against a mis-copied id. RECOMMENDED whenever you have the payee/amount.",
           },
-          dry_run_variant: "delete_bank_transaction uses its own two-step: pass dryRun:true to get the would-be-unlinked transaction ids with ZERO writes, then call again with dryRun:false to commit.",
+          dry_run_variant: "manage_bank_ledger(op='delete_row') uses its own two-step: pass dryRun:true to get the would-be-unlinked transaction ids with ZERO writes, then call again with dryRun:false to commit.",
           config_deletes: "delete_loan / delete_subscription / delete_fx_override / delete_rule / delete_budget / delete_goal are direct (single low-risk, user-recreatable config rows) but carry destructiveHint:true so a host can prompt.",
         });
       }
@@ -1731,10 +1701,10 @@ export function registerReadsTools(server: McpServer, ctx: PgToolContext) {
             get_investment_insights: { basis: "market else active_cost (patterns/rebalancing) / lifetime_cost (benchmark totalInvested)", override: "none" },
             get_realized_gains: { basis: "realized", override: "none" },
             get_dividend_income: { basis: "cash_flow", override: "none" },
-            "get_spending_trends / get_income_statement / get_spending_anomalies / get_weekly_recap / get_cash_flow_forecast / get_spotlight_items / get_budget_summary / get_subscription_summary": { basis: "cash_flow", override: "none" },
+            "get_spending_trends / get_income_statement / get_spending_anomalies / get_weekly_recap / get_cash_flow_forecast / get_spotlight_items / get_budget_summary": { basis: "cash_flow", override: "none" },
           },
-          not_labelled: "Loans (get_loans / get_loan_amortization / get_debt_payoff_plan) report scheduled/ledger loan balances, not portfolio valuation — no `basis`. Per-row listings (get_categories, search_transactions), quantity-only tools (trace_holding_quantity), and reconcile data carry no `basis` either.",
-          deprecated_aliases: "The pre-F divergent labels are kept as deprecated aliases through v4.1: get_account_balances.balanceBasis, get_investment_insights.valuationBasis / diversificationValuationBasis. Read the new uniform `basis` field.",
+          not_labelled: "Loans (manage_loans(op='list') / get_loan_amortization / get_debt_payoff_plan) report scheduled/ledger loan balances, not portfolio valuation — no `basis`. Per-row listings (get_categories, search_transactions), quantity-only tools (trace_holding_quantity), and reconcile data carry no `basis` either.",
+          deprecated_aliases: "The pre-F divergent labels are surfaced only as the new uniform `basis` field now (v4.1 removed the divergent-label aliases): read get_account_balances / get_investment_insights `basis`.",
         });
       }
 

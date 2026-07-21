@@ -36,7 +36,7 @@ import {
   withConfirmation,
   PreviewAbortError,
 } from "./_confirm";
-import { registerManageTool, registerAlias } from "./_consolidate";
+import { registerManageTool } from "./_consolidate";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -470,37 +470,4 @@ export function registerCategoriesTools(server: McpServer, ctx: PgToolContext) {
     },
   );
 
-  // ── hidden back-compat aliases (removed in v4.1) ─────────────────────────────
-  registerAlias(
-    server,
-    "preview_delete_category",
-    "Preview deletion of a category. Returns the resolved category id/name plus FK row counts (transactions / rules / subscriptions still referencing it) and a confirmationToken for `delete_category`. The execute step refuses if any FK count is non-zero — reassign or delete dependents first via `preview_bulk_categorize` / `execute_bulk_categorize` (transactions), `update_rule` / `delete_rule` (auto-categorize rules), and `update_subscription` (subscriptions).",
-    {
-      id: z.number().int().positive().optional().describe("Category FK (categories.id). Exact match — preferred. Pass exactly one of id or name."),
-      name: z.string().optional().describe("Category name (fuzzy matched against decrypted name). Requires an unlocked DEK because category names live in encrypted columns post Stream D Phase 4. Pass `id` instead when no DEK is available."),
-    },
-    async (args) => opDeletePreview(args),
-  );
-  registerAlias(
-    server,
-    "delete_category",
-    "Delete a category. Refuses if any transactions / auto-categorize rules / subscriptions still reference it (use `preview_bulk_categorize` / `execute_bulk_categorize` to reassign first). MUST be preceded by `preview_delete_category` with a matching id — pass that call's `confirmationToken` here verbatim. The token is single-use and expires after 5 minutes.",
-    {
-      id: z.number().int().positive().describe("Category FK (categories.id) — must match the id from the preview that issued the token."),
-      confirmation_token: z.string().describe("Token returned by `preview_delete_category` for this exact id. Single-use; 5-minute TTL."),
-    },
-    async (args) => opDeleteCommit(args),
-  );
-  registerAlias(
-    server,
-    "create_category",
-    "Create a new transaction category",
-    {
-      name: z.string().describe("Category name (must be unique)"),
-      type: z.enum(["E", "I", "R"]).describe("Type: 'E'=expense, 'I'=income, 'R'=transfer"),
-      group: z.string().optional().describe("Group label (e.g. 'Housing', 'Food')"),
-      note: z.string().optional(),
-    },
-    async (args) => opCreate(args),
-  );
 }

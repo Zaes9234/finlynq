@@ -67,9 +67,15 @@ function getDeleteTransferTool(db: { execute: (q: unknown) => Promise<unknown> }
   registerPgTools(server, db, "test-user", dek);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tools = (server as any)._registeredTools as Record<string, { handler: (a: unknown, e: unknown) => Promise<unknown> }>;
-  const tool = tools["delete_transfer"];
-  if (!tool) throw new Error("delete_transfer not registered");
-  return tool;
+  // v4.1 clean break: the `delete_transfer` alias was removed; the op lives on
+  // `manage_transfers(op:"delete")`. Grab the union tool and wrap its handler to
+  // inject the `op` discriminator — every test's args stay identical.
+  const tool = tools["manage_transfers"];
+  if (!tool) throw new Error("manage_transfers not registered");
+  return {
+    handler: (args: unknown, extra: unknown) =>
+      tool.handler({ op: "delete", ...(args as Record<string, unknown>) }, extra),
+  };
 }
 
 function envelopeText(result: unknown): string {

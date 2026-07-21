@@ -65,6 +65,23 @@ function makeFixtureDb(matcher: RowsetFn): {
   return { db, queries };
 }
 
+// v4.1 clean break: the per-verb name-accepting aliases were removed; each op
+// now lives on a consolidated discriminated-union tool. Map the old alias name →
+// the union tool + the `op` discriminator to inject so each test's args (and its
+// warning/ambiguous/not-found assertions, lifted verbatim) stay identical.
+// preview_delete_category → manage_categories(op:"delete") with NO token = the
+// preview path, exactly what preview_delete_category did.
+const ALIAS_TO_CONSOLIDATED: Record<string, { tool: string; op: string }> = {
+  add_goal: { tool: "manage_goals", op: "add" },
+  update_goal: { tool: "manage_goals", op: "update" },
+  add_loan: { tool: "manage_loans", op: "add" },
+  add_subscription: { tool: "manage_subscriptions", op: "add" },
+  delete_account: { tool: "manage_accounts", op: "delete" },
+  delete_budget: { tool: "manage_budgets", op: "delete" },
+  delete_portfolio_holding: { tool: "manage_holdings", op: "delete" },
+  preview_delete_category: { tool: "manage_categories", op: "delete" },
+};
+
 function getTool(
   name: string,
   db: { execute: (q: unknown) => Promise<unknown> },
@@ -77,9 +94,14 @@ function getTool(
     string,
     { handler: (args: unknown, extra: unknown) => Promise<unknown> }
   >;
-  const tool = tools[name];
-  if (!tool) throw new Error(`${name} tool not registered`);
-  return tool;
+  const map = ALIAS_TO_CONSOLIDATED[name];
+  if (!map) throw new Error(`no consolidated mapping for ${name}`);
+  const tool = tools[map.tool];
+  if (!tool) throw new Error(`${map.tool} tool not registered`);
+  return {
+    handler: (args: unknown, extra: unknown) =>
+      tool.handler({ op: map.op, ...(args as Record<string, unknown>) }, extra),
+  };
 }
 
 function envelopeText(result: unknown): string {

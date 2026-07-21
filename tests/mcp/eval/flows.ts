@@ -40,7 +40,8 @@ export const EVAL_FLOWS: EvalFlow[] = [
     id: "reconcile-statement",
     task: "Show me the reconciliation suggestions for my checking account so I can match imported bank rows to my transactions.",
     baselineTools: ["get_reconcile_suggestions", "get_reconciliation_summary"],
-    consolidatedTools: ["get_reconcile_suggestions", "get_reconciliation_summary"],
+    // reconcile-consolidation: get_reconcile_suggestions folded into reconcile(op:suggest).
+    consolidatedTools: ["reconcile", "get_reconciliation_summary"],
     writeFlow: false,
   },
   {

@@ -39,7 +39,7 @@ import {
   invalidateUser as invalidateUserTxCache,
 } from "../../src/lib/mcp/user-tx-cache";
 import { withConfirmation, PreviewAbortError } from "./_confirm";
-import { registerManageTool, registerAlias } from "./_consolidate";
+import { registerManageTool } from "./_consolidate";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -387,56 +387,4 @@ export function registerAccountsTools(server: McpServer, ctx: PgToolContext) {
     },
   );
 
-  // ── hidden back-compat aliases (removed in v4.1) ─────────────────────────────
-  registerAlias(
-    server,
-    "add_account",
-    "Create a new financial account (bank, investment, credit card, etc.)",
-    {
-      name: z.string().describe("Account name (must be unique)"),
-      type: z.enum(["A", "L"]).describe("Account type: 'A' for asset, 'L' for liability"),
-      group: z.string().optional().describe("Account group (e.g. 'Banks', 'Credit Cards', 'Investment')"),
-      currency: supportedCurrencyEnum.optional().describe("ISO 4217 currency code (default CAD). Issue #206: any currency in SUPPORTED_CURRENCIES is accepted; FX engine triangulates through USD."),
-      note: z.string().optional().describe("Optional note"),
-      alias: z.string().max(64).optional().describe("Optional short alias used to match the account when receipts or imports reference it by a non-canonical name (e.g. last 4 digits of a card, or a receipt label)."),
-    },
-    async (args) => opAdd(args),
-  );
-  registerAlias(
-    server,
-    "update_account",
-    "Update name, group, currency, note, or alias of an account. Pass exactly ONE of `accountId` (preferred, exact) or `account` (name/alias, fuzzy). Supplying both is allowed only when they resolve to the same account — a mismatch fails loud and does NOT update.",
-    {
-      accountId: z.number().int().positive().optional().describe("Account FK (accounts.id). Exact match — preferred. The only path that works without an unlocked DEK."),
-      account: z.string().optional().describe("Current account name or alias (fuzzy matched against name; exact match on alias). Requires an unlocked DEK because account names live in encrypted columns post Stream D Phase 4. Pass `accountId` instead when no DEK is available."),
-      name: z.string().optional().describe("New name"),
-      group: z.string().optional().describe("New group"),
-      currency: supportedCurrencyEnum.optional().describe("New ISO 4217 currency code (issue #206: full SUPPORTED_CURRENCIES list)."),
-      note: z.string().optional().describe("New note"),
-      alias: z.string().max(64).optional().describe("New alias — short shorthand used to match receipts/imports (e.g. last 4 digits of a card). Pass an empty string to clear."),
-    },
-    async (args) => opUpdate(args),
-  );
-  registerAlias(
-    server,
-    "delete_account",
-    "Delete an account. Pass exactly ONE of `accountId` (preferred, exact) or `account` (name/alias, fuzzy). A non-empty account (has transactions) or `force=true` is DESTRUCTIVE — it CASCADEs the account's transactions, holding_accounts, and goal_accounts — so it requires a two-step: the first call returns a preview (name + tx/holding/goal counts) + a confirmationToken (single-use, 5-min TTL) and deletes NOTHING; call again with the token to commit. A CLEAN, empty account deletes directly. Supplying both id + name is allowed only when they resolve to the same account.",
-    {
-      accountId: z.number().int().positive().optional().describe("Account FK (accounts.id). Exact match — preferred and the only way to delete an account when the user's DEK is not unlocked."),
-      account: z.string().optional().describe("Account name or alias (fuzzy matched against name; exact match on alias). Requires an unlocked DEK because account names live in encrypted columns post Stream D Phase 4. Pass `accountId` instead when no DEK is available."),
-      force: z.boolean().optional().describe("Delete even if transactions exist. FK CASCADE removes the account's transactions, holding_accounts, and goal_accounts rows — irreversible. A non-empty delete ALWAYS requires the confirmation token regardless of this flag."),
-      confirmation_token: z.string().optional().describe("Omit to preview; pass the preview's token to commit a non-empty/force delete. Single-use, 5-min TTL. Not needed to delete a clean empty account."),
-    },
-    async (args) => deleteAccountHandler(args),
-  );
-  registerAlias(
-    server,
-    "set_account_mode",
-    "Set an account's import pipeline mode. 'auto' fires rules at upload, 'approve' reviews each row, 'manual' fires rules at materialize. Returns {id, mode}. Cross-tenant / missing id → Not found.",
-    {
-      accountId: z.number().int().positive().describe("accounts.id."),
-      mode: z.enum(["auto", "approve", "manual"]).describe("New pipeline mode for this account."),
-    },
-    async (args) => opSetMode(args),
-  );
 }

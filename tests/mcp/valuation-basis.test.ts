@@ -88,9 +88,12 @@ const MONEY_BEARING: Record<string, Entry> = {
       return Array.isArray(accts) ? accts : [];
     },
   },
-  get_goals: {
+  // get_goals folded into manage_goals(op:list) in the v4.1 clean break; the
+  // per-goal basis emission stays in goals.ts on the same handler.
+  manage_goals: {
     axis: "position",
     placement: "rows",
+    args: () => ({ op: "list" }),
     rows: (d) => (Array.isArray(d) ? d : []),
   },
   get_financial_health_score: { axis: "position", placement: "top" },
@@ -132,7 +135,13 @@ const MONEY_BEARING: Record<string, Entry> = {
     placement: "top",
     args: () => ({ month: new Date().toISOString().slice(0, 7) }),
   },
-  get_subscription_summary: { axis: "flow", placement: "top" },
+  // get_subscription_summary folded into manage_subscriptions(op:list,
+  // include_summary:true) in the v4.1 clean break.
+  manage_subscriptions: {
+    axis: "flow",
+    placement: "top",
+    args: () => ({ op: "list", include_summary: true }),
+  },
 };
 
 function legalBasisFor(axis: "position" | "flow"): Set<string> {
@@ -195,8 +204,8 @@ describe("FINLYNQ-268 tc-1 — money-bearing tools emit a basis literal (source 
     // contain a `basis:` or `basis,` emission (the phase 1–4 edits). This
     // catches an accidental removal of the label.
     const moduleFor: Record<string, string> = {
-      get_goals: "goals.ts",
-      get_subscription_summary: "subscriptions.ts",
+      manage_goals: "goals.ts",
+      manage_subscriptions: "subscriptions.ts",
       get_realized_gains: "portfolio.ts",
       get_dividend_income: "portfolio.ts",
       get_portfolio_analysis: "portfolio.ts",

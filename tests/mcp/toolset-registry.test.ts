@@ -1,12 +1,12 @@
 /**
- * FINLYNQ-263 (child A) — toolset-registry assertion.
+ * Toolset-registry assertion (reconcile-consolidation, was FINLYNQ-263 child A).
  *
- * Every registered tool must map to exactly one toolset, and the
- * `import-pipeline` set must have exactly the enumerated 24 members (11 imports
- * + 13 reconcile; get_reconciliation_summary lives in analytics — FINLYNQ-271).
- * This is the tripwire that keeps `src/lib/mcp/toolsets.ts`
- * from drifting from the registered surface — a new reconcile/import tool added
- * without an entry, or a stale entry naming a removed tool, fails here.
+ * The statement-import + bank-reconcile cohort was folded into the default-ON
+ * `reconcile` / `manage_statement_import` / `manage_bank_ledger` union tools and
+ * the `import-pipeline` toolset was RETIRED (un-gated — resolves #306). This
+ * tripwire now asserts every registered tool maps to one of the surviving sets
+ * (analytics | ledger-write | admin), that no retired per-verb reconcile/import
+ * name survives, and that the folded cohort is DEFAULT-ON in every session.
  *
  * DB-free (registration only).
  */
@@ -21,11 +21,46 @@ import { registerPgTools } from "../../mcp-server/register-tools-pg";
 import { withAutoAnnotations } from "../../mcp-server/auto-annotations";
 import {
   toolsetForTool,
-  IMPORT_PIPELINE_TOOLS,
   isToolInEnabledToolsets,
   DEFAULT_TOOLSETS,
   type Toolset,
 } from "../../src/lib/mcp/toolsets";
+
+/** The 3 folded union tools + the standalone reconcile read. */
+const RECONCILE_SURFACE = [
+  "reconcile",
+  "manage_statement_import",
+  "manage_bank_ledger",
+  "get_reconciliation_summary",
+] as const;
+
+/** Every per-verb name the clean break removed (must not survive on ANY surface). */
+const RETIRED_RECONCILE_NAMES = [
+  "upload_statement",
+  "get_reconcile_suggestions",
+  "accept_reconcile_suggestion",
+  "accept_reconcile_suggestions",
+  "unlink_reconcile",
+  "materialize_bank_row",
+  "send_to_bank_ledger",
+  "find_duplicate_bank_rows",
+  "get_balance_anchors",
+  "upsert_balance_anchor",
+  "delete_bank_transaction",
+  "apply_rules_to_bank_rows",
+  "apply_rules_to_staged_import",
+  "list_staged_imports",
+  "get_staged_import",
+  "list_staged_transactions",
+  "update_staged_transaction",
+  "link_staged_transfer_pair",
+  "approve_staged_rows",
+  "reject_staged_import",
+  "list_pending_uploads",
+  "preview_import",
+  "execute_import",
+  "cancel_import",
+] as const;
 
 function registeredNames(): string[] {
   const server = withAutoAnnotations(
@@ -41,64 +76,53 @@ function registeredNames(): string[] {
   return Object.keys((server as any)._registeredTools as Record<string, unknown>);
 }
 
-describe("MCP toolset registry (FINLYNQ-263)", () => {
+describe("MCP toolset registry (reconcile-consolidation)", () => {
   let names: string[];
   beforeAll(() => {
     names = registeredNames();
   });
 
   it("every registered tool maps to exactly one valid toolset", () => {
-    const valid: Toolset[] = ["analytics", "ledger-write", "import-pipeline", "admin"];
+    const valid: Toolset[] = ["analytics", "ledger-write", "admin"];
     for (const name of names) {
       const set = toolsetForTool(name);
       expect(valid, `${name} → ${set}`).toContain(set);
     }
   });
 
-  it("every import-pipeline entry names a REGISTERED tool (no stale entries)", () => {
-    const registered = new Set(names);
-    const stale = [...IMPORT_PIPELINE_TOOLS].filter((n) => !registered.has(n));
-    expect(stale, `stale import-pipeline entries: ${stale.join(", ")}`).toEqual([]);
+  it("the retired import-pipeline set is gone — nothing derives to it", () => {
+    // With no user-facing default-OFF set, every tool is analytics | ledger-write.
+    const sets = new Set(names.map(toolsetForTool));
+    expect([...sets].sort()).toEqual(["analytics", "ledger-write"]);
   });
 
-  it("the live import-pipeline set is exactly the 24 enumerated tools", () => {
-    const live = names.filter((n) => toolsetForTool(n) === "import-pipeline").sort();
-    const expected = [...IMPORT_PIPELINE_TOOLS].sort();
-    expect(live).toEqual(expected);
-    expect(expected.length).toBe(24);
+  it("the 3 folded union tools + get_reconciliation_summary are all default-ON", () => {
+    for (const n of RECONCILE_SURFACE) {
+      expect(names, `${n} registered`).toContain(n);
+      expect(isToolInEnabledToolsets(n, DEFAULT_TOOLSETS), `${n} default-on`).toBe(true);
+    }
   });
 
-  it("get_reconciliation_summary is in the default analytics profile (FINLYNQ-271)", () => {
+  it("get_reconciliation_summary is a read (analytics); the union tools are ledger-write", () => {
     expect(toolsetForTool("get_reconciliation_summary")).toBe("analytics");
-    expect(IMPORT_PIPELINE_TOOLS.has("get_reconciliation_summary")).toBe(false);
-    expect(
-      isToolInEnabledToolsets("get_reconciliation_summary", DEFAULT_TOOLSETS),
-    ).toBe(true);
-    // The write cohort stays gated.
-    expect(isToolInEnabledToolsets("upload_statement", DEFAULT_TOOLSETS)).toBe(false);
+    expect(toolsetForTool("reconcile")).toBe("ledger-write");
+    expect(toolsetForTool("manage_statement_import")).toBe("ledger-write");
+    expect(toolsetForTool("manage_bank_ledger")).toBe("ledger-write");
   });
 
-  it("default toolsets hide import-pipeline but expose analytics + ledger-write", () => {
-    const importTool = "upload_statement";
-    const analyticsTool = "get_net_worth";
-    const ledgerTool = "manage_goals";
-    expect(isToolInEnabledToolsets(importTool, DEFAULT_TOOLSETS)).toBe(false);
-    expect(isToolInEnabledToolsets(analyticsTool, DEFAULT_TOOLSETS)).toBe(true);
-    expect(isToolInEnabledToolsets(ledgerTool, DEFAULT_TOOLSETS)).toBe(true);
+  it("no retired reconcile/import per-verb name survives on the registered surface", () => {
+    const survivors = RETIRED_RECONCILE_NAMES.filter((n) => names.includes(n));
+    expect(survivors, `retired names still registered: ${survivors.join(", ")}`).toEqual([]);
   });
 
-  it("the DEFAULT-PROFILE tools/list is <= 60 (tc-1) + import-pipeline hidden", async () => {
-    // Owner decision #6: the <= 60 bar is measured against the default profile
-    // (analytics + ledger-write), NOT the full registry. The 25 import/reconcile
-    // tools are toolset-gated OFF by default.
+  it("the default-profile tools/list advertises the folded union tools (no gating)", async () => {
     const { dumpToolsList } = await import("./eval/dump-tools-list");
     const defProfile = await dumpToolsList((n) =>
       isToolInEnabledToolsets(n, DEFAULT_TOOLSETS),
     );
-    expect(defProfile.length).toBeLessThanOrEqual(60);
-    const leaked = defProfile
-      .map((t) => t.name)
-      .filter((n) => IMPORT_PIPELINE_TOOLS.has(n));
-    expect(leaked, `import tools in default profile: ${leaked.join(", ")}`).toEqual([]);
+    const listed = defProfile.map((t) => t.name);
+    for (const n of ["reconcile", "manage_statement_import", "manage_bank_ledger"]) {
+      expect(listed, `${n} advertised in default profile`).toContain(n);
+    }
   });
 });

@@ -1,5 +1,7 @@
 /**
- * FINLYNQ-271 phase 2 — `upload_statement` content-hash idempotency.
+ * `manage_statement_import(op:"upload")` content-hash idempotency (was FINLYNQ-271
+ * `upload_statement`, folded into the manage_statement_import union in the
+ * reconcile-consolidation).
  *
  * Re-sending the SAME file bytes while a PENDING staged import for that content
  * hash already exists must return the existing { stagedImportId, duplicateOf }
@@ -52,7 +54,7 @@ const toBase64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 const sha256Hex = (s: string) =>
   createHash("sha256").update(Buffer.from(s, "utf8")).digest("hex");
 
-describeDb("upload_statement content-hash idempotency (FINLYNQ-271)", () => {
+describeDb("manage_statement_import(op:upload) content-hash idempotency", () => {
   let world: SeededWorld;
   let handler: ToolHandler;
 
@@ -60,12 +62,12 @@ describeDb("upload_statement content-hash idempotency (FINLYNQ-271)", () => {
     world = await seedContractWorld();
     const server = new McpServer({ name: "upload-idem", version: "0.0.0" });
     const { db } = await import("@/db");
-    // No enabledToolsets passed ⇒ treated as all-enabled (upload_statement is
-    // registered regardless; the toolset gate is a route-level concern).
     registerPgTools(server, db as never, world.userId, CONTRACT_DEK);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const tools = (server as any)._registeredTools as Record<string, { handler: ToolHandler }>;
-    handler = tools["upload_statement"].handler;
+    // The upload op lives on the manage_statement_import union now; invoking the
+    // stored handler directly bypasses schema validation, so pass op verbatim.
+    handler = tools["manage_statement_import"].handler;
   }, 60_000);
 
   afterAll(async () => {
@@ -74,6 +76,7 @@ describeDb("upload_statement content-hash idempotency (FINLYNQ-271)", () => {
 
   it("second identical upload returns duplicateOf = the first id and stages no new row", async () => {
     const args = {
+      op: "upload",
       fileContent: toBase64(CSV_A),
       fileName: "idem-a.csv",
       accountId: world.cashAccountId,
@@ -110,6 +113,7 @@ describeDb("upload_statement content-hash idempotency (FINLYNQ-271)", () => {
     const res = envelope(
       await handler(
         {
+          op: "upload",
           fileContent: toBase64(CSV_B),
           fileName: "idem-b.csv",
           accountId: world.cashAccountId,
