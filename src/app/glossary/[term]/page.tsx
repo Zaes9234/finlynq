@@ -23,7 +23,7 @@ export async function generateMetadata({
   const entry = getGlossaryEntry(term);
   if (!entry) return {};
   return {
-    title: `${entry.term} | Finlynq glossary`,
+    title: `${entry.term} | Finlynq`,
     description: metaDescription(entry.description),
     alternates: { canonical: `/glossary/${entry.slug}` },
     openGraph: {

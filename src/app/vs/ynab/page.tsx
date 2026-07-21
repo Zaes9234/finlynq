@@ -3,12 +3,12 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs YNAB: open-source alternative with investments & MCP",
+  title: "Finlynq vs YNAB: open-source alternative with MCP",
   description:
     "Finlynq vs YNAB: open-source AGPL v3 with self-host, investment tracking, envelope encryption, and a first-party MCP server, vs YNAB's closed SaaS.",
   alternates: { canonical: "/vs/ynab" },
   openGraph: {
-    title: "Finlynq vs YNAB: open-source alternative with investments & MCP",
+    title: "Finlynq vs YNAB: open-source alternative with MCP",
     description:
       "Open-source self-hostable PFM with investments, multi-currency, encryption, and a first-party MCP server, compared with YNAB's zero-based budgeting SaaS.",
     url: "/vs/ynab",

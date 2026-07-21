@@ -3,12 +3,12 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",
+  title: "Finlynq vs Actual Budget: open-source PFM with MCP",
   description:
     "Finlynq vs Actual Budget: two open-source self-hostable PFMs. Actual is local-first budgeting; Finlynq adds investments and a first-party MCP server.",
   alternates: { canonical: "/vs/actual" },
   openGraph: {
-    title: "Finlynq vs Actual Budget: open-source PFM with investments & MCP",
+    title: "Finlynq vs Actual Budget: open-source PFM with MCP",
     description:
       "Two open-source self-hostable PFMs. Actual: local-first envelope budgeting (MIT). Finlynq: investments + multi-currency + direct bank connections + per-user encryption + a first-party MCP server.",
     url: "/vs/actual",

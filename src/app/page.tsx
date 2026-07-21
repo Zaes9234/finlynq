@@ -8,7 +8,7 @@ import { JsonLd, softwareApplicationSchema } from "@/components/seo/json-ld";
 // a `"use client"` file cannot export.
 export const metadata: Metadata = {
   title:
-    "Finlynq: Open-Source Personal Finance with a First-Party MCP Server",
+    "Finlynq: open-source personal finance with an MCP server",
   description:
     "Open-source (AGPL v3) personal finance with a first-party MCP server. Track your money, then query it in plain English from Claude or any MCP client.",
   alternates: { canonical: "/" },

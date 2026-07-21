@@ -5,7 +5,7 @@ import { JsonLd, breadcrumbSchema } from "@/components/seo/json-ld";
 import { VS_SLUGS, VS_META } from "@/lib/seo/site";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs other personal finance apps: side-by-side comparisons",
+  title: "Finlynq vs Mint, Monarch, YNAB & more: side-by-side",
   description:
     "How Finlynq compares to Monarch, Era, Firefly III, YNAB, and more: open-source AGPL v3, self-hostable, with a first-party MCP server and envelope encryption.",
   alternates: { canonical: "/vs" },
