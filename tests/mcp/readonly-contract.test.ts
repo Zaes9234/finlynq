@@ -45,14 +45,19 @@ const DB_URL = process.env.DATABASE_URL || process.env.PF_DATABASE_URL || "";
 const HAS_TEST_DB = /\/[^/]*_test([?#]|$)/.test(DB_URL);
 
 // ─── Read-only surface (single source of truth) ──────────────────────────────
-// Empirically 51 on `dev` HEAD — read-only per `inferAnnotations(name).readOnlyHint`.
-// FINLYNQ-265 renamed get_portfolio_performance_v2 → get_portfolio_returns and
-// kept the old name a HIDDEN alias; both stay REGISTERED (this enumerates the
-// registered surface, not the advertised tools/list), so the read-only registered
-// count went 50 → 51. get_loans is likewise a registered-but-hidden alias (still
-// counted here). Bump this when a read tool is added AND add its contract-table
-// entry below; the count assert is the tripwire.
-const EXPECTED_READONLY_COUNT = 51;
+// Empirically 33 post reconcile-consolidation (v4.1 clean break) — read-only per
+// `inferAnnotations(name).readOnlyHint`. The v4.1 clean break REMOVED every v4.0
+// hidden alias (registerAlias), which included the read aliases folded into
+// `manage_*(op:list)` (get_goals, list_loans, list_subscriptions, list_rules,
+// list_fx_overrides, get_subscription_summary, list_splits, get_loans,
+// get_portfolio_performance_v2, preview_delete_category) AND the 8 read-prefixed
+// import/reconcile tools folded into the union tools (get_reconcile_suggestions,
+// find_duplicate_bank_rows, get_balance_anchors, list_pending_uploads,
+// preview_import, list_staged_imports, get_staged_import, list_staged_transactions).
+// This test enumerates the REGISTERED surface (== advertised now that no aliases
+// remain). Bump this when a read tool is added AND add its contract-table entry
+// below; the count assert is the tripwire.
+const EXPECTED_READONLY_COUNT = 33;
 
 /**
  * A single MCP `content` response. Every handler returns `{ content: [{ type,
@@ -116,16 +121,10 @@ const CONTRACT: Record<string, Entry> = {
   get_spotlight_items: { assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true) },
   get_financial_health_score: { assert: (d) => expect(isObj(d)).toBe(true) },
 
-  // ── Lists (arrays) ──
+  // ── Lists (arrays) — the get_*/list_* v4.0 read aliases were folded into
+  //    manage_*(op:list) and REMOVED in the v4.1 clean break; only the
+  //    still-standalone reads remain. ──
   get_categories: { assert: (d) => expect(Array.isArray(d)).toBe(true) },
-  get_goals: { assert: (d) => expect(Array.isArray(d)).toBe(true) },
-  get_loans: { assert: (d) => expect(Array.isArray(d)).toBe(true) },
-  list_loans: { assert: (d) => expect(Array.isArray(d)).toBe(true) },
-  list_subscriptions: { assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true) },
-  list_rules: { assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true) },
-  list_fx_overrides: { assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true) },
-  list_pending_uploads: { assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true) },
-  list_staged_imports: { assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true) },
   get_recurring_transactions: { assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true) },
 
   // ── Summaries ──
@@ -133,16 +132,15 @@ const CONTRACT: Record<string, Entry> = {
     args: () => ({ month: new Date().toISOString().slice(0, 7) }),
     assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true),
   },
-  get_subscription_summary: { assert: (d) => expect(isObj(d)).toBe(true) },
   detect_subscriptions: { assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true) },
   get_reconciliation_summary: { assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true) },
 
   // ── Portfolio ──
   get_portfolio_analysis: { assert: (d) => expect(isObj(d)).toBe(true) },
   get_portfolio_performance: { assert: (d) => expect(isObj(d)).toBe(true) },
-  // FINLYNQ-265: renamed from get_portfolio_performance_v2 (which stays a hidden alias).
+  // FINLYNQ-265: renamed from get_portfolio_performance_v2 (the old-name alias
+  // was removed in the v4.1 clean break).
   get_portfolio_returns: { assert: (d) => expect(isObj(d)).toBe(true) },
-  get_portfolio_performance_v2: { assert: (d) => expect(isObj(d)).toBe(true) },
   get_investment_insights: { assert: (d) => expect(isObj(d)).toBe(true) },
   get_dividend_income: { assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true) },
   get_realized_gains: { assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true) },
@@ -172,10 +170,6 @@ const CONTRACT: Record<string, Entry> = {
     args: () => ({ match_payee: "Whole" }),
     assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true),
   },
-  list_splits: {
-    args: (w) => ({ transaction_id: w.transactionId }),
-    assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true),
-  },
 
   // ── Bulk preview (confirmation-token) — filter needs ≥1 field (else the
   //    handler throws "At least one filter field is required"); scope to the
@@ -192,34 +186,11 @@ const CONTRACT: Record<string, Entry> = {
     args: (w) => ({ filter: { account_id: w.cashAccountId }, changes: { category_id: w.expenseCategoryId } }),
     assert: (d) => expect(isObj(d)).toBe(true),
   },
-  preview_delete_category: {
-    args: (w) => ({ id: w.incomeCategoryId }),
-    assert: (d) => expect(isObj(d)).toBe(true),
-  },
 
-  // ── Staged import detail ──
-  get_staged_import: {
-    args: (w) => ({ stagedImportId: w.stagedImportId }),
-    assert: (d) => expect(isObj(d)).toBe(true),
-  },
-  list_staged_transactions: {
-    args: (w) => ({ stagedImportId: w.stagedImportId }),
-    assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true),
-  },
-
-  // ── Reconcile ──
-  get_reconcile_suggestions: {
-    args: (w) => ({ accountId: w.cashAccountId }),
-    assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true),
-  },
-  get_balance_anchors: {
-    args: (w) => ({ accountId: w.cashAccountId }),
-    assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true),
-  },
-  find_duplicate_bank_rows: {
-    args: (w) => ({ accountId: w.cashAccountId }),
-    assert: (d) => expect(Array.isArray(d) || isObj(d)).toBe(true),
-  },
+  // ── Reconcile — get_reconciliation_summary is the only STANDALONE reconcile
+  //    read left; the rest are ops inside the (write-classified) union tools
+  //    (reconcile / manage_statement_import / manage_bank_ledger), so they are
+  //    no longer in the read-only surface (reconcile-consolidation). ──
 
   // ── FX (external world) ──
   get_fx_rate: {
@@ -233,15 +204,6 @@ const CONTRACT: Record<string, Entry> = {
 
   // ── Help ──
   finlynq_help: { assert: (d) => expect(isObj(d) || Array.isArray(d)).toBe(true) },
-
-  // ── Needs an on-disk upload artifact (mcp_uploads) — envelope/shape only ──
-  // DEFERRED to a fuller fixture: `preview_import` resolves `upload_id` against
-  // the `mcp_uploads` row + a file on disk written by POST /api/mcp/upload.
-  // We assert a well-formed MCP content response with an unknown upload_id.
-  preview_import: {
-    args: () => ({ upload_id: "00000000-0000-0000-0000-000000000000" }),
-    envelopeOnly: true,
-  },
 };
 
 // ─── Register tools against a mock server + enumerate read-only set ───────────
@@ -260,7 +222,7 @@ describe("MCP read-only tools — enumeration + coverage (no DB)", () => {
   const { allNames, readOnly } = registerAndEnumerate("enum-user");
 
   it("read-only subset is derived from inferAnnotations and matches the expected count", () => {
-    expect(allNames.length).toBeGreaterThan(100); // 117-tool surface
+    expect(allNames.length).toBeGreaterThanOrEqual(50); // ~54-tool surface (registered == advertised post-v4.1)
     expect(readOnly.length).toBe(EXPECTED_READONLY_COUNT);
   });
 

@@ -31,7 +31,7 @@ import {
 import {
   ymdDate,
 } from "../lib/date-validators";
-import { registerManageTool, registerAlias } from "./_consolidate";
+import { registerManageTool } from "./_consolidate";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -197,35 +197,6 @@ export function registerFxTools(server: McpServer, ctx: PgToolContext) {
     },
   );
 
-  // ── hidden back-compat aliases (removed in v4.1) ─────────────────────────────
-  registerAlias(
-    server,
-    "list_fx_overrides",
-    "List the user's manual FX rate overrides. Each override pins rate_to_usd for a currency over a date range; lookup uses the most-specific match.",
-    {},
-    async () => opList(),
-  );
-  registerAlias(
-    server,
-    "set_fx_override",
-    "Pin a manual FX rate. Accepts the user-friendly pair shape (1 `from` = `rate` `to` on `date`) and stores it as a rate_to_usd entry under fx_overrides. One side of the pair MUST be USD; cross-pair overrides should be entered as two USD-anchored rows.",
-    {
-      from: z.string().describe("Source currency (e.g. USD)"),
-      to: z.string().describe("Target currency (e.g. CAD)"),
-      date: ymdDate.describe("YYYY-MM-DD"),
-      rate: z.number().positive().describe("Exchange rate — 1 {from} = rate {to}"),
-      dateTo: ymdDate.optional().describe("Optional end date YYYY-MM-DD; defaults to a single-day override"),
-      note: z.string().optional().describe("Optional note (e.g. 'bank rate at Wise on this day')"),
-    },
-    async (args) => opSet(args),
-  );
-  registerAlias(
-    server,
-    "delete_fx_override",
-    "Delete a manual FX rate override by id",
-    { id: z.number().describe("fx_overrides row id") },
-    async (args) => opDelete(args),
-  );
 
 
   // ── convert_amount ────────────────────────────────────────────────────────

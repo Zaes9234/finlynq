@@ -808,7 +808,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       // Investment-account constraint: stdio MCP record_transaction has no
       // portfolio-holding parameter, so it can't satisfy the FK requirement.
       if (acct.is_investment) {
-        return sqliteErr(`Account #${account_id} is an investment account — record_transaction can't write to it (over any transport). Use the HTTP MCP at /mcp (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion) or the web app to record investment activity.`);
+        return sqliteErr(`Account #${account_id} is an investment account — record_transaction can't write to it (over any transport). Use the HTTP MCP at /mcp (portfolio_record_entry, entry_type: buy | sell | swap | transfer | deposit | withdrawal | income_expense | fx_conversion) or the web app to record investment activity.`);
       }
 
       let catId: number | null = null;
@@ -1811,7 +1811,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
           get_investment_insights: "get_investment_insights(mode?, targets?, benchmark?) — mode: 'patterns' (default), 'rebalancing' (needs targets), 'benchmark'",
           get_net_worth: "get_net_worth(currency?, months?) — Omit months for current totals; set months>0 for a trend.",
           record_transfer: "record_transfer(from_account_id, to_account_id, amount, ...) — Atomic transfer pair. Stdio requires numeric ids; HTTP MCP also accepts fromAccount/toAccount (strict fuzzy fail-loud ambiguity per issue #234). In-kind: holding+quantity.",
-          portfolio_buy: "portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion — HTTP MCP only (need an unlocked DEK; unavailable on stdio). Canonical investment writes; record_transaction rejects investment accounts.",
+          portfolio_buy: "portfolio_buy is a hidden HTTP-only alias for portfolio_record_entry (entry_type: buy). portfolio_record_entry (entry_type: buy | sell | swap | transfer | deposit | withdrawal | income_expense | fx_conversion) is the canonical investment write — HTTP MCP only (need an unlocked DEK; unavailable on stdio). record_transaction rejects investment accounts.",
           preview_bulk_update: "preview_bulk_update(filter, changes) — stdio-accepted `changes` keys: category_id, category (name → id), account_id, date, note, payee, is_business, tags. Unknown keys fail strictly. Returns affectedCount, sampleBefore/After, unappliedChanges[{field, requestedValue, reason}], confirmationToken. sampleAfter.category re-hydrates to the resolved name when `category` resolves. (HTTP transport adds quantity, portfolioHoldingId, portfolioHolding.)",
           execute_bulk_update: "execute_bulk_update(filter, changes, confirmation_token) — re-runs name→id resolution and aborts when the resolved set is empty. Returns {updated, unappliedChanges[{field, requestedValue, reason}]}. Stdio: category-by-name only (HTTP supports quantity/holding writes too).",
         };
@@ -1825,7 +1825,7 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
         write_tools: ["record_transaction", "bulk_record_transactions", "update_transaction", "delete_transaction", "set_budget", "delete_budget", "add_account", "update_account", "delete_account", "add_goal", "update_goal", "delete_goal", "create_category", "delete_category", "create_rule", "add_snapshot", "apply_rules_to_uncategorized"],
         portfolio_tools: ["get_portfolio_analysis", "get_portfolio_performance", "analyze_holding", "trace_holding_quantity", "get_investment_insights"],
         transfer_tools: ["record_transfer"],
-        tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for usage details. Investment accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the HTTP-MCP portfolio_* tools (portfolio_buy / portfolio_sell / portfolio_swap / portfolio_transfer / portfolio_deposit / portfolio_withdrawal / portfolio_income_expense / portfolio_fx_conversion), which are unavailable on stdio (no DEK). record_transfer remains the path for plain cash transfers between non-investment accounts.",
+        tip: "Finlynq records bookkeeping entries in your own database; it never connects to a brokerage or bank or moves real money. Use tool_name='record_transaction' for usage details. Investment accounts CANNOT use record_transaction / bulk_record_transactions / record_transfer for trades — use the HTTP-MCP portfolio_record_entry (entry_type: buy | sell | swap | transfer | deposit | withdrawal | income_expense | fx_conversion), which is unavailable on stdio (no DEK). record_transfer remains the path for plain cash transfers between non-investment accounts.",
       });
 
       if (t === "schema") return dataResponse({
@@ -3296,83 +3296,35 @@ export function registerCoreTools(server: McpServer, sqlite: PgCompatDb, opts: C
       "This tool requires the HTTP MCP transport because staging operations need to read or write encrypted data under your DEK. Connect via the HTTP MCP at /mcp instead, or use the web UI at /import/pending.",
     );
 
+  // reconcile-consolidation §6a — the staged-import + bank-reconcile cohort is
+  // folded into 3 HTTP-only discriminated-union tools. stdio can't run them
+  // (staging/reconcile need the user's DEK), so it registers refusal STUBS under
+  // the NEW names (the retired per-verb names — update_staged_transaction,
+  // approve_staged_rows, … — no longer exist on ANY transport). Each stub takes
+  // a loose `op` field for parity with the HTTP schema and refuses cleanly.
   server.tool(
-    "list_staged_imports",
-    "List the user's staged imports (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    "manage_statement_import",
+    "Manage the staged-import lifecycle: upload/list/get/list_rows/update_row/link_transfer_pair/approve/send_to_bank_ledger/apply_rules/reject (HTTP MCP only — stdio refuses; staging needs the DEK).",
     {
-      status: z.enum(["pending", "imported", "rejected"]).optional(),
-      limit: z.number().int().positive().optional(),
+      op: z.string().describe("The staged-import operation (HTTP MCP only)."),
     },
     async () => stagingHttpOnlyError(),
   );
 
   server.tool(
-    "get_staged_import",
-    "Fetch full detail for one staged import (HTTP MCP only — stdio refuses; staging needs the DEK).",
-    { stagedImportId: z.string() },
-    async () => stagingHttpOnlyError(),
-  );
-
-  server.tool(
-    "list_staged_transactions",
-    "Flat list of staged transaction rows (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    "reconcile",
+    "Reconcile a bank statement against the ledger for one account: suggest/accept/unlink/materialize/apply_rules (HTTP MCP only — stdio refuses; reconcile needs the DEK).",
     {
-      stagedImportId: z.string().optional(),
-      dedupStatus: z.enum(["new", "existing", "probable_duplicate"]).optional(),
-      rowStatus: z.enum(["pending", "approved", "rejected"]).optional(),
-      txType: z.enum(["E", "I", "R"]).optional(),
-      limit: z.number().int().positive().optional(),
+      op: z.string().describe("The reconcile operation (HTTP MCP only)."),
     },
     async () => stagingHttpOnlyError(),
   );
 
   server.tool(
-    "update_staged_transaction",
-    "Edit a single staged transaction row (HTTP MCP only — stdio refuses; staging needs the DEK).",
+    "manage_bank_ledger",
+    "Maintain bank-ledger rows and balance anchors: list_anchors/upsert_anchor/find_duplicates/delete_row (HTTP MCP only — stdio refuses; the reconcile cohort needs the DEK).",
     {
-      stagedTransactionId: z.string(),
-      txType: z.enum(["E", "I", "R"]).optional(),
-      payee: z.string().optional(),
-      category: z.string().optional(),
-      note: z.string().optional(),
-      tags: z.string().optional(),
-      quantity: z.number().nullable().optional(),
-      portfolioHoldingId: z.number().int().nullable().optional(),
-      enteredAmount: z.number().nullable().optional(),
-      enteredCurrency: z.string().nullable().optional(),
-      peerStagedId: z.string().nullable().optional(),
-      targetAccountId: z.number().int().nullable().optional(),
-      forceCommit: z.boolean().optional(),
-    },
-    async () => stagingHttpOnlyError(),
-  );
-
-  server.tool(
-    "link_staged_transfer_pair",
-    "Sugar over update_staged_transaction (HTTP MCP only — stdio refuses; staging needs the DEK).",
-    { rowAId: z.string(), rowBId: z.string() },
-    async () => stagingHttpOnlyError(),
-  );
-
-  server.tool(
-    "approve_staged_rows",
-    "Materialize staged rows into the live transactions table (HTTP MCP only — stdio refuses; staging needs the DEK).",
-    {
-      stagedImportId: z.string(),
-      rowIds: z.array(z.string()).optional(),
-      forceImportIndices: z.array(z.number().int()).optional(),
-      idempotencyKey: z.string().uuid().optional(),
-      confirmation_token: z.string().optional(),
-    },
-    async () => stagingHttpOnlyError(),
-  );
-
-  server.tool(
-    "reject_staged_import",
-    "Reject (hard-delete) a staged import (HTTP MCP only — stdio refuses; staging needs the DEK).",
-    {
-      stagedImportId: z.string(),
-      confirmation_token: z.string().optional(),
+      op: z.string().describe("The bank-ledger operation (HTTP MCP only)."),
     },
     async () => stagingHttpOnlyError(),
   );

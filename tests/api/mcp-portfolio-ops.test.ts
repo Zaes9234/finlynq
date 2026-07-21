@@ -126,6 +126,32 @@ function bootstrap(dek: Buffer | null = DEK) {
   return { tools };
 }
 
+// v4.1 clean break: the per-verb aliases (record_transaction, portfolio_buy)
+// were removed; their ops live on the consolidated discriminated-union tools.
+// Grab the union tool and wrap its handler to inject the discriminator field
+// (`op` for manage_*, `entry_type` for portfolio_record_entry) so each test's
+// args stay identical. Returns undefined if the union tool isn't registered so
+// the `toBeDefined()` registration assertion still means something.
+const ALIAS_TO_CONSOLIDATED: Record<string, { tool: string; inject: Record<string, unknown> }> = {
+  record_transaction: { tool: "manage_transactions", inject: { op: "record" } },
+  portfolio_buy: { tool: "portfolio_record_entry", inject: { entry_type: "buy" } },
+};
+
+function getConsolidatedTool(
+  tools: Record<string, { handler?: (args: unknown, extra: unknown) => Promise<unknown> }>,
+  name: string,
+): { handler: (args: unknown, extra: unknown) => Promise<unknown> } | undefined {
+  const map = ALIAS_TO_CONSOLIDATED[name];
+  if (!map) throw new Error(`no consolidated mapping for ${name}`);
+  const tool = tools[map.tool];
+  if (!tool?.handler) return undefined;
+  const handler = tool.handler;
+  return {
+    handler: (args: unknown, extra: unknown) =>
+      handler({ ...map.inject, ...(args as Record<string, unknown>) }, extra),
+  };
+}
+
 function bodyText(res: unknown): string {
   return (res as { content: { text: string }[] }).content[0].text;
 }
@@ -141,20 +167,24 @@ beforeEach(() => {
 describe("record_transaction refuses investment accounts", () => {
   it("returns an error pointing at portfolio_* and never calls createTransaction", async () => {
     const { tools } = bootstrap();
-    const cb = tools["record_transaction"].handler!;
+    const cb = getConsolidatedTool(tools, "record_transaction")!.handler;
     const res = await cb(
       { amount: -1500, payee: "AAPL", account_id: 7, date: "2026-06-10" },
       {},
     );
     const txt = bodyText(res);
     expect(txt).toMatch(/investment account/i);
-    expect(txt).toMatch(/portfolio_buy/);
+    // FINLYNQ-282: the refusal now points at the v4 consolidated tool, not the
+    // retired per-verb portfolio_* names (which are hidden aliases absent from
+    // tools/list).
+    expect(txt).toMatch(/portfolio_record_entry/);
+    expect(txt).toMatch(/entry_type/);
     expect(createTransactionSpy).not.toHaveBeenCalled();
   });
 
   it("refuses on the dryRun path too (preview the block)", async () => {
     const { tools } = bootstrap();
-    const cb = tools["record_transaction"].handler!;
+    const cb = getConsolidatedTool(tools, "record_transaction")!.handler;
     const res = await cb(
       { amount: -1500, payee: "AAPL", account_id: 7, dryRun: true, date: "2026-06-10" },
       {},
@@ -167,8 +197,8 @@ describe("record_transaction refuses investment accounts", () => {
 describe("portfolio_buy routes through the operations domain layer", () => {
   it("calls recordBuy with the resolved ids, source='mcp_http', and fires the side effects", async () => {
     const { tools } = bootstrap();
-    expect(tools["portfolio_buy"], "portfolio_buy is registered").toBeDefined();
-    const cb = tools["portfolio_buy"].handler!;
+    expect(getConsolidatedTool(tools, "portfolio_buy"), "portfolio_buy is registered").toBeDefined();
+    const cb = getConsolidatedTool(tools, "portfolio_buy")!.handler;
     const res = await cb(
       { account_id: 7, holdingId: 55, qty: 10, totalCost: 1500, date: "2026-06-10" },
       {},
@@ -192,7 +222,7 @@ describe("portfolio_buy routes through the operations domain layer", () => {
 
   it("refuses without a DEK before touching the domain layer", async () => {
     const { tools } = bootstrap(null);
-    const cb = tools["portfolio_buy"].handler!;
+    const cb = getConsolidatedTool(tools, "portfolio_buy")!.handler;
     const res = await cb(
       { account_id: 7, holdingId: 55, qty: 1, totalCost: 1, date: "2026-06-10" },
       {},

@@ -60,7 +60,9 @@ describe("MCP annotation registry (FINLYNQ-264 tc-2, clause 1)", () => {
   });
 
   it("registers a non-trivial tool surface", () => {
-    expect(Object.keys(tools).length).toBeGreaterThan(100);
+    // ~54 registered tools post reconcile-consolidation (v4.1 clean break —
+    // registered == advertised now that all v4.0 hidden aliases are removed).
+    expect(Object.keys(tools).length).toBeGreaterThanOrEqual(50);
   });
 
   it("every tool carries all three hints as booleans + a title", () => {
@@ -97,9 +99,10 @@ describe("MCP annotation registry (FINLYNQ-264 tc-2, clause 1)", () => {
   });
 
   it("read-only preview tools stay readOnly, never destructive", () => {
-    // preview_delete_category / preview_bulk_delete embed a delete/reject token
-    // in their NAME but are pure reads — must be readOnly, not destructive.
-    for (const name of ["preview_delete_category", "preview_bulk_delete"]) {
+    // preview_bulk_delete embeds a delete token in its NAME but is a pure read —
+    // must be readOnly, not destructive. (preview_delete_category was a v4.0
+    // hidden alias, removed in the v4.1 clean break.)
+    for (const name of ["preview_bulk_delete"]) {
       const a = tools[name]?.annotations;
       expect(a, `${name} registered`).toBeTruthy();
       expect(a?.readOnlyHint, `${name} readOnly`).toBe(true);

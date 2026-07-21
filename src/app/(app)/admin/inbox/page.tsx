@@ -1,32 +1,35 @@
 "use client";
 
 /**
- * /admin/inbox — admin triage for non-import emails.
+ * /admin/inbox — admin triage for non-import emails, two-pane (list | thread).
  *
- * Two tabs:
- *   - Mailbox: info@/admin@/etc. and named-human matches, kept indefinitely
- *   - Trash:   unknown addresses, auto-deleted after 24h
+ * Left: compact list (Mailbox / Trash tabs). Right: the selected email's full
+ * CONVERSATION — their inbound messages + our sent replies (from
+ * /api/admin/inbox/[id]/thread) — plus a reply box. Replying sends via the
+ * Resend transport from the mailbox address and is persisted, so the thread
+ * shows the back-and-forth.
  *
- * SECURITY: email body HTML is attacker-controlled. Render it in a sandboxed
- * iframe with `srcDoc` + `sandbox="allow-same-origin"` (no allow-scripts, no
- * allow-forms, no top-navigation). Do NOT dangerouslySetInnerHTML the html
- * into the main DOM.
+ * SECURITY: inbound body HTML is attacker-controlled. Render it ONLY in a
+ * sandboxed iframe with `srcDoc` + `sandbox="allow-same-origin"` (no scripts,
+ * no forms, no top-nav). Never dangerouslySetInnerHTML it into the main DOM.
+ * Our own outbound replies + plaintext bodies render as escaped text.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { Inbox, Trash2, RefreshCw, ArrowUpFromLine, CheckCircle2, Send } from "lucide-react";
+  Inbox,
+  Trash2,
+  RefreshCw,
+  ArrowUpFromLine,
+  CheckCircle2,
+  Send,
+  X,
+  Mail,
+} from "lucide-react";
 
 interface InboxRow {
   id: string;
@@ -41,9 +44,24 @@ interface InboxRow {
   triagedAt: string | null;
 }
 
-interface InboxDetail extends InboxRow {
+interface ThreadMessage {
+  kind: "inbound" | "outbound";
+  id: string;
+  fromAddress: string;
+  toAddress: string;
+  subject: string | null;
+  bodyText: string | null;
   bodyHtml: string | null;
-  svixId: string | null;
+  at: string;
+}
+
+interface Thread {
+  id: string;
+  category: "mailbox" | "trash";
+  subject: string | null;
+  counterparty: string;
+  triagedAt: string | null;
+  messages: ThreadMessage[];
 }
 
 function hoursUntil(iso: string): number {
@@ -51,18 +69,58 @@ function hoursUntil(iso: string): number {
   return Math.max(0, Math.ceil(ms / (60 * 60 * 1000)));
 }
 
+function fmtTime(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+/** Wrap untrusted HTML for a sandboxed iframe (no scripts run under sandbox). */
+function htmlSrcDoc(html: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"></head><body style="font:13px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:12px;color:#111">${html}</body></html>`;
+}
+
+function MessageBody({ m }: { m: ThreadMessage }) {
+  const text = (m.bodyText || "").trim();
+  if (text) {
+    return (
+      <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed m-0">
+        {text}
+      </pre>
+    );
+  }
+  if (m.bodyHtml) {
+    return (
+      <iframe
+        title="Email body"
+        sandbox="allow-same-origin"
+        srcDoc={htmlSrcDoc(m.bodyHtml)}
+        className="w-full h-[320px] rounded border bg-white"
+      />
+    );
+  }
+  return <p className="text-sm text-muted-foreground">(no body content)</p>;
+}
+
 export default function AdminInboxPage() {
   const [rows, setRows] = useState<InboxRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [category, setCategory] = useState<"mailbox" | "trash">("mailbox");
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<InboxDetail | null>(null);
+
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [thread, setThread] = useState<Thread | null>(null);
+  const [threadLoading, setThreadLoading] = useState(false);
+
   const [acting, setActing] = useState(false);
   const [replyText, setReplyText] = useState("");
   const [sending, setSending] = useState(false);
   const [replyError, setReplyError] = useState<string | null>(null);
-  const [replySent, setReplySent] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -79,104 +137,114 @@ export default function AdminInboxPage() {
     }
   }, [category]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
-  const openDetail = useCallback(async (id: string) => {
-    setOpenId(id);
-    setDetail(null);
-    setReplyText("");
-    setReplyError(null);
-    setReplySent(false);
-    try {
-      const res = await fetch(`/api/admin/inbox/${id}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to load");
-      setDetail(data);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load");
-      setOpenId(null);
-    }
+  const fetchThread = useCallback(async (id: string) => {
+    const res = await fetch(`/api/admin/inbox/${id}/thread`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to load thread");
+    return data as Thread;
   }, []);
 
-  const closeDetail = () => {
-    setOpenId(null);
-    setDetail(null);
+  const openThread = useCallback(
+    async (id: string) => {
+      setSelectedId(id);
+      setThread(null);
+      setThreadLoading(true);
+      setReplyText("");
+      setReplyError(null);
+      try {
+        setThread(await fetchThread(id));
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "Failed to load thread");
+        setSelectedId(null);
+      } finally {
+        setThreadLoading(false);
+      }
+    },
+    [fetchThread],
+  );
+
+  const closeThread = () => {
+    setSelectedId(null);
+    setThread(null);
     setReplyText("");
     setReplyError(null);
-    setReplySent(false);
   };
 
-  const sendReply = useCallback(async (id: string) => {
+  const sendReply = useCallback(async () => {
+    if (!selectedId) return;
     const body = replyText.trim();
     if (!body) return;
     setSending(true);
     setReplyError(null);
     try {
-      const res = await fetch(`/api/admin/inbox/${id}/reply`, {
+      const res = await fetch(`/api/admin/inbox/${selectedId}/reply`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ body }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Failed to send reply");
-      setReplySent(true);
       setReplyText("");
-      // Reflect the now-triaged state in the list without closing the panel.
+      setThread(await fetchThread(selectedId));
       load();
     } catch (e) {
       setReplyError(e instanceof Error ? e.message : "Failed to send reply");
     } finally {
       setSending(false);
     }
-  }, [replyText, load]);
+  }, [selectedId, replyText, fetchThread, load]);
 
-  const markTriaged = useCallback(async (id: string) => {
+  const markTriaged = useCallback(async () => {
+    if (!selectedId) return;
     setActing(true);
     try {
-      await fetch(`/api/admin/inbox/${id}`, {
+      await fetch(`/api/admin/inbox/${selectedId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "triage" }),
       });
-      closeDetail();
+      setThread((t) => (t ? { ...t, triagedAt: new Date().toISOString() } : t));
       load();
-    } finally { setActing(false); }
-  }, [load]);
+    } finally {
+      setActing(false);
+    }
+  }, [selectedId, load]);
 
-  const promote = useCallback(async (id: string) => {
+  const promote = useCallback(async () => {
+    if (!selectedId) return;
     setActing(true);
     try {
-      await fetch(`/api/admin/inbox/${id}`, {
+      await fetch(`/api/admin/inbox/${selectedId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "promote-to-mailbox" }),
       });
-      closeDetail();
+      closeThread();
       load();
-    } finally { setActing(false); }
-  }, [load]);
+    } finally {
+      setActing(false);
+    }
+  }, [selectedId, load]);
 
-  const remove = useCallback(async (id: string) => {
+  const remove = useCallback(async () => {
+    if (!selectedId) return;
     if (!confirm("Delete this email permanently?")) return;
     setActing(true);
     try {
-      await fetch(`/api/admin/inbox/${id}`, { method: "DELETE" });
-      closeDetail();
+      await fetch(`/api/admin/inbox/${selectedId}`, { method: "DELETE" });
+      closeThread();
       load();
-    } finally { setActing(false); }
-  }, [load]);
-
-  const srcDoc = useMemo(() => {
-    if (!detail?.bodyHtml) return null;
-    // Wrap the untrusted HTML in a minimal document. The iframe's `sandbox`
-    // attribute strips scripts + forms + top-nav; `allow-same-origin` lets
-    // srcDoc resolve relative URLs to about:blank (harmless). No CSP meta
-    // needed because sandbox already blocks script execution.
-    return `<!doctype html><html><head><meta charset="utf-8"></head><body style="font:13px -apple-system,sans-serif;margin:12px">${detail.bodyHtml}</body></html>`;
-  }, [detail]);
+    } finally {
+      setActing(false);
+    }
+  }, [selectedId, load]);
 
   return (
-    <div className="max-w-6xl space-y-6">
+    <div className="max-w-7xl space-y-4">
       <div className="flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Admin Inbox</h1>
@@ -196,164 +264,164 @@ export default function AdminInboxPage() {
         </Card>
       )}
 
-      <Tabs value={category} onValueChange={(v) => setCategory(v as "mailbox" | "trash")}>
-        <TabsList>
-          <TabsTrigger value="mailbox"><Inbox className="h-4 w-4 mr-1.5" />Mailbox</TabsTrigger>
-          <TabsTrigger value="trash"><Trash2 className="h-4 w-4 mr-1.5" />Trash</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value={category} className="mt-4">
-          <Card>
-            <CardContent className="p-0">
-              {loading && !rows && <p className="p-6 text-sm text-muted-foreground text-center">Loading…</p>}
-              {rows && rows.length === 0 && (
-                <p className="p-8 text-sm text-muted-foreground text-center">No {category} messages.</p>
-              )}
-              {rows && rows.length > 0 && (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>From → To</TableHead>
-                      <TableHead>Subject</TableHead>
-                      <TableHead className="w-20">Atts</TableHead>
-                      <TableHead>Received</TableHead>
-                      {category === "trash" && <TableHead>Expires</TableHead>}
-                      <TableHead className="w-24">Status</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {rows.map((r) => (
-                      <TableRow key={r.id} className="cursor-pointer" onClick={() => openDetail(r.id)}>
-                        <TableCell className="text-xs">
-                          <div className="font-mono">{r.fromAddress}</div>
-                          <div className="text-muted-foreground">→ {r.toAddress}</div>
-                        </TableCell>
-                        <TableCell className="text-xs max-w-[280px] truncate">{r.subject || <span className="text-muted-foreground">(no subject)</span>}</TableCell>
-                        <TableCell className="text-xs text-center font-mono">{r.attachmentCount || ""}</TableCell>
-                        <TableCell className="text-xs">{new Date(r.receivedAt).toLocaleString()}</TableCell>
-                        {category === "trash" && (
-                          <TableCell className="text-xs">
-                            {r.expiresAt ? `${hoursUntil(r.expiresAt)}h` : "—"}
-                          </TableCell>
-                        )}
-                        <TableCell>
-                          {r.triagedAt ? (
-                            <Badge variant="outline" className="text-[10px]"><CheckCircle2 className="h-3 w-3 mr-1" />triaged</Badge>
-                          ) : (
-                            <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 text-[10px]">new</Badge>
+      <div className="grid gap-4 lg:grid-cols-[340px_minmax(0,1fr)] items-start">
+        {/* ─── Left: list ─── */}
+        <Card className="overflow-hidden">
+          <Tabs value={category} onValueChange={(v) => setCategory(v as "mailbox" | "trash")}>
+            <div className="border-b px-3 pt-3">
+              <TabsList>
+                <TabsTrigger value="mailbox"><Inbox className="h-4 w-4 mr-1.5" />Mailbox</TabsTrigger>
+                <TabsTrigger value="trash"><Trash2 className="h-4 w-4 mr-1.5" />Trash</TabsTrigger>
+              </TabsList>
+            </div>
+          </Tabs>
+          <div className="max-h-[calc(100vh-16rem)] overflow-y-auto">
+            {loading && !rows && (
+              <p className="p-6 text-sm text-muted-foreground text-center">Loading…</p>
+            )}
+            {rows && rows.length === 0 && (
+              <p className="p-8 text-sm text-muted-foreground text-center">No {category} messages.</p>
+            )}
+            {rows && rows.length > 0 && (
+              <ul className="divide-y">
+                {rows.map((r) => {
+                  const active = r.id === selectedId;
+                  return (
+                    <li key={r.id}>
+                      <button
+                        type="button"
+                        onClick={() => openThread(r.id)}
+                        className={`w-full text-left px-3 py-2.5 transition-colors hover:bg-muted/50 ${active ? "bg-muted" : ""}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className={`text-xs font-mono truncate ${r.triagedAt ? "text-muted-foreground" : "font-semibold"}`}>
+                            {r.fromAddress}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground whitespace-nowrap">{fmtTime(r.receivedAt)}</span>
+                        </div>
+                        <div className="text-xs mt-0.5 truncate">
+                          {r.subject || <span className="text-muted-foreground">(no subject)</span>}
+                        </div>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className="text-[10px] text-muted-foreground truncate">→ {r.toAddress}</span>
+                          {!r.triagedAt && (
+                            <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200 text-[9px] px-1 py-0">new</Badge>
                           )}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+                          {r.attachmentCount > 0 && (
+                            <span className="text-[10px] text-muted-foreground">📎 {r.attachmentCount}</span>
+                          )}
+                          {category === "trash" && r.expiresAt && (
+                            <span className="text-[10px] text-muted-foreground ml-auto">{hoursUntil(r.expiresAt)}h left</span>
+                          )}
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </Card>
 
-      {/* Detail panel — bottom sheet style. Kept inline (no Dialog) so the
-          sandboxed iframe for body HTML can take full width and doesn't have
-          to fight a modal's focus trap. */}
-      {openId && (
-        <Card className="mt-4">
-          <CardContent className="py-4 space-y-3">
-            {!detail && <p className="text-sm text-muted-foreground">Loading…</p>}
-            {detail && (
-              <>
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate">{detail.subject || "(no subject)"}</p>
-                    <p className="text-xs text-muted-foreground font-mono truncate">
-                      {detail.fromAddress} → {detail.toAddress}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      received {new Date(detail.receivedAt).toLocaleString()}
-                      {detail.attachmentCount > 0 && ` · ${detail.attachmentCount} attachment${detail.attachmentCount === 1 ? "" : "s"}`}
-                    </p>
+        {/* ─── Right: conversation ─── */}
+        <Card className="min-h-[calc(100vh-16rem)]">
+          <CardContent className="p-0 h-full">
+            {!selectedId && (
+              <div className="flex flex-col items-center justify-center text-center h-full min-h-[300px] p-8 text-muted-foreground">
+                <Mail className="h-8 w-8 mb-2 opacity-40" />
+                <p className="text-sm">Select a message to read and reply.</p>
+              </div>
+            )}
+
+            {selectedId && threadLoading && !thread && (
+              <p className="p-6 text-sm text-muted-foreground">Loading conversation…</p>
+            )}
+
+            {selectedId && thread && (
+              <div className="flex flex-col h-full">
+                {/* Header */}
+                <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">{thread.subject || "(no subject)"}</p>
+                    <p className="text-xs text-muted-foreground font-mono truncate">{thread.counterparty}</p>
                   </div>
-                  <Button variant="ghost" size="sm" onClick={closeDetail}>Close</Button>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {!thread.triagedAt && (
+                      <Button variant="outline" size="sm" onClick={markTriaged} disabled={acting}>
+                        <CheckCircle2 className="h-4 w-4 mr-1.5" />Triage
+                      </Button>
+                    )}
+                    {thread.category === "trash" && (
+                      <Button variant="outline" size="sm" onClick={promote} disabled={acting}>
+                        <ArrowUpFromLine className="h-4 w-4 mr-1.5" />Keep
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={remove}
+                      disabled={acting}
+                      className="text-rose-700 hover:text-rose-800 hover:bg-rose-50"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={closeThread}>
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
                 </div>
 
-                <div className="border rounded-lg overflow-hidden bg-background">
-                  {srcDoc ? (
-                    <iframe
-                      title="Email body"
-                      sandbox="allow-same-origin"
-                      srcDoc={srcDoc}
-                      className="w-full h-[400px] bg-white"
-                    />
-                  ) : detail.bodyText ? (
-                    <pre className="p-3 text-xs whitespace-pre-wrap max-h-[400px] overflow-auto font-mono">{detail.bodyText}</pre>
-                  ) : (
-                    <p className="p-6 text-sm text-muted-foreground text-center">(no body content)</p>
-                  )}
+                {/* Conversation */}
+                <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 max-h-[calc(100vh-28rem)]">
+                  {thread.messages.map((m) => (
+                    <div
+                      key={m.id}
+                      className={`rounded-lg border p-3 ${m.kind === "outbound" ? "bg-indigo-50/60 border-indigo-100 ml-6" : "bg-muted/40 mr-6"}`}
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <span className="text-xs font-mono truncate">
+                          {m.kind === "outbound" ? (
+                            <><span className="font-semibold text-indigo-700">You</span> · {m.fromAddress}</>
+                          ) : (
+                            m.fromAddress
+                          )}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground whitespace-nowrap">{fmtTime(m.at)}</span>
+                      </div>
+                      <MessageBody m={m} />
+                    </div>
+                  ))}
                 </div>
 
-                {detail.category === "mailbox" && (
-                  <div className="space-y-2 pt-1">
+                {/* Reply box */}
+                {thread.category === "mailbox" && (
+                  <div className="border-t px-4 py-3 space-y-2">
                     <label className="text-xs font-medium text-muted-foreground">
-                      Reply to <span className="font-mono">{detail.fromAddress}</span>
-                      <span className="text-muted-foreground/70"> · sends from {detail.toAddress}</span>
+                      Reply to <span className="font-mono">{thread.counterparty}</span>
                     </label>
                     <textarea
                       value={replyText}
-                      onChange={(e) => {
-                        setReplyText(e.target.value);
-                        if (replySent) setReplySent(false);
-                      }}
-                      rows={5}
+                      onChange={(e) => setReplyText(e.target.value)}
+                      rows={4}
                       maxLength={50000}
-                      placeholder={`Write your reply…`}
+                      placeholder="Write your reply…"
                       disabled={sending}
                       className="w-full resize-y rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:opacity-60"
                     />
                     {replyError && <p className="text-xs text-rose-700">{replyError}</p>}
-                    {replySent && (
-                      <p className="text-xs text-emerald-700 flex items-center gap-1">
-                        <CheckCircle2 className="h-3.5 w-3.5" /> Reply sent.
-                      </p>
-                    )}
-                    <div className="flex items-center gap-2">
-                      <Button
-                        size="sm"
-                        onClick={() => sendReply(detail.id)}
-                        disabled={sending || !replyText.trim()}
-                      >
+                    <div className="flex justify-end">
+                      <Button size="sm" onClick={sendReply} disabled={sending || !replyText.trim()}>
                         <Send className={`h-4 w-4 mr-1.5 ${sending ? "animate-pulse" : ""}`} />
                         {sending ? "Sending…" : "Send reply"}
                       </Button>
                     </div>
                   </div>
                 )}
-
-                <div className="flex items-center gap-2 pt-1">
-                  {!detail.triagedAt && (
-                    <Button variant="outline" size="sm" onClick={() => markTriaged(detail.id)} disabled={acting}>
-                      <CheckCircle2 className="h-4 w-4 mr-1.5" />Mark triaged
-                    </Button>
-                  )}
-                  {detail.category === "trash" && (
-                    <Button variant="outline" size="sm" onClick={() => promote(detail.id)} disabled={acting}>
-                      <ArrowUpFromLine className="h-4 w-4 mr-1.5" />Promote to mailbox
-                    </Button>
-                  )}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => remove(detail.id)}
-                    disabled={acting}
-                    className="text-rose-700 hover:text-rose-800 hover:bg-rose-50 ml-auto"
-                  >
-                    <Trash2 className="h-4 w-4 mr-1.5" />Delete
-                  </Button>
-                </div>
-              </>
+              </div>
             )}
           </CardContent>
         </Card>
-      )}
+      </div>
     </div>
   );
 }

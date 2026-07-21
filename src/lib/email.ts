@@ -432,6 +432,25 @@ export function feedbackReplyNotificationEmail(opts: {
  * quoted original are user-derived → escaped. The caller sets `from` (the
  * verified mailbox address, e.g. "Finlynq <info@finlynq.com>") + `replyTo`.
  */
+/** "Sat, Jul 11, 2026 at 9:13 AM UTC" — clean, unambiguous reply attribution date. */
+function formatReplyDate(iso?: string | null): string {
+  if (!iso) return "an earlier date";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "an earlier date";
+  const date = d.toLocaleDateString("en-US", {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+  const time = d.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  });
+  return `${date} at ${time}`;
+}
+
 export function contactReplyEmail(opts: {
   to: string;
   from: string;
@@ -449,19 +468,18 @@ export function contactReplyEmail(opts: {
   let quotedHtml = "";
   let quotedText = "";
   if (opts.original) {
-    const when = opts.original.receivedAt
-      ? new Date(opts.original.receivedAt).toLocaleString()
-      : "earlier";
-    const safeWhen = escapeHtml(when);
-    const safeFrom = escapeHtml(opts.original.fromAddress);
+    const when = formatReplyDate(opts.original.receivedAt);
+    const safeAttr = `On ${escapeHtml(when)}, ${escapeHtml(opts.original.fromAddress)} wrote:`;
     const origBody = (opts.original.bodyText || "").trim();
     const safeOrigBody = escapeHtml(origBody).replace(/\n/g, "<br>");
-    quotedHtml = `
-      <div style="margin-top:24px;padding-left:12px;border-left:3px solid #e4e4e7;color:#71717a;font-size:13px;line-height:1.6">
-        <p style="margin:0 0 8px">On ${safeWhen}, ${safeFrom} wrote:</p>
-        ${safeOrigBody ? `<div style="white-space:pre-wrap">${safeOrigBody}</div>` : "<em>(no message body)</em>"}
-      </div>`;
-    quotedText = `\n\n---\nOn ${when}, ${opts.original.fromAddress} wrote:\n${
+    // Mimic Gmail's own reply markup (gmail_quote + gmail_attr + blockquote) so
+    // mail clients COLLAPSE the quoted original behind the "…" toggle instead of
+    // rendering it inline as a nested mess.
+    quotedHtml = `<br><div class="gmail_quote">` +
+      `<div dir="ltr" class="gmail_attr" style="color:#5f6368;font-size:13px">${safeAttr}<br></div>` +
+      `<blockquote class="gmail_quote" style="margin:0 0 0 .8ex;border-left:1px solid #ccc;padding-left:1ex;color:#5f6368">` +
+      `${safeOrigBody || "<em>(no message body)</em>"}</blockquote></div>`;
+    quotedText = `\n\nOn ${when}, ${opts.original.fromAddress} wrote:\n${
       origBody
         ? origBody
             .split("\n")
@@ -471,16 +489,10 @@ export function contactReplyEmail(opts: {
     }`;
   }
 
-  const html = `<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
-<body style="margin:0;padding:24px;background:#ffffff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#18181b;font-size:14px;line-height:1.6">
-  <div style="max-width:600px;margin:0 auto">
-    <div style="white-space:pre-wrap">${safeReply}</div>
-    ${quotedHtml}
-  </div>
-</body>
-</html>`;
+  // A plain HTML fragment (how Gmail composes replies) — no marketing chrome.
+  const html =
+    `<div dir="ltr" style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#202124">${safeReply}</div>` +
+    quotedHtml;
 
   return {
     to: opts.to,

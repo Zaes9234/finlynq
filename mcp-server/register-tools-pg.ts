@@ -41,7 +41,7 @@ export function registerPgTools(
   server: McpServer,
   db: DbLike,
   userId: string,
-  dek: Buffer | null = null
+  dek: Buffer | null = null,
 ) {
   // Phase 2 (2026-06-01) — free-text note/notes columns are user-DEK encrypted
   // at rest. DEK is in scope for every HTTP tool (same as the transaction-note

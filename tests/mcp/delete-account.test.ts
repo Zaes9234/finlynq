@@ -93,7 +93,10 @@ function makeFixtureDb(matcher: RowsetFn): {
 }
 
 /**
- * Pull `delete_account`'s handler off a freshly-registered server.
+ * Pull the delete handler off a freshly-registered server. The v4.0
+ * `delete_account` alias was removed in the v4.1 clean break; the op lives on
+ * `manage_accounts(op:"delete")` now, so we grab that union tool and wrap its
+ * handler to inject the `op` discriminator — every test's args stay identical.
  */
 function getDeleteAccountTool(
   db: { execute: (q: unknown) => Promise<unknown> },
@@ -106,9 +109,12 @@ function getDeleteAccountTool(
     string,
     { handler: (args: unknown, extra: unknown) => Promise<unknown> }
   >;
-  const tool = tools["delete_account"];
-  if (!tool) throw new Error("delete_account tool not registered");
-  return tool;
+  const tool = tools["manage_accounts"];
+  if (!tool) throw new Error("manage_accounts tool not registered");
+  return {
+    handler: (args: unknown, extra: unknown) =>
+      tool.handler({ op: "delete", ...(args as Record<string, unknown>) }, extra),
+  };
 }
 
 /**

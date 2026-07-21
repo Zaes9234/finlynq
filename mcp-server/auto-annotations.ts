@@ -95,6 +95,15 @@ export const TOOL_ANNOTATION_OVERRIDES: Record<string, ToolAnnotations> = {
   manage_splits: { destructiveHint: true },
   manage_transactions: { destructiveHint: true },
   manage_transfers: { destructiveHint: true },
+  // reconcile-consolidation — the 3 folded import/reconcile union tools. Their
+  // NAMES escape the `delete_`/`reject_` inference, so the destructive ones need
+  // an explicit tool-level hint: `manage_statement_import` carries `op:reject`
+  // (data-discarding) and `manage_bank_ledger` carries `op:delete_row`.
+  // `reconcile` writes but never hard-deletes (accept is idempotent per-pair but
+  // the tool isn't uniformly so) — pinned explicitly to match the plan.
+  reconcile: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+  manage_statement_import: { readOnlyHint: false, destructiveHint: true },
+  manage_bank_ledger: { readOnlyHint: false, destructiveHint: true },
 };
 
 export function inferAnnotations(name: string): ToolAnnotations {

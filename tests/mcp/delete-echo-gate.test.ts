@@ -50,14 +50,27 @@ function makeFixtureDb(matcher: (sqlText: string) => Record<string, unknown>[] |
   return { db, queries };
 }
 
+// v4.1 clean break: the per-verb delete aliases were removed; each op now lives
+// on a consolidated discriminated-union tool. Map the old alias name → the
+// union tool + the `op` discriminator to inject so each test's args stay identical.
+const ALIAS_TO_CONSOLIDATED: Record<string, { tool: string; op: string }> = {
+  delete_transaction: { tool: "manage_transactions", op: "delete" },
+  delete_split: { tool: "manage_splits", op: "delete" },
+};
+
 function getTool(name: string, db: { execute: (q: unknown) => Promise<unknown> }, dek: Buffer | null) {
   const server = new McpServer({ name: "delete-echo-test", version: "0.0.0" });
   registerPgTools(server, db, "test-user", dek);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tools = (server as any)._registeredTools as Record<string, { handler: (a: unknown, e: unknown) => Promise<unknown> }>;
-  const tool = tools[name];
-  if (!tool) throw new Error(`${name} not registered`);
-  return tool;
+  const map = ALIAS_TO_CONSOLIDATED[name];
+  if (!map) throw new Error(`no consolidated mapping for ${name}`);
+  const tool = tools[map.tool];
+  if (!tool) throw new Error(`${map.tool} not registered`);
+  return {
+    handler: (args: unknown, extra: unknown) =>
+      tool.handler({ op: map.op, ...(args as Record<string, unknown>) }, extra),
+  };
 }
 
 function envelopeText(result: unknown): string {

@@ -73,6 +73,8 @@ When an MCP tool is superseded, we retire it in three steps so agents and connec
 2. **Handle for one minor version** — a call to the hidden tool still returns a valid result plus a `deprecation` warning field pointing at the replacement, for exactly one minor version.
 3. **Remove** — after that grace window the tool is deleted; calls then return a hard error.
 
+**Exception — the v4.1 reconcile-consolidation clean break (2026-07):** the 24 statement-import + bank-reconcile tools skipped the hidden-then-warned window and were removed in one step. They were **scope-gated** behind the (now-retired) `import-pipeline` toolset / `mcp:import` scope — i.e. already invisible to every default session — so no agent discovering tools via `tools/list` could reach them anyway (that unreachability was the bug, [finlynq/finlynq#306](https://github.com/finlynq/finlynq/issues/306)). The same release also removed all v4.0 hidden `registerAlias` names, which had been hidden since 2026-07-05 and so had already served their one-minor grace window.
+
 Prefer clear, replacement-free names over versioned suffixes (no `_v2`). When two tools overlap, add a one-sentence "intended split" note to each description rather than leaving them ambiguous. Any change to the registered tool set must update `src/lib/mcp/tool-counts.ts` (`MCP_TOOL_COUNTS`) in lockstep — `npm run build` fails on a tool-count drift.
 
 ## Code Conventions

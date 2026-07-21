@@ -61,10 +61,13 @@ type Entry = {
   placement: Placement;
   /** For "rows": pull the row array out of the data envelope. */
   rows?: (data: unknown) => unknown[];
-  /** For "top": pull the basis-bearing object out of `data` when it's nested
-   * (e.g. get_investment_insights patterns nests it under `data.summary`).
-   * Defaults to `data` itself. */
-  pick?: (data: unknown) => unknown;
+  /** For "top": pull the basis-bearing object out of the RESPONSE ENVELOPE when
+   * it isn't `data` itself — either nested inside data, or a SIBLING of data at
+   * the envelope level. `manage_subscriptions(op:list, include_summary:true)`
+   * returns `{ success, data:[rows], summary:{…, basis} }`, so its basis lives at
+   * `payload.summary` (a sibling of `data`, not inside it). Receives the whole
+   * parsed envelope; defaults to `data`. */
+  pick?: (payload: Record<string, unknown>) => unknown;
   args?: (w: SeededWorld) => Record<string, unknown>;
 };
 
@@ -88,9 +91,12 @@ const MONEY_BEARING: Record<string, Entry> = {
       return Array.isArray(accts) ? accts : [];
     },
   },
-  get_goals: {
+  // get_goals folded into manage_goals(op:list) in the v4.1 clean break; the
+  // per-goal basis emission stays in goals.ts on the same handler.
+  manage_goals: {
     axis: "position",
     placement: "rows",
+    args: () => ({ op: "list" }),
     rows: (d) => (Array.isArray(d) ? d : []),
   },
   get_financial_health_score: { axis: "position", placement: "top" },
@@ -132,7 +138,15 @@ const MONEY_BEARING: Record<string, Entry> = {
     placement: "top",
     args: () => ({ month: new Date().toISOString().slice(0, 7) }),
   },
-  get_subscription_summary: { axis: "flow", placement: "top" },
+  // get_subscription_summary folded into manage_subscriptions(op:list,
+  // include_summary:true) in the v4.1 clean break.
+  manage_subscriptions: {
+    axis: "flow",
+    placement: "top",
+    args: () => ({ op: "list", include_summary: true }),
+    // basis rides on the envelope-level `summary` (sibling of data), not data.
+    pick: (p) => p.summary,
+  },
 };
 
 function legalBasisFor(axis: "position" | "flow"): Set<string> {
@@ -195,8 +209,8 @@ describe("FINLYNQ-268 tc-1 — money-bearing tools emit a basis literal (source 
     // contain a `basis:` or `basis,` emission (the phase 1–4 edits). This
     // catches an accidental removal of the label.
     const moduleFor: Record<string, string> = {
-      get_goals: "goals.ts",
-      get_subscription_summary: "subscriptions.ts",
+      manage_goals: "goals.ts",
+      manage_subscriptions: "subscriptions.ts",
       get_realized_gains: "portfolio.ts",
       get_dividend_income: "portfolio.ts",
       get_portfolio_analysis: "portfolio.ts",
@@ -243,7 +257,7 @@ describeDb("FINLYNQ-268 tc-1 — basis on every money-bearing response (seeded D
       const data = payload.data;
 
       if (entry.placement === "top") {
-        assertBasisObject(entry.pick ? entry.pick(data) : data, entry, name);
+        assertBasisObject(entry.pick ? entry.pick(payload) : data, entry, name);
       } else {
         const rows = entry.rows!(data);
         // Per-row placement: EVERY row must carry a legal basis. An empty row

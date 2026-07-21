@@ -33,7 +33,7 @@ import {
 import {
   invalidateUser as invalidateUserTxCache,
 } from "../../src/lib/mcp/user-tx-cache";
-import { registerManageTool, registerAlias } from "./_consolidate";
+import { registerManageTool } from "./_consolidate";
 
 type ToolResult = { content: Array<{ type: "text"; text: string }> };
 
@@ -628,7 +628,7 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
       return text({ success: true, data: { reordered: ordered_ids.length, order: ordered_ids } });
   }
 
-  // ── consolidated tool: manage_rules + hidden back-compat aliases ───────────
+  // ── consolidated tool: manage_rules ───────────
   registerManageTool(
     server,
     "manage_rules",
@@ -685,64 +685,6 @@ export function registerRulesTools(server: McpServer, ctx: PgToolContext) {
     },
   );
 
-  registerAlias(
-    server,
-    "create_rule",
-    "Create an auto-categorization rule for future imports. Legacy shorthand (match_payee + assign_category) is synthesized into a v2 rule (FINLYNQ-84).",
-    {
-      match_payee: z.string().describe("Payee pattern to match (substring, case-insensitive; legacy `%` wildcards are stripped)"),
-      assign_category: z.string().optional().describe("Category name to assign (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous). Pass this OR `category_id`."),
-      category_id: z.number().int().positive().optional().describe("Category FK fast-path — wins over the fuzzy `assign_category` name."),
-      rename_to: z.string().optional().describe("Optionally rename matched payee to this"),
-      assign_tags: z.string().optional().describe("Tags to assign (comma-separated)"),
-      priority: z.number().optional().describe("Rule priority (higher = checked first, default 0)"),
-    },
-    async (args) => opCreate(args),
-  );
-  registerAlias(
-    server,
-    "list_rules",
-    "List all auto-categorization rules. Returns JSONB conditions + actions (FINLYNQ-84 v2 shape) plus decrypted FK names for human-readable rendering.",
-    {},
-    async () => opList(),
-  );
-  registerAlias(
-    server,
-    "update_rule",
-    "Update an existing transaction rule. Accepts legacy shorthand (match_payee + assign_category) OR the v2 shape (conditions + actions, FINLYNQ-84).",
-    {
-      id: z.number().describe("Rule id"),
-      name: z.string().optional(),
-      match_payee: z.string().optional().describe("Legacy alias: sets a single payee/contains condition + set_category action"),
-      assign_category: z.string().optional().describe("Legacy: category name (fuzzy matched)"),
-      assign_tags: z.string().optional().describe("Legacy: tags assigned by the rule"),
-      rename_to: z.string().optional().describe("Legacy: payee rename target"),
-      conditions: z.unknown().optional().describe("v2: full ConditionGroup JSON. Replaces conditions entirely."),
-      actions: z.unknown().optional().describe("v2: full Action[] JSON. Replaces actions entirely."),
-      is_active: z.boolean().optional(),
-      priority: z.number().optional(),
-    },
-    async (args) => opUpdate(args),
-  );
-  registerAlias(
-    server,
-    "delete_rule",
-    "Delete a transaction rule by id or name (FINLYNQ-273 — `name` resolves via the shared envelope; `id` fast-path wins).",
-    {
-      id: z.number().int().positive().optional().describe("Rule FK fast-path — wins over `name`. Pass this OR `name`."),
-      name: z.string().optional().describe("Rule name (fuzzy matched — mistyped/unmatched is REFUSED; 2+ → ambiguous)."),
-    },
-    async (args) => opDelete(args),
-  );
-  registerAlias(
-    server,
-    "reorder_rules",
-    "Reorder rules by assigning new priorities. The first id in `ordered_ids` gets the highest priority.",
-    {
-      ordered_ids: z.array(z.number()).min(1).describe("Rule ids in desired execution order (first = highest priority)"),
-    },
-    async (args) => opReorder(args),
-  );
 
 
   // ── suggest_transaction_details ───────────────────────────────────────────
