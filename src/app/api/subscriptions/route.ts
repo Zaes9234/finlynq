@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, inArray } from "drizzle-orm";
 import { detectRecurringTransactions } from "@/lib/recurring-detector";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { requireDevMode } from "@/lib/require-dev-mode";
+import { CASH_GROUP_NAMES } from "@/lib/accounts/groups";
 import { z } from "zod";
 import { validateBody, safeErrorMessage, logApiError } from "@/lib/validate";
 import { buildNameFields, decryptNamedRows, decryptTxRows, encryptOptional, decryptOptional } from "@/lib/crypto/encrypted-columns";
@@ -86,7 +87,20 @@ export async function POST(request: NextRequest) {
       cutoff.setFullYear(cutoff.getFullYear() - 1);
       const cutoffStr = cutoff.toISOString().split("T")[0];
 
-      const rawTxns = await db
+      // GH #307 — scope detection to cash-group accounts only, matching the fix
+      // applied to /api/recurring and /api/forecast. Without this, an excluded
+      // account's recurring item pollutes the suggestion list.
+      const cashAccounts = await db
+        .select({ id: schema.accounts.id })
+        .from(schema.accounts)
+        .where(and(
+          eq(schema.accounts.userId, userId),
+          inArray(schema.accounts.group, [...CASH_GROUP_NAMES])
+        ))
+        .all();
+      const detectAccountIds = cashAccounts.map((a) => a.id);
+
+      const rawTxns = detectAccountIds.length > 0 ? await db
         .select({
           id: schema.transactions.id,
           date: schema.transactions.date,
@@ -98,9 +112,10 @@ export async function POST(request: NextRequest) {
         .from(schema.transactions)
         .where(and(
           eq(schema.transactions.userId, userId),
+          inArray(schema.transactions.accountId, detectAccountIds),
           sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`
         ))
-        .all();
+        .all() : [];
       // Payee is encrypted at rest — decrypt before running the recurring
       // detector (which needs plaintext to group by payee).
       const txns = decryptTxRows(auth.context.dek, rawTxns);

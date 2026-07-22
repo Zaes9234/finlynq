@@ -18,11 +18,16 @@ vi.mock("@/db", () => ({
   }),
   schema: {
     transactions: { id: "id", date: "date", payee: "payee", amount: "amount", accountId: "accountId", categoryId: "categoryId", userId: "userId" },
+    accounts: { id: "id", group: "group", userId: "userId" },
   },
 }));
 
 vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" } })),
+}));
+
+vi.mock("@/lib/require-dev-mode", () => ({
+  requireDevMode: vi.fn(async () => null),
 }));
 
 vi.mock("@/lib/recurring-detector", () => ({
@@ -33,7 +38,7 @@ vi.mock("@/lib/recurring-detector", () => ({
   forecastCashFlow: vi.fn(() => []),
 }));
 
-vi.mock("drizzle-orm", () => ({ sql: vi.fn(), and: vi.fn(), eq: vi.fn() }));
+vi.mock("drizzle-orm", () => ({ sql: vi.fn(), and: vi.fn(), eq: vi.fn(), inArray: vi.fn() }));
 
 import { GET } from "@/app/api/recurring/route";
 import { createMockRequest, parseResponse } from "../helpers/api-test-utils";
@@ -42,7 +47,10 @@ describe("API /api/recurring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     for (const m of chainMethods) mockDbChain[m]!.mockReturnValue(mockDbChain);
-    mockDbChain.all!.mockReturnValue([]);
+    // First .all() returns one cash account (so the route doesn't short-circuit on
+    // zero accounts); subsequent calls return empty (transactions — detectRecurringTransactions
+    // is fully mocked and supplies its own fixture data).
+    mockDbChain.all!.mockReturnValueOnce([{ id: 1 }]).mockReturnValue([]);
   });
 
   it("returns recurring transactions", async () => {

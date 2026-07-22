@@ -21,13 +21,17 @@ vi.mock("@/db", () => ({
   schema: {
     subscriptions: { id: "id", name: "name", amount: "amount", currency: "currency", frequency: "frequency", categoryId: "categoryId", accountId: "accountId", nextDate: "nextDate", status: "status", cancelReminderDate: "cancelReminderDate", notes: "notes" },
     categories: { id: "id", name: "name" },
-    accounts: { id: "id", name: "name" },
+    accounts: { id: "id", name: "name", group: "group", userId: "userId" },
     transactions: { id: "id", date: "date", payee: "payee", amount: "amount", accountId: "accountId", categoryId: "categoryId" },
   },
 }));
 
 vi.mock("@/lib/auth/require-auth", () => ({
   requireAuth: vi.fn(async () => ({ authenticated: true, context: { userId: "default", method: "passphrase" as const, mfaVerified: false, dek: Buffer.alloc(32, 0xaa), sessionId: "test-session-jti" } })),
+}));
+
+vi.mock("@/lib/require-dev-mode", () => ({
+  requireDevMode: vi.fn(async () => null),
 }));
 
 vi.mock("@/lib/recurring-detector", () => ({
@@ -38,6 +42,29 @@ vi.mock("@/lib/recurring-detector", () => ({
 
 vi.mock("drizzle-orm", () => ({
   eq: vi.fn(), sql: vi.fn(), and: vi.fn(), desc: vi.fn(), asc: vi.fn(), inArray: vi.fn(),
+}));
+
+// Stream D: mock encrypted-column helpers so tests work with plain-string fixture
+// data rather than real ciphertext. decryptNamedRows falls back to the plain key
+// when the ct key is absent (covers legacy fixture rows that use `name` not `nameCt`).
+vi.mock("@/lib/crypto/encrypted-columns", () => ({
+  decryptNamedRows: vi.fn((rows: Record<string, unknown>[], _dek: unknown, mapping: Record<string, string>) =>
+    rows.map((r) => {
+      const out = { ...r };
+      for (const [ctKey, plainKey] of Object.entries(mapping)) {
+        out[plainKey] = r[ctKey] ?? r[plainKey] ?? null;
+      }
+      return out;
+    })
+  ),
+  decryptTxRows: vi.fn((_dek: unknown, rows: unknown[]) => rows),
+  decryptOptional: vi.fn((_dek: unknown, value: unknown) => value ?? null),
+  encryptOptional: vi.fn((_dek: unknown, value: unknown) => value ?? null),
+  buildNameFields: vi.fn((_dek: unknown, fields: Record<string, string | null | undefined>) => {
+    const out: Record<string, string | null | undefined> = {};
+    for (const [key, val] of Object.entries(fields)) { out[`${key}Ct`] = val; }
+    return out;
+  }),
 }));
 
 // B4 — bypass verifyOwnership; cross-tenant rejection in authz-ownership.test.ts.
@@ -69,7 +96,9 @@ describe("API /api/subscriptions", () => {
       const res = await GET(req);
       const { status, data } = await parseResponse(res);
       expect(status).toBe(200);
-      expect(data).toEqual(subs);
+      // Response includes decryption-added fields (categoryName, accountName, notes);
+      // assert on the fields the fixture provides rather than exact shape equality.
+      expect(data).toEqual([expect.objectContaining({ id: 1, name: "Netflix", amount: 15.99, frequency: "monthly", status: "active" })]);
     });
   });
 
@@ -87,9 +116,12 @@ describe("API /api/subscriptions", () => {
     });
 
     it("auto-detects subscriptions from transactions", async () => {
-      mockDbChain.all!.mockReturnValueOnce([
-        { id: 1, date: "2024-01-01", payee: "Netflix", amount: -15.99, accountId: 1, categoryId: 2 },
-      ]);
+      // First .all() = cash accounts; second .all() = transactions (GH #307 scoping fix).
+      mockDbChain.all!
+        .mockReturnValueOnce([{ id: 1 }])
+        .mockReturnValueOnce([
+          { id: 1, date: "2024-01-01", payee: "Netflix", amount: -15.99, accountId: 1, categoryId: 2 },
+        ]);
       const req = createMockRequest("http://localhost:3000/api/subscriptions", {
         method: "POST",
         body: { action: "detect" },

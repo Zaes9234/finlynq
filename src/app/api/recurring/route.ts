@@ -1,11 +1,12 @@
 ﻿import { NextRequest, NextResponse } from "next/server";
 import { db, schema } from "@/db";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, inArray } from "drizzle-orm";
 import { detectRecurringTransactions, forecastCashFlow } from "@/lib/recurring-detector";
 import { requireAuth } from "@/lib/auth/require-auth";
 import { getDEK } from "@/lib/crypto/dek-cache";
 import { tryDecryptField } from "@/lib/crypto/envelope";
 import { requireDevMode } from "@/lib/require-dev-mode";
+import { CASH_GROUP_NAMES } from "@/lib/accounts/groups";
 
 export async function GET(request: NextRequest) {
   const auth = await requireAuth(request);
@@ -19,6 +20,23 @@ export async function GET(request: NextRequest) {
   cutoff.setFullYear(cutoff.getFullYear() - 1);
   const cutoffStr = cutoff.toISOString().split("T")[0];
 
+  // GH #307 — scope recurring detection to cash-group accounts only, mirroring
+  // the fix applied to /api/forecast and the MCP tool. Without this, an excluded
+  // account's recurring item (loan payment, investment auto-buy, etc.) projects
+  // against the in-scope balance and double-counts in the dashboard Recurring widget.
+  const cashAccounts = await db
+    .select({ id: schema.accounts.id })
+    .from(schema.accounts)
+    .where(and(
+      eq(schema.accounts.userId, userId),
+      inArray(schema.accounts.group, [...CASH_GROUP_NAMES])
+    ))
+    .all();
+  const accountIds = cashAccounts.map((a) => a.id);
+  if (accountIds.length === 0) {
+    return NextResponse.json({ recurring: [], monthlyRecurringTotal: 0, count: 0 });
+  }
+
   const txns = await db
     .select({
       id: schema.transactions.id,
@@ -31,6 +49,7 @@ export async function GET(request: NextRequest) {
     .from(schema.transactions)
     .where(and(
       eq(schema.transactions.userId, userId),
+      inArray(schema.transactions.accountId, accountIds),
       sql`${schema.transactions.date} >= ${cutoffStr} AND ${schema.transactions.payee} != ''`
     ))
     .all();

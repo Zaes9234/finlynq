@@ -60,8 +60,13 @@ export async function GET(request: NextRequest) {
 
   // Decrypt payee in memory so merchant grouping works (ciphertext has a
   // random IV per row, so SQL-side grouping on ciphertext would be wrong).
+  // Filter to expense transactions only (categoryType "E") so that transfer-type
+  // rows (e.g. "Opening Balance", type "R") and income rows don't pollute the
+  // Top Merchants list ranked by absolute dollar value.
   const merchants = analyzeMerchants(
-    recentTxns.map((t) => ({ payee: (dek ? tryDecryptField(dek, t.payee, "transactions.payee") : t.payee) ?? "", amount: t.amount }))
+    recentTxns
+      .filter((t) => t.categoryType === "E")
+      .map((t) => ({ payee: (dek ? tryDecryptField(dek, t.payee, "transactions.payee") : t.payee) ?? "", amount: t.amount }))
   );
 
   const dayOfWeek = spendingByDayOfWeek(
