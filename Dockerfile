@@ -56,6 +56,11 @@ COPY --from=builder /app/public ./public
 # Copy PostgreSQL migration files
 COPY --from=builder /app/drizzle-pg ./drizzle-pg
 
+# Copy production node_modules for the entrypoint migration script.
+# drizzle-orm/node-postgres and pg are webpack-bundled in the standalone output
+# and not available as bare CJS require()s — NODE_PATH in entrypoint.sh points here.
+COPY --from=deps /app/node_modules /migrate/node_modules
+
 # Copy and prepare the entrypoint script
 COPY scripts/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
