@@ -13,8 +13,8 @@ echo "[entrypoint] DATABASE_URL detected — PostgreSQL mode"
 
 # Extract host and port from connection string for health check
 # Expected format: postgres://user:pass@host:port/db
-DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|postgres://[^@]+@([^:/]+).*|\1|')
-DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|postgres://[^@]+@[^:]+:([0-9]+).*|\1|')
+DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|postgresql?://[^@]+@([^:/]+).*|\1|')
+DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|postgresql?://[^@]+@[^:]+:([0-9]+).*|\1|')
 DB_PORT="${DB_PORT:-5432}"
 
 echo "[entrypoint] Waiting for PostgreSQL at $DB_HOST:$DB_PORT..."
@@ -33,7 +33,7 @@ echo "[entrypoint] PostgreSQL is ready."
 
 # Run database migrations via Node.js (uses the PostgresAdapter)
 echo "[entrypoint] Running database migrations..."
-node -e "
+NODE_PATH=/migrate/node_modules node -e "
   const { drizzle } = require('drizzle-orm/node-postgres');
   const { migrate } = require('drizzle-orm/node-postgres/migrator');
   const { Pool } = require('pg');
