@@ -10,7 +10,7 @@ import {
 import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "What is Finlynq? Open-source personal finance app with first-party MCP",
+  title: "What is Finlynq? Open-source personal finance app with MCP",
   description:
     "Finlynq is an open-source (AGPL v3) personal finance app with a first-party MCP server. Query your money from Claude, Cursor, or any MCP AI assistant.",
   alternates: {

@@ -41,6 +41,7 @@ import { sql } from "drizzle-orm";
 import { calculateAgeOfMoney } from "./age-of-money";
 import { getRate } from "./fx-service";
 import { tagAmount, type TaggedAmount } from "../../mcp-server/currency-tagging";
+import { isCashGroup } from "./accounts/groups";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type DbLike = { execute: (q: ReturnType<typeof sql>) => Promise<any> };
@@ -55,18 +56,10 @@ function asRows(result: unknown): Array<Record<string, unknown>> {
   return [];
 }
 
-// Cash-group whitelist for the liquid-assets filter (issue #235). Not an
-// exhaustive list of "user-defined cash groups" — a starting point mirroring
-// the load-bearing branching shape used by /api/goals currentAmount and the
-// account-balance rule. Extend rather than reverting to substring matching.
-const CASH_GROUPS = new Set([
-  "Banks",
-  "Cash Accounts",
-  "Cash",
-  "Savings",
-  "Chequing",
-  "Checking",
-]);
+// Cash-group whitelist for the liquid-assets filter — now the shared canonical
+// set (GH #307). `isCashGroup` (from accounts/groups) is the single source of
+// truth, reused by the cash-flow forecast + chat balance summary. Extend the
+// list THERE rather than reverting to a local copy or substring matching.
 
 // Canonical weights (must sum to 1.0).
 export const HEALTH_WEIGHTS = {
@@ -121,6 +114,20 @@ export type HealthPayload = {
   excludedComponents: HealthExclusion[];
   reportingCurrency: string;
   totals: HealthTotals;
+  /**
+   * FINLYNQ-291 — the real headline percentages surfaced as first-class figures
+   * on the dashboard. The composite score only ever exposes these as normalized
+   * 0-100 sub-scores; here we carry the actual ratios.
+   *   - `savingsRatePct`: 3-month (income − expenses) / income, `null` when there
+   *     is no income to divide by.
+   *   - `dti.pct`: trailing-12-month debt-service / income, `null` with no income.
+   *   - `dti.reliable`: mirrors the anomaly backstop that drops DTI from the score
+   *     (payments > 1.2× outstanding liabilities). When `false` the raw ratio is
+   *     likely inflated by mis-linked transfer legs, so the UI must caveat it
+   *     rather than present it as authoritative.
+   */
+  savingsRatePct: number | null;
+  dti: { pct: number | null; reliable: boolean };
 };
 
 export type CalculateFinancialHealthArgs = {
@@ -272,8 +279,7 @@ export async function calculateFinancialHealth(
     const converted = Number(b.balance) * fx;
     if (b.type === "L") totalLiabilities += Math.abs(converted);
     if (b.type === "A") {
-      const groupTrim = (b.group ?? "").trim();
-      if (b.is_investment !== true && CASH_GROUPS.has(groupTrim)) {
+      if (b.is_investment !== true && isCashGroup(b.group)) {
         liquidAssets += converted;
       }
     }
@@ -487,12 +493,25 @@ export async function calculateFinancialHealth(
 
   const components: HealthComponent[] = kept.map(({ weightedRaw: _wr, ...rest }) => rest);
 
+  // FINLYNQ-291 — standalone headline percentages for the dashboard metrics strip.
+  // Savings rate reuses the 3-month income/expense window (same basis as the
+  // Savings Rate component); DTI reuses the trailing-12m ratio. `dti.reliable`
+  // is the negation of the anomaly backstop so the UI can present a caveated
+  // figure instead of a suspect number when payments exceed outstanding debt.
+  const savingsRatePct =
+    totalIncome > 0
+      ? Math.round(((totalIncome - totalExpenses) / totalIncome) * 100)
+      : null;
+  const dtiPct = dtiRatio !== null ? Math.round(dtiRatio * 100) : null;
+
   return {
     score: totalScore,
     grade: gradeFor(totalScore),
     components,
     excludedComponents,
     reportingCurrency: reporting,
+    savingsRatePct,
+    dti: { pct: dtiPct, reliable: !dtiAnomaly },
     totals: {
       totalIncome3m: tagAmount(totalIncome, reporting, "reporting"),
       totalExpenses3m: tagAmount(totalExpenses, reporting, "reporting"),

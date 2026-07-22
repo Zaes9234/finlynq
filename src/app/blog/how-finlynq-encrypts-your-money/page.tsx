@@ -13,7 +13,7 @@ const PUBLISHED = "2026-05-13";
 
 export const metadata: Metadata = {
   title:
-    "How Finlynq encrypts your money: envelope encryption, in plain English",
+    "How Finlynq encrypts your money, in plain English",
   description:
     "A walkthrough of Finlynq's encryption: AES-256-GCM at rest, a per-user key wrapped by a scrypt key from your password, and the tradeoffs I won't hide.",
   alternates: { canonical: `/blog/${SLUG}` },

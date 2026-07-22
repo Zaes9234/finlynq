@@ -3,7 +3,7 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 import { MCP_TOOL_COUNTS } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs Maybe (and the Sure fork): actively-built open-source PFM",
+  title: "Finlynq vs Maybe (Sure fork): actively-built open-source PFM",
   description:
     "Finlynq vs Maybe Finance and its Sure fork: a modern open-source PFM with envelope encryption and a first-party MCP server neither ships.",
   alternates: { canonical: "/vs/maybe" },

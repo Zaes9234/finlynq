@@ -4,7 +4,7 @@ import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
   title:
-    "Finlynq vs Firefly III: open-source personal finance with first-party MCP",
+    "Finlynq vs Firefly III: open-source PFM with first-party MCP",
   description: `Finlynq vs Firefly III: two AGPL v3 PFMs. Firefly is double-entry accounting; Finlynq adds a first-party MCP server (${MCP_TOOL_COUNTS.http} tools) and envelope encryption.`,
   alternates: {
     canonical: "/vs/firefly-iii",

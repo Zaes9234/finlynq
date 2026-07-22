@@ -3,13 +3,14 @@ import { VsPage, type VsPageContent } from "../_components/VsPage";
 import { MCP_TOOL_COUNTS, MCP_SERVER_VERSION } from "@/lib/mcp/tool-counts";
 
 export const metadata: Metadata = {
-  title: "Finlynq vs Mint: an open-source Mint alternative after the shutdown",
-  description: `Mint shut down in 2024. Finlynq is an open-source (AGPL v3), self-hostable Mint alternative with no ads, per-user encryption, and a first-party MCP server (${MCP_TOOL_COUNTS.http} tools).`,
+  title: "Finlynq vs Mint: the open-source Mint alternative",
+  description:
+    "Mint shut down in 2024. Finlynq is the open-source (AGPL v3), self-hostable Mint alternative: no ads, per-user encryption, and a first-party MCP server.",
   alternates: {
     canonical: "/vs/mint",
   },
   openGraph: {
-    title: "Finlynq vs Mint: an open-source Mint alternative after the shutdown",
+    title: "Finlynq vs Mint: the open-source Mint alternative",
     description: `Intuit shut Mint down in March 2024 and moved users to Credit Karma, which isn't a budgeting tool. Finlynq is the open-source, self-hostable, ad-free alternative: AGPL v3, per-user envelope encryption, ${MCP_TOOL_COUNTS.http} MCP tools, and a real import pipeline for your old Mint CSV.`,
     url: "/vs/mint",
     siteName: "Finlynq",
