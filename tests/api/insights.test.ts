@@ -41,6 +41,11 @@ vi.mock("@/lib/crypto/encrypted-columns", () => ({
   decryptName: vi.fn((_ct: string | null, _dek: Buffer | null) => "Food"),
 }));
 
+// Pass payee through unchanged so tests can assert on readable payee names.
+vi.mock("@/lib/crypto/envelope", () => ({
+  tryDecryptField: vi.fn((_dek: unknown, value: string) => value),
+}));
+
 vi.mock("@/lib/currency", () => ({
   getCurrentMonth: vi.fn(() => "2024-01"),
 }));
@@ -114,5 +119,25 @@ describe("API /api/insights", () => {
     expect(passed).toHaveLength(1);
     expect(passed[0].month).toBe("2024-01");
     expect(passed[0].total).toBeCloseTo(1417.5, 2);
+  });
+
+  // Top Merchants must exclude transfer-type (R) rows so that payees like
+  // "Opening Balance" — which use type R and can dwarf real merchants in
+  // absolute-value ranking — never surface in the widget.
+  it("excludes transfer-type transactions from merchant analysis", async () => {
+    const { analyzeMerchants } = await import("@/lib/spending-insights");
+    mockGetTransactions.mockReturnValue([
+      { payee: "Starbucks", amount: -5, categoryType: "E", date: "2024-01-15" },
+      { payee: "Opening Balance", amount: -305000, categoryType: "R", date: "2024-01-01" },
+      { payee: "Employer", amount: 5000, categoryType: "I", date: "2024-01-15" },
+    ]);
+    const req = createMockRequest("http://localhost:3000/api/insights");
+    await GET(req);
+    const passedTxns = vi.mocked(analyzeMerchants).mock.calls[0]?.[0] as { payee: string }[];
+    const passedPayees = passedTxns?.map((t) => t.payee) ?? [];
+    // Only the expense transaction should reach analyzeMerchants
+    expect(passedPayees).toContain("Starbucks");
+    expect(passedPayees).not.toContain("Opening Balance");
+    expect(passedPayees).not.toContain("Employer");
   });
 });
